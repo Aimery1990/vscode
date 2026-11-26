@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { clearNode, Dimension, h, isHTMLElement } from '../../../../base/browser/dom.js';
+import { $, clearNode, Dimension, h, isHTMLElement, reset } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { Mutable } from '../../../../base/common/types.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
@@ -47,7 +47,7 @@ import { IMainProcessService } from '../../../../platform/ipc/common/mainProcess
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { ITicketWorkflowRuntimeService, IPrimitiveExecutionStepResult } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { highlightPythonToHTML, renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
+import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
@@ -65,6 +65,11 @@ function templatePart<E extends Element = Element>(root: ParentNode | null | und
 function templatePart(root: ParentNode | null | undefined, selector: string): Element | null | undefined {
 	// eslint-disable-next-line no-restricted-syntax -- template-rendered DOM, see above
 	return root?.querySelector(selector);
+}
+
+/** Text for a DOM text node / attribute value: `undefined` / `null` become an empty string. */
+function textOf(value: unknown): string {
+	return value === undefined || value === null ? '' : String(value);
 }
 
 /** Persisted value of a primitive card (a JSON object in ticket.md / the entity snapshot); every key is optional. */
@@ -107,7 +112,10 @@ interface ICardRuntimeState {
 	externalScripts?: string[];
 	loadTtsBytes?: (buffer: Uint8Array, mimeType: string, autoPlay: boolean) => Promise<void>;
 	resetTtsPlayer?: () => void;
+	/** Creates fresh nodes for the "Insert Output" chips row of a new User Prompt Input box. */
+	promptChips?: () => Node[];
 }
+
 
 const cardRuntimeStates = new WeakMap<HTMLElement, ICardRuntimeState>();
 
@@ -638,29 +646,6 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
-	private _setElementHTML(element: HTMLElement, html: string): void {
-		try {
-			if (ttPolicy) {
-				element.innerHTML = ttPolicy.createHTML(html) as unknown as string;
-			} else {
-				element.innerHTML = html;
-			}
-		} catch {
-			try {
-				element.innerHTML = html;
-			} catch {
-				while (element.firstChild) {
-					element.removeChild(element.firstChild);
-				}
-				const parser = new DOMParser();
-				const doc = parser.parseFromString(html, 'text/html');
-				while (doc.body.firstChild) {
-					element.appendChild(doc.body.firstChild);
-				}
-			}
-		}
-	}
-
 	override setEditorVisible(visible: boolean): void {
 		if (!visible) {
 			this._saveCurrentScrollPosition();
@@ -1018,9 +1003,9 @@ export class EntityDetailEditor extends EditorPane {
 		this._userHasScrolledSinceRender = false;
 		this._isRestoringScroll = true;
 
-		const html = this._generateHtml(this._lastParsedData, workLogContent, [], mod, agents, allTickets);
+		const content = this._buildContent(this._lastParsedData, workLogContent, [], mod, agents, allTickets);
 		this._disposeMediaCleanupFns();
-		this._setElementHTML(this._container, html);
+		reset(this._container, ...content);
 		this._applySavedScrollPosition(scrollKey);
 		this._hydratePythonPrimitiveCards();
 		await this._hydratePromptPrimitiveCards();
@@ -1240,9 +1225,9 @@ export class EntityDetailEditor extends EditorPane {
 			this._userHasScrolledSinceRender = false;
 			this._isRestoringScroll = true;
 
-			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
+			const content = this._buildContent(parsed, workLogContent, attachments, customModule, agents, allTickets);
 			this._disposeMediaCleanupFns();
-			this._setElementHTML(this._container, html);
+			reset(this._container, ...content);
 			this._applySavedScrollPosition(scrollKey);
 			this._hydratePythonPrimitiveCards();
 			await this._hydratePromptPrimitiveCards();
@@ -1278,21 +1263,22 @@ export class EntityDetailEditor extends EditorPane {
 				const errObj = err as { message?: unknown; stack?: unknown } | undefined;
 				const errMsg = err && errObj?.message ? errObj.message : String(err);
 				const errStack = errObj?.stack ? String(errObj.stack) : '';
-				this._setElementHTML(this._container, `
-					<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 40px; color: var(--vscode-editor-foreground); text-align: center;">
-						<div style="font-size: 20px; font-weight: 600; margin-bottom: 12px; color: #ef4444;">Error Loading Ticket Detail</div>
-						<div style="font-size: 13px; opacity: 0.8; max-width: 600px; margin-bottom: 16px;">
-							${this._escapeHtml(errMsg)}
-						</div>
-						${errStack ? `
-						<div style="font-size: 11px; opacity: 0.6; font-family: monospace; max-width: 700px; white-space: pre-wrap; margin-bottom: 20px; text-align: left; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; overflow-x: auto;">
-							${this._escapeHtml(errStack)}
-						</div>` : ''}
-						<button id="entity-detail-error-retry-btn" style="padding: 6px 18px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;">
-							Retry
-						</button>
-					</div>
-				`);
+				reset(this._container,
+					$('div', { style: 'display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 40px; color: var(--vscode-editor-foreground); text-align: center;' },
+						$('div', { style: 'font-size: 20px; font-weight: 600; margin-bottom: 12px; color: #ef4444;' }, 'Error Loading Ticket Detail'),
+						$('div', { style: 'font-size: 13px; opacity: 0.8; max-width: 600px; margin-bottom: 16px;' }, textOf(errMsg)),
+						...(errStack ? [
+							$('div', { style: 'font-size: 11px; opacity: 0.6; font-family: monospace; max-width: 700px; white-space: pre-wrap; margin-bottom: 20px; text-align: left; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; overflow-x: auto;' },
+								'\n\t\t\t\t\t\t\t',
+								textOf(errStack),
+								'\n\t\t\t\t\t\t'
+							)
+						] : []),
+						$<HTMLButtonElement>('button#entity-detail-error-retry-btn', { style: 'padding: 6px 18px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;' },
+							'Retry'
+						)
+					)
+				);
 				const retryBtn = templatePart(this._container, '#entity-detail-error-retry-btn') as HTMLElement | null;
 				if (retryBtn) {
 					retryBtn.onclick = () => this._resolvePathsAndLoadData();
@@ -1691,7 +1677,11 @@ export class EntityDetailEditor extends EditorPane {
 				if (card) {
 					const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
 					if (contentEl) {
-						this._setElementHTML(contentEl, '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>');
+						reset(contentEl,
+							$('span', { style: 'opacity: 0.4; font-style: italic;' },
+								'No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.'
+							)
+						);
 					}
 					const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
 					if (statusEl) {
@@ -1947,7 +1937,13 @@ export class EntityDetailEditor extends EditorPane {
 					const rawTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
 					if (rawTa) { rawTa.value = ''; }
 					const display = templatePart(card, '.prompt-output-display') as HTMLElement | null;
-					if (display) { this._setElementHTML(display, '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'); }
+					if (display) {
+						reset(display,
+							$('span', { style: 'opacity: 0.4; font-style: italic;' },
+								'No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.'
+							)
+						);
+					}
 					const statusText = templatePart(card, '.prompt-status-text') as HTMLElement | null;
 					if (statusText) { statusText.textContent = 'Ready'; }
 					await this._savePromptDataFromCard(card, fieldKey, '');
@@ -2024,24 +2020,22 @@ export class EntityDetailEditor extends EditorPane {
 					if (listEl) {
 						const existingItems = templateParts(listEl, '.prompt-user-input-item');
 						const nextIdx = existingItems.length;
-						const firstItemChips = templatePart(listEl, '.prompt-user-input-chips')?.innerHTML || card.getAttribute('data-prompt-chips-html') || '';
-						const newItemHtml = this._buildPromptUserInputItemHtml(fieldKey, nextIdx, nextIdx + 1, '', firstItemChips, false);
-						const tempDiv = document.createElement('div');
-						tempDiv.innerHTML = ttPolicy ? (ttPolicy.createHTML(newItemHtml) as unknown as string) : newItemHtml;
-						const newItemEl = tempDiv.firstElementChild as HTMLElement | null;
-						if (newItemEl) {
-							listEl.appendChild(newItemEl);
-							this._refreshPromptUserInputItemsUi(card);
-							const newDisplay = templatePart(newItemEl, '.prompt-tokenized-display') as HTMLElement | null;
-							if (newDisplay) {
-								this._switchPromptDisplayToEdit(newDisplay, undefined, 0);
-							} else {
-								const newTa = templatePart(newItemEl, '.prompt-user-textarea') as HTMLTextAreaElement | null;
-								newTa?.focus();
-							}
-							if (fieldKey) {
-								await this._savePromptDataFromCard(card, fieldKey);
-							}
+						const firstItemChipsEl = templatePart(listEl, '.prompt-user-input-chips');
+						const firstItemChips = firstItemChipsEl && firstItemChipsEl.childNodes.length > 0
+							? Array.from(firstItemChipsEl.childNodes, node => node.cloneNode(true))
+							: cardRuntimeState(card).promptChips?.() ?? [];
+						const newItemEl = this._buildPromptUserInputItem(fieldKey, nextIdx, nextIdx + 1, '', firstItemChips, false);
+						listEl.appendChild(newItemEl);
+						this._refreshPromptUserInputItemsUi(card);
+						const newDisplay = templatePart(newItemEl, '.prompt-tokenized-display') as HTMLElement | null;
+						if (newDisplay) {
+							this._switchPromptDisplayToEdit(newDisplay, undefined, 0);
+						} else {
+							const newTa = templatePart(newItemEl, '.prompt-user-textarea') as HTMLTextAreaElement | null;
+							newTa?.focus();
+						}
+						if (fieldKey) {
+							await this._savePromptDataFromCard(card, fieldKey);
 						}
 					}
 				}
@@ -2080,9 +2074,11 @@ export class EntityDetailEditor extends EditorPane {
 						return;
 					}
 
-					const existingChips = templatePart(itemEl, '.prompt-user-input-chips')?.innerHTML || '';
-					if (existingChips && !card.getAttribute('data-prompt-chips-html')) {
-						card.setAttribute('data-prompt-chips-html', existingChips);
+					const existingChipsEl = templatePart(itemEl, '.prompt-user-input-chips');
+					const runtimeState = cardRuntimeState(card);
+					if (existingChipsEl && existingChipsEl.childNodes.length > 0 && !runtimeState.promptChips) {
+						const existingChips = Array.from(existingChipsEl.childNodes, node => node.cloneNode(true));
+						runtimeState.promptChips = () => existingChips.map(node => node.cloneNode(true));
 					}
 					itemEl.remove();
 					this._refreshPromptUserInputItemsUi(card);
@@ -2458,9 +2454,12 @@ export class EntityDetailEditor extends EditorPane {
 					: (resDisplay?.textContent || '');
 				if (text) {
 					await this._clipboardService.writeText(text);
-					const prevHtml = copyPyResBtn.innerHTML;
-					this._setElementHTML(copyPyResBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
-					setTimeout(() => { if (copyPyResBtn.isConnected) { this._setElementHTML(copyPyResBtn, prevHtml); } }, 1500);
+					const prevContent = Array.from(copyPyResBtn.childNodes);
+					reset(copyPyResBtn,
+						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						$('span', { style: 'color: #4ade80;' }, 'Copied!')
+					);
+					setTimeout(() => { if (copyPyResBtn.isConnected) { reset(copyPyResBtn, ...prevContent); } }, 1500);
 					this._notificationService.info('Complete Python Return Value (Output) copied to clipboard.');
 				} else {
 					this._notificationService.warn('No return value to copy.');
@@ -2478,9 +2477,12 @@ export class EntityDetailEditor extends EditorPane {
 				const text = outputDisplay?.textContent || '';
 				if (text && !text.startsWith('No execution')) {
 					await this._clipboardService.writeText(text);
-					const prevHtml = copyPyOutBtn.innerHTML;
-					this._setElementHTML(copyPyOutBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
-					setTimeout(() => { if (copyPyOutBtn.isConnected) { this._setElementHTML(copyPyOutBtn, prevHtml); } }, 1500);
+					const prevContent = Array.from(copyPyOutBtn.childNodes);
+					reset(copyPyOutBtn,
+						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						$('span', { style: 'color: #4ade80;' }, 'Copied!')
+					);
+					setTimeout(() => { if (copyPyOutBtn.isConnected) { reset(copyPyOutBtn, ...prevContent); } }, 1500);
 					this._notificationService.info('Complete Python console logs copied to clipboard.');
 				} else {
 					this._notificationService.warn('No console logs to copy.');
@@ -2501,7 +2503,11 @@ export class EntityDetailEditor extends EditorPane {
 					if (resultBlock) { resultBlock.remove(); }
 					const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
 					if (outputDisplay) {
-						this._setElementHTML(outputDisplay, '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>');
+						reset(outputDisplay,
+							$('span', { style: 'opacity: 0.4; font-style: italic;' },
+								'No execution logs yet. Click "Run Script" above to execute the automation code.'
+							)
+						);
 					}
 					const statusText = templatePart(card, '.python-status-text') as HTMLElement | null;
 					if (statusText) {
@@ -2525,9 +2531,13 @@ export class EntityDetailEditor extends EditorPane {
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
-					const prevHtml = copyOutputItemBtn.innerHTML;
-					this._setElementHTML(copyOutputItemBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span> <span style="color: #4ade80;">Copied!</span>`);
-					setTimeout(() => { if (copyOutputItemBtn.isConnected) { this._setElementHTML(copyOutputItemBtn, prevHtml); } }, 1500);
+					const prevContent = Array.from(copyOutputItemBtn.childNodes);
+					reset(copyOutputItemBtn,
+						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						' ',
+						$('span', { style: 'color: #4ade80;' }, 'Copied!')
+					);
+					setTimeout(() => { if (copyOutputItemBtn.isConnected) { reset(copyOutputItemBtn, ...prevContent); } }, 1500);
 					this._notificationService.info(`Output '${specKey}' copied to clipboard.`);
 				} else {
 					this._notificationService.warn('No content to copy.');
@@ -2596,9 +2606,13 @@ export class EntityDetailEditor extends EditorPane {
 					});
 					const jsonStr = JSON.stringify(allOutputs, null, 2);
 					await this._clipboardService.writeText(jsonStr);
-					const prevHtml = copyAllOutputBtn.innerHTML;
-					this._setElementHTML(copyAllOutputBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span> <span style="color: #4ade80;">Copied!</span>`);
-					setTimeout(() => { if (copyAllOutputBtn.isConnected) { this._setElementHTML(copyAllOutputBtn, prevHtml); } }, 1500);
+					const prevContent = Array.from(copyAllOutputBtn.childNodes);
+					reset(copyAllOutputBtn,
+						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						' ',
+						$('span', { style: 'color: #4ade80;' }, 'Copied!')
+					);
+					setTimeout(() => { if (copyAllOutputBtn.isConnected) { reset(copyAllOutputBtn, ...prevContent); } }, 1500);
 					this._notificationService.info('All output items copied as JSON.');
 				}
 				return;
@@ -2627,11 +2641,14 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				if (textToCopy) {
 					await this._clipboardService.writeText(textToCopy);
-					const originalHtml = copyCustomFieldBtn.innerHTML;
-					this._setElementHTML(copyCustomFieldBtn, `<span class="codicon codicon-check" style="font-size: 11px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
+					const originalContent = Array.from(copyCustomFieldBtn.childNodes);
+					reset(copyCustomFieldBtn,
+						$('span.codicon.codicon-check', { style: 'font-size: 11px; color: #4ade80;' }),
+						$('span', { style: 'color: #4ade80;' }, 'Copied!')
+					);
 					setTimeout(() => {
 						if (copyCustomFieldBtn.isConnected) {
-							this._setElementHTML(copyCustomFieldBtn, originalHtml);
+							reset(copyCustomFieldBtn, ...originalContent);
 						}
 					}, 1500);
 					this._notificationService.info(`Copied full content of "${fieldKey}" to clipboard.`);
@@ -2651,9 +2668,13 @@ export class EntityDetailEditor extends EditorPane {
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
-					const prevHtml = copyResultBtn.innerHTML;
-					this._setElementHTML(copyResultBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span> <span style="color: #4ade80;">Copied!</span>`);
-					setTimeout(() => { if (copyResultBtn.isConnected) { this._setElementHTML(copyResultBtn, prevHtml); } }, 1500);
+					const prevContent = Array.from(copyResultBtn.childNodes);
+					reset(copyResultBtn,
+						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						' ',
+						$('span', { style: 'color: #4ade80;' }, 'Copied!')
+					);
+					setTimeout(() => { if (copyResultBtn.isConnected) { reset(copyResultBtn, ...prevContent); } }, 1500);
 					this._notificationService.info('Result content copied to clipboard.');
 				} else {
 					this._notificationService.warn('No content to copy.');
@@ -3712,15 +3733,6 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
-	private _escapeHtmlAttr(str: unknown): string {
-		if (str === undefined || str === null) { return ''; }
-		return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-	}
-
-	private _escapeHtml(str: unknown): string {
-		return this._escapeHtmlAttr(str);
-	}
-
 	private _updateReadmeContent(content: string, newTitle?: string, newDesc?: string): string {
 		const lines = content.split(/\r?\n/);
 		const newLines: string[] = [];
@@ -4077,21 +4089,22 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		}
 
-		let iconHtml = '';
+		let icon: HTMLElement;
 		if (status === 'running') {
-			iconHtml = `<span class="${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin" style="font-size: 11px;"></span>`;
+			icon = $('span', { class: `${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin`, style: 'font-size: 11px;' });
 		} else if (status === 'success') {
-			iconHtml = `<span class="${ThemeIcon.asClassName(Codicon.check)}" style="font-size: 11px;"></span>`;
+			icon = $('span', { class: ThemeIcon.asClassName(Codicon.check), style: 'font-size: 11px;' });
 		} else {
-			iconHtml = `<span class="${ThemeIcon.asClassName(Codicon.error)}" style="font-size: 11px;"></span>`;
+			icon = $('span', { class: ThemeIcon.asClassName(Codicon.error), style: 'font-size: 11px;' });
 		}
 
-		badgeContainer.innerHTML = `
-			<span class="ticket-step-badge ${status}" ${tooltip ? `title="${this._escapeHtmlAttr(tooltip)}"` : ''}>
-				${iconHtml}
-				<span>${this._escapeHtml(text)}</span>
-			</span>
-		`;
+		reset(badgeContainer, $('span', { class: `ticket-step-badge ${status}`, title: tooltip ? textOf(tooltip) : undefined },
+			' ',
+			icon,
+			' ',
+			$('span', undefined, textOf(text)),
+			' '
+		));
 	}
 
 	private _updateCardExecutionFeedback(cardEl: HTMLElement, stepRes: IPrimitiveExecutionStepResult): void {
@@ -4130,19 +4143,23 @@ export class EntityDetailEditor extends EditorPane {
 						resultBlock.style.flexDirection = 'column';
 						resultBlock.style.gap = '4px';
 						resultBlock.style.marginBottom = '6px';
-						this._setElementHTML(resultBlock, `
-							<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
-								<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-									<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
-									<button type="button" class="python-copy-result-btn" title="Copy complete Return Value (Output)" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;">
-										<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
-										<span>Copy</span>
-									</button>
-								</div>
-							</div>
-							<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;">${this._escapeHtml(typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal))}</pre>
-						`);
+						reset(resultBlock,
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', { style: 'font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;' },
+									'Return Value (Output):'
+								),
+								$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
+									$('span', { style: 'font-size: 9.5px; opacity: 0.65; color: #38bdf8;' }, 'Consumed by Output Manifest & Downstream Primitives'),
+									$<HTMLButtonElement>('button.python-copy-result-btn', { type: 'button', title: 'Copy complete Return Value (Output)', style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;' },
+										$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+										$('span', undefined, 'Copy')
+									)
+								)
+							),
+							$('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' },
+								textOf(typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal))
+							)
+						);
 						outputSection.insertBefore(resultBlock, outputSection.firstChild);
 					}
 				}
@@ -4164,7 +4181,9 @@ export class EntityDetailEditor extends EditorPane {
 					const outRec = (out && typeof out === 'object') ? out as { data?: unknown } : undefined;
 					const displayData = outRec?.data !== undefined ? outRec.data : out;
 					const formatted = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
-					contentBox.innerHTML = `<pre style="margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;">${this._escapeHtml(formatted)}</pre>`;
+					reset(contentBox, $('pre', { style: 'margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;' },
+						textOf(formatted)
+					));
 				}
 			}
 		}
@@ -4225,15 +4244,16 @@ export class EntityDetailEditor extends EditorPane {
 			});
 		}
 
-		const originalHtml = btnEl ? btnEl.innerHTML : '';
+		const originalContent = btnEl ? Array.from(btnEl.childNodes) : [];
 		if (btnEl) {
 			btnEl.setAttribute('disabled', 'true');
 			btnEl.style.opacity = '0.9';
 			btnEl.style.pointerEvents = 'none';
-			btnEl.innerHTML = `
-				<span class="${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin" style="font-size: 12px;"></span>
-				<span class="run-ticket-btn-label">Running...</span>
-			`;
+			reset(btnEl, ...[
+				$('span', { class: `${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin`, style: 'font-size: 12px;' }),
+				' ',
+				$('span.run-ticket-btn-label', undefined, 'Running...')
+			]);
 		}
 
 		let completedStepsCount = 0;
@@ -4293,18 +4313,20 @@ export class EntityDetailEditor extends EditorPane {
 			if (result.success && failedStepsCount === 0) {
 				this._notificationService.info(`Ticket '${ticketId}' executed successfully (${result.stepResults?.length || 0} step(s)).`);
 				if (liveBtn) {
-					liveBtn.innerHTML = `
-						<span class="${ThemeIcon.asClassName(Codicon.check)}" style="font-size: 12px; color: #4ade80;"></span>
-						<span class="run-ticket-btn-label">Done</span>
-					`;
+					reset(liveBtn, ...[
+						$('span', { class: ThemeIcon.asClassName(Codicon.check), style: 'font-size: 12px; color: #4ade80;' }),
+						' ',
+						$('span.run-ticket-btn-label', undefined, 'Done')
+					]);
 				}
 			} else {
 				this._notificationService.warn(`Ticket '${ticketId}' execution completed with ${failedStepsCount} issue(s). Check components for details.`);
 				if (liveBtn) {
-					liveBtn.innerHTML = `
-						<span class="${ThemeIcon.asClassName(Codicon.warning)}" style="font-size: 12px; color: #f87171;"></span>
-						<span class="run-ticket-btn-label">Finished with Warnings</span>
-					`;
+					reset(liveBtn, ...[
+						$('span', { class: ThemeIcon.asClassName(Codicon.warning), style: 'font-size: 12px; color: #f87171;' }),
+						' ',
+						$('span.run-ticket-btn-label', undefined, 'Finished with Warnings')
+					]);
 				}
 			}
 		} catch (err) {
@@ -4312,10 +4334,11 @@ export class EntityDetailEditor extends EditorPane {
 			this._notificationService.warn(`Ticket '${ticketId}' execution completed with errors: ${(err as Error | undefined)?.message || err}`);
 			const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
 			if (liveBtn) {
-				liveBtn.innerHTML = `
-					<span class="${ThemeIcon.asClassName(Codicon.error)}" style="font-size: 12px; color: #f87171;"></span>
-					<span class="run-ticket-btn-label">Failed</span>
-				`;
+				reset(liveBtn, ...[
+					$('span', { class: ThemeIcon.asClassName(Codicon.error), style: 'font-size: 12px; color: #f87171;' }),
+					' ',
+					$('span.run-ticket-btn-label', undefined, 'Failed')
+				]);
 			}
 		} finally {
 			this._isTicketRunning = false;
@@ -4325,7 +4348,8 @@ export class EntityDetailEditor extends EditorPane {
 					liveBtn.removeAttribute('disabled');
 					liveBtn.style.opacity = '1';
 					liveBtn.style.pointerEvents = '';
-					liveBtn.innerHTML = originalHtml;
+					reset(liveBtn, ...originalContent.map(node => node.cloneNode(true)));
+
 				}
 			}, 3500);
 		}
@@ -4863,7 +4887,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		viewEl.setAttribute('data-inline-editing', 'true');
 
-		const originalHtml = viewEl.innerHTML;
+		const originalContent = Array.from(viewEl.childNodes);
 		clearNode(viewEl);
 
 		if (isMultiline) {
@@ -4913,7 +4937,7 @@ export class EntityDetailEditor extends EditorPane {
 				const numCheck = this._checkNumberFieldValue(fieldKey, newVal);
 				if (numCheck && !numCheck.ok) {
 					this._notificationService.warn(numCheck.error!);
-					this._setElementHTML(viewEl, originalHtml);
+					reset(viewEl, ...originalContent);
 					return;
 				}
 				await this._saveCustomFieldDirectly(fieldKey, newVal);
@@ -4923,7 +4947,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (isCommitted) { return; }
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
-				this._setElementHTML(viewEl, originalHtml);
+				reset(viewEl, ...originalContent);
 			};
 
 			saveBtn.onclick = (e) => { e.stopPropagation(); commitSave(); };
@@ -4980,7 +5004,7 @@ export class EntityDetailEditor extends EditorPane {
 				const numCheck = this._checkNumberFieldValue(fieldKey, newVal);
 				if (numCheck && !numCheck.ok) {
 					this._notificationService.warn(numCheck.error!);
-					this._setElementHTML(viewEl, originalHtml);
+					reset(viewEl, ...originalContent);
 					return;
 				}
 				await this._saveCustomFieldDirectly(fieldKey, newVal);
@@ -4990,7 +5014,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (isCommitted) { return; }
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
-				this._setElementHTML(viewEl, originalHtml);
+				reset(viewEl, ...originalContent);
 			};
 
 			saveBtn.onclick = (e) => { e.stopPropagation(); commitSave(); };
@@ -5030,7 +5054,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		titleEl.setAttribute('data-inline-editing', 'true');
 
-		const originalHtml = titleEl.innerHTML;
+		const originalContent = Array.from(titleEl.childNodes);
 		const curTitle = this._lastParsedData?.title || titleEl.textContent?.trim() || '';
 		clearNode(titleEl);
 
@@ -5071,7 +5095,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (newVal && newVal !== curTitle) {
 				await this._saveTitleDirectly(newVal);
 			} else {
-				this._setElementHTML(titleEl, originalHtml);
+				reset(titleEl, ...originalContent);
 			}
 		};
 
@@ -5079,7 +5103,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (committed) { return; }
 			committed = true;
 			titleEl.removeAttribute('data-inline-editing');
-			this._setElementHTML(titleEl, originalHtml);
+			reset(titleEl, ...originalContent);
 		};
 
 		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
@@ -5118,7 +5142,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		descEl.setAttribute('data-inline-editing', 'true');
 
-		const originalHtml = descEl.innerHTML;
+		const originalContent = Array.from(descEl.childNodes);
 		const curDesc = this._lastParsedData?.description || '';
 		clearNode(descEl);
 
@@ -5172,7 +5196,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (committed) { return; }
 			committed = true;
 			descEl.removeAttribute('data-inline-editing');
-			this._setElementHTML(descEl, originalHtml);
+			reset(descEl, ...originalContent);
 		};
 
 		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
@@ -5200,7 +5224,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		promptEl.setAttribute('data-inline-editing', 'true');
 
-		const originalHtml = promptEl.innerHTML;
+		const originalContent = Array.from(promptEl.childNodes);
 		const curVal = promptKey === 'Ticket Prompt' ? (this._lastParsedData?.ticketPrompt || '') : (this._lastParsedData?.typePrompt || '');
 		clearNode(promptEl);
 
@@ -5254,7 +5278,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (committed) { return; }
 			committed = true;
 			promptEl.removeAttribute('data-inline-editing');
-			this._setElementHTML(promptEl, originalHtml);
+			reset(promptEl, ...originalContent);
 		};
 
 		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
@@ -5282,7 +5306,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		selectViewEl.setAttribute('data-inline-editing', 'true');
 
-		const originalHtml = selectViewEl.innerHTML;
+		const originalContent = Array.from(selectViewEl.childNodes);
 		const curVal = this._lastParsedData?.customMetadata?.[fieldKey] ?? '';
 		clearNode(selectViewEl);
 
@@ -5342,7 +5366,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (committed) { return; }
 			committed = true;
 			selectViewEl.removeAttribute('data-inline-editing');
-			this._setElementHTML(selectViewEl, originalHtml);
+			reset(selectViewEl, ...originalContent);
 		};
 
 		select.onchange = () => {
@@ -5369,7 +5393,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		subfieldValEl.setAttribute('data-inline-editing', 'true');
 
-		const originalHtml = subfieldValEl.innerHTML;
+		const originalContent = Array.from(subfieldValEl.childNodes);
 		let arr: IJsonObject[] = [];
 		const raw = this._lastParsedData?.customMetadata?.[fieldKey];
 		if (raw) {
@@ -5425,7 +5449,7 @@ export class EntityDetailEditor extends EditorPane {
 				item[subKey] = newVal;
 				await this._saveCustomFieldDirectly(fieldKey, JSON.stringify(arr));
 			} else {
-				this._setElementHTML(subfieldValEl, originalHtml);
+				reset(subfieldValEl, ...originalContent);
 			}
 		};
 
@@ -5433,7 +5457,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (committed) { return; }
 			committed = true;
 			subfieldValEl.removeAttribute('data-inline-editing');
-			this._setElementHTML(subfieldValEl, originalHtml);
+			reset(subfieldValEl, ...originalContent);
 		};
 
 		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
@@ -5973,28 +5997,28 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
-	private _renderTicketChipsHtml(raw: string | undefined, allTickets: ILinkableTicket[] = []): string {
+	private _renderTicketChips(raw: string | undefined, allTickets: ILinkableTicket[] = []): HTMLElement[] {
 		if (!raw || raw === 'None' || raw === 'Unassigned') {
-			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
+			return [$('span', { style: 'opacity:0.4; font-size: 0.88em;' }, 'None')];
 		}
 		const ids = raw.split(/[,;\n]+/).map(s => s.trim()).filter(s => s && s !== 'None' && s !== 'Unassigned');
 		if (ids.length === 0) {
-			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
+			return [$('span', { style: 'opacity:0.4; font-size: 0.88em;' }, 'None')];
 		}
 		return ids.map(id => {
 			const matched = allTickets.find(t => t.id === id || t.code === id);
 			const typeLower = (matched?.type || 'task').toLowerCase();
 			const colorInfo = this._getTypeColorInfo(typeLower);
-			const typeBadge = matched?.type ? `<span style="font-size: 8px; padding: 1px 4px; border-radius: 3px; background: ${colorInfo.bg}; color: ${colorInfo.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;">${this._escapeHtmlAttr(matched.type)}</span>` : '';
+			const typeBadge = matched?.type ? $('span', { style: `font-size: 8px; padding: 1px 4px; border-radius: 3px; background: ${colorInfo.bg}; color: ${colorInfo.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;` },
+				textOf(matched.type)
+			) : undefined;
 			const tooltip = matched ? `${matched.id} [${(matched.type || 'task').toUpperCase()}]: ${matched.title || ''}\n${matched.summary || ''}` : `Ticket ${id}`;
 
-			return `
-			<span class="ticket-link-chip" data-ticket-id="${this._escapeHtmlAttr(id)}" style="display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;" title="${this._escapeHtmlAttr(tooltip)}">
-				${typeBadge}
-				<span>${this._escapeHtmlAttr(id)}</span>
-			</span>
-		`;
-		}).join('');
+			return $('span.ticket-link-chip', { 'data-ticket-id': textOf(id), style: `display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;`, title: textOf(tooltip) },
+				...(typeBadge ? [typeBadge] : []),
+				$('span', undefined, textOf(id))
+			);
+		});
 	}
 
 	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: IAgentItem[], allTickets: ILinkableTicket[] = [], customModule?: ITicketTemplateModule | null): ITicketHierarchyNode[] {
@@ -7845,20 +7869,20 @@ ${rawErr}
 		}
 	}
 
-	private _renderPromptTokenizedHtml(rawText: string, placeholderText: string): string {
+	private _renderPromptTokenized(rawText: string, placeholderText: string): HTMLElement[] {
 		if (!rawText) {
-			return `<span style="color: rgba(255, 255, 255, 0.35); font-style: italic;">${this._escapeHtml(placeholderText)}</span>`;
+			return [$('span', { style: 'color: rgba(255, 255, 255, 0.35); font-style: italic;' }, textOf(placeholderText))];
 		}
 		const regex = /\{\{([^{}\n]+)\}\}|\{([^{}\n]+)\}/g;
 		let lastIndex = 0;
 		let match: RegExpExecArray | null;
-		let outHtml = '';
+		const out: HTMLElement[] = [];
 
 		const appendRawText = (startIdx: number, endIdx: number) => {
 			if (endIdx <= startIdx) {
 				return;
 			}
-			outHtml += `<span class="prompt-raw-segment" data-raw-start="${startIdx}" data-raw-end="${endIdx}">${this._escapeHtml(rawText.substring(startIdx, endIdx))}</span>`;
+			out.push($('span.prompt-raw-segment', { 'data-raw-start': `${startIdx}`, 'data-raw-end': `${endIdx}` }, textOf(rawText.substring(startIdx, endIdx))));
 		};
 
 		while ((match = regex.exec(rawText)) !== null) {
@@ -7872,7 +7896,12 @@ ${rawErr}
 				const rawToken = rawText.substring(matchStart, matchEnd);
 				const openBrace = rawToken.startsWith('{{') ? '{{' : '{';
 				const closeBrace = rawToken.endsWith('}}') ? '}}' : '}';
-				outHtml += `<span class="prompt-token-pill" data-raw-start="${matchStart}" data-raw-end="${matchEnd}" data-raw-token="${this._escapeHtmlAttr(rawToken)}" style="display: inline; white-space: nowrap; padding: 1px 6px; font-size: 11px; font-weight: 500; border-radius: 3.5px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); vertical-align: baseline; font-family: var(--vscode-editor-font-family, monospace); user-select: text; -webkit-user-select: text; margin: 0 1.5px; line-height: 1.35; cursor: text; transition: all 0.15s ease;" title="Referenced Field: ${this._escapeHtmlAttr(varLabel)} (Click to edit)"><span class="codicon codicon-link" style="font-size: 10px; opacity: 0.85; margin-right: 3.5px; vertical-align: -1px; user-select: none; -webkit-user-select: none;"></span><span style="font-size: 0; line-height: 0; opacity: 0;">${openBrace}</span><span style="font-weight: 600;">${this._escapeHtml(varLabel)}</span><span style="font-size: 0; line-height: 0; opacity: 0;">${closeBrace}</span></span>`;
+				out.push($('span.prompt-token-pill', { 'data-raw-start': `${matchStart}`, 'data-raw-end': `${matchEnd}`, 'data-raw-token': textOf(rawToken), style: 'display: inline; white-space: nowrap; padding: 1px 6px; font-size: 11px; font-weight: 500; border-radius: 3.5px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); vertical-align: baseline; font-family: var(--vscode-editor-font-family, monospace); user-select: text; -webkit-user-select: text; margin: 0 1.5px; line-height: 1.35; cursor: text; transition: all 0.15s ease;', title: `Referenced Field: ${textOf(varLabel)} (Click to edit)` },
+					$('span.codicon.codicon-link', { style: 'font-size: 10px; opacity: 0.85; margin-right: 3.5px; vertical-align: -1px; user-select: none; -webkit-user-select: none;' }),
+					$('span', { style: 'font-size: 0; line-height: 0; opacity: 0;' }, openBrace),
+					$('span', { style: 'font-weight: 600;' }, textOf(varLabel)),
+					$('span', { style: 'font-size: 0; line-height: 0; opacity: 0;' }, closeBrace)
+				));
 			} else {
 				appendRawText(matchStart, matchEnd);
 			}
@@ -7881,7 +7910,7 @@ ${rawErr}
 		if (lastIndex < rawText.length) {
 			appendRawText(lastIndex, rawText.length);
 		}
-		return outHtml;
+		return out;
 	}
 
 	private static readonly _PROMPT_BOX_DEFAULT_MAX_HEIGHT = 156;
@@ -7974,8 +8003,7 @@ ${rawErr}
 		}
 		const placeholderText = textarea.getAttribute('placeholder') || displayEl.getAttribute('data-placeholder') || '';
 		displayEl.setAttribute('data-placeholder', placeholderText);
-		const renderedHtml = this._renderPromptTokenizedHtml(textarea.value || '', placeholderText);
-		displayEl.innerHTML = ttPolicy ? (ttPolicy.createHTML(renderedHtml) as unknown as string) : renderedHtml;
+		reset(displayEl, ...this._renderPromptTokenized(textarea.value || '', placeholderText));
 		if (switchToDisplayMode) {
 			const savedScrollTop = textarea.scrollTop;
 			textarea.style.display = 'none';
@@ -8245,14 +8273,18 @@ ${rawErr}
 		}
 	}
 
-	private _buildPromptUserInputItemHtml(
+	/**
+	 * Builds one User Prompt Input box. `promptChips` are fresh nodes for the "Insert Output" chips row; when they already
+	 * start with the "Insert Output:" label (chips copied from another box) the label is not added again.
+	 */
+	private _buildPromptUserInputItem(
 		rawKey: string,
 		boxIdx: number,
 		totalBoxes: number,
 		boxVal: string,
-		promptChipsHtml: string,
+		promptChips: Node[],
 		isLocked?: boolean
-	): string {
+	): HTMLElement {
 		const isMulti = totalBoxes > 1;
 		const canMoveUp = isMulti && boxIdx > 0;
 		const canMoveDown = isMulti && boxIdx < totalBoxes - 1;
@@ -8261,10 +8293,12 @@ ${rawErr}
 		const placeholderText = isMulti
 			? `Enter or voice-dictate User Input #${boxIdx + 1} (e.g. experience / item #${boxIdx + 1})...`
 			: 'Enter your prompt or custom instructions here...';
-		const chipsInner = promptChipsHtml.includes('Insert Output:')
-			? promptChipsHtml
-			: `<span style="font-size: 10.5px; opacity: 0.65;">Insert Output:</span>${promptChipsHtml}`;
-		const tokenizedHtml = this._renderPromptTokenizedHtml(boxVal || '', placeholderText);
+		const chipsInner = promptChips.some(node => node.textContent?.includes('Insert Output:'))
+			? promptChips
+			: [
+				$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Output:'),
+				...promptChips
+			];
 		const isLong = this._isPromptBoxContentLong(boxVal || '');
 		const maxH = EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT;
 		const lockColor = effectiveLocked ? '#fbbf24' : '#34d399';
@@ -8280,45 +8314,52 @@ ${rawErr}
 			? 'Locked — Unlock this prompt box first to record voice input'
 			: 'Record voice input (Speech-to-Text)';
 		const chipsOpacity = effectiveLocked ? '0.5' : '1';
-		return `
-			<div class="prompt-user-input-item" data-input-index="${boxIdx}" style="display: flex; flex-direction: column; gap: 6px;">
-				<div class="voice-input-textarea-wrapper" data-expanded="false" data-locked="${effectiveLocked ? 'true' : 'false'}" style="position: relative; width: 100%;">
-					<div class="prompt-user-input-top-actions" style="position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;">
-						<span class="prompt-user-input-badge" title="Click to jump / move User Input #${boxIdx + 1} to any position (1 ~ ${totalBoxes})" style="font-size: 9.5px; font-weight: 700; color: #38bdf8; background: transparent; border: none; padding: 0 3px; line-height: 1; user-select: none; cursor: pointer; display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; opacity: 0.85;">#${boxIdx + 1}</span>
-						<button type="button" class="prompt-lock-box-btn" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${lockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="${lockTitle}">
-							<span class="codicon ${lockIcon}" style="font-size: 12px;"></span>
-						</button>
-						<button type="button" class="prompt-move-up-user-input-btn" style="display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveUp ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveUp ? '0.8' : '0.22'}; pointer-events: ${canMoveUp ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;" title="${canMoveUp ? `Move User Input #${boxIdx + 1} Up (to #${boxIdx})` : 'Already at the top (#1)'}">
-							<span class="codicon codicon-arrow-up" style="font-size: 12px;"></span>
-						</button>
-						<button type="button" class="prompt-move-down-user-input-btn" style="display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveDown ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveDown ? '0.8' : '0.22'}; pointer-events: ${canMoveDown ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;" title="${canMoveDown ? `Move User Input #${boxIdx + 1} Down (to #${boxIdx + 2})` : `Already at the bottom (#${totalBoxes})`}">
-							<span class="codicon codicon-arrow-down" style="font-size: 12px;"></span>
-						</button>
-						<button type="button" class="prompt-expand-box-btn" style="display: ${isLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="Expand input box to show full content">
-							<span class="codicon codicon-chevron-down" style="font-size: 13px;"></span>
-						</button>
-						<button type="button" class="prompt-remove-user-input-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #f87171; background: transparent; border: none; opacity: 0.72; padding: 0; transition: all 120ms ease;" title="${isMulti ? `Delete User Input #${boxIdx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)'}">
-							<span class="codicon codicon-trash" style="font-size: 12px;"></span>
-						</button>
-					</div>
-					<div class="prompt-tokenized-display" data-placeholder="${this._escapeHtmlAttr(placeholderText)}" title="${displayTitle}" style="width: 100%; min-height: 118px; max-height: ${maxH}px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;">${tokenizedHtml}</div>
-					<textarea class="prompt-instruction-textarea prompt-user-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-input-index="${boxIdx}" rows="5" placeholder="${this._escapeHtmlAttr(placeholderText)}" style="width: 100%; min-height: 118px; max-height: ${maxH}px; height: 140px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0,0,0,0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;">${this._escapeHtml(boxVal)}</textarea>
-					<button type="button" class="prompt-expand-bottom-pill" style="display: none;"></button>
-					<div class="prompt-voice-input-controls" style="position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;">
-						<div class="prompt-voice-recording-indicator" style="display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;">
-							<span class="prompt-voice-recording-dot" style="width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;"></span>
-							<span class="prompt-voice-recording-time">0:00 / 5:00</span>
-						</div>
-						<button type="button" class="prompt-voice-mic-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-voice-target="user" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${micOpacity}; padding: 0; transition: all 120ms ease;" title="${micTitle}">
-							<span class="codicon codicon-mic" style="font-size: 12.5px;"></span>
-						</button>
-					</div>
-				</div>
-				<div class="prompt-user-input-chips" style="display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 2px; opacity: ${chipsOpacity};">
-					${chipsInner}
-				</div>
-			</div>
-		`;
+		return $('div.prompt-user-input-item', { 'data-input-index': `${boxIdx}`, style: 'display: flex; flex-direction: column; gap: 6px;' },
+			$('div.voice-input-textarea-wrapper', { 'data-expanded': 'false', 'data-locked': (effectiveLocked ? 'true' : 'false'), style: 'position: relative; width: 100%;' },
+				$('div.prompt-user-input-top-actions', { style: 'position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;' },
+					$('span.prompt-user-input-badge', { title: `Click to jump / move User Input #${boxIdx + 1} to any position (1 ~ ${totalBoxes})`, style: `font-size: 9.5px; font-weight: 700; color: #38bdf8; background: transparent; border: none; padding: 0 3px; line-height: 1; user-select: none; cursor: pointer; display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; opacity: 0.85;` },
+						'#',
+						String(boxIdx + 1)
+					),
+					$<HTMLButtonElement>('button.prompt-lock-box-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${lockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: lockTitle },
+						$('span', { class: `codicon ${lockIcon}`, style: 'font-size: 12px;' })
+					),
+					$<HTMLButtonElement>('button.prompt-move-up-user-input-btn', { type: 'button', style: `display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveUp ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveUp ? '0.8' : '0.22'}; pointer-events: ${canMoveUp ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;`, title: (canMoveUp ? `Move User Input #${boxIdx + 1} Up (to #${boxIdx})` : 'Already at the top (#1)') },
+						$('span.codicon.codicon-arrow-up', { style: 'font-size: 12px;' })
+					),
+					$<HTMLButtonElement>('button.prompt-move-down-user-input-btn', { type: 'button', style: `display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveDown ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveDown ? '0.8' : '0.22'}; pointer-events: ${canMoveDown ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;`, title: (canMoveDown ? `Move User Input #${boxIdx + 1} Down (to #${boxIdx + 2})` : `Already at the bottom (#${totalBoxes})`) },
+						$('span.codicon.codicon-arrow-down', { style: 'font-size: 12px;' })
+					),
+					$<HTMLButtonElement>('button.prompt-expand-box-btn', { type: 'button', style: `display: ${isLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: 'Expand input box to show full content' },
+						$('span.codicon.codicon-chevron-down', { style: 'font-size: 13px;' })
+					),
+					$<HTMLButtonElement>('button.prompt-remove-user-input-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #f87171; background: transparent; border: none; opacity: 0.72; padding: 0; transition: all 120ms ease;', title: (isMulti ? `Delete User Input #${boxIdx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)') },
+						$('span.codicon.codicon-trash', { style: 'font-size: 12px;' })
+					)
+				),
+				$('div.prompt-tokenized-display', { 'data-placeholder': textOf(placeholderText), title: displayTitle, style: `width: 100%; min-height: 118px; max-height: ${maxH}px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;` },
+					...this._renderPromptTokenized(boxVal || '', placeholderText)
+				),
+				$<HTMLTextAreaElement>('textarea.prompt-instruction-textarea.prompt-user-textarea.monaco-inputbox', { 'data-field-key': textOf(rawKey), 'data-input-index': `${boxIdx}`, rows: '5', placeholder: textOf(placeholderText), style: `width: 100%; min-height: 118px; max-height: ${maxH}px; height: 140px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0,0,0,0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;` },
+					textOf(boxVal)
+				),
+				$<HTMLButtonElement>('button.prompt-expand-bottom-pill', { type: 'button', style: 'display: none;' }),
+				$('div.prompt-voice-input-controls', { style: 'position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;' },
+					$('div.prompt-voice-recording-indicator', { style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;' },
+						$('span.prompt-voice-recording-dot', { style: 'width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;' }),
+						' ',
+						$('span.prompt-voice-recording-time', undefined, '0:00 / 5:00')
+					),
+					$<HTMLButtonElement>('button.prompt-voice-mic-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-voice-target': 'user', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${micOpacity}; padding: 0; transition: all 120ms ease;`, title: micTitle },
+						$('span.codicon.codicon-mic', { style: 'font-size: 12.5px;' })
+					)
+				)
+			),
+			$('div.prompt-user-input-chips', { style: `display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 2px; opacity: ${chipsOpacity};` },
+				...chipsInner
+
+			)
+		);
 	}
 
 	private _refreshPromptUserInputItemsUi(card: HTMLElement): void {
@@ -8817,181 +8858,240 @@ ${rawErr}
 			const preRaw = String(activeSnapshot.preInjectedRaw || '');
 			const preInterp = String(activeSnapshot.preInjectedInterpolated || preRaw);
 
-			const refVarsHtml = refVars.length > 0
-				? refVars.map((rv, idx) => `
-					<div style="border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 6px; background: rgba(15, 23, 42, 0.55); overflow: hidden;">
-						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; background: rgba(56, 189, 248, 0.1); border-bottom: 1px solid rgba(56, 189, 248, 0.18); flex-wrap: wrap;">
-							<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; font-family: var(--vscode-editor-font-family, monospace); padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35);">${this._escapeHtml(rv.token)}</span>
-								<span style="font-size: 10.5px; opacity: 0.78;">Used in: <strong>${this._escapeHtml((rv.sourceLocations || []).join(', '))}</strong></span>
-								<span style="font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.08); opacity: 0.8;">${Number(rv.charCount || 0).toLocaleString()} chars</span>
-							</div>
-							<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="ref" data-copy-index="${idx}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;">Copy Value</button>
-						</div>
-						<pre style="margin: 0; padding: 10px 12px; max-height: 220px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${rv.resolvedValue ? this._escapeHtml(rv.resolvedValue) : '<span style="opacity: 0.45; font-style: italic;">(Empty value)</span>'}</pre>
-					</div>
-				`).join('')
-				: `<div style="padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;">No <code>{Field}</code> or <code>{{parameter}}</code> tags were referenced in this prompt.</div>`;
+			const refVarsContent = refVars.length > 0
+				? refVars.map((rv, idx) => $('div', { style: 'border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 6px; background: rgba(15, 23, 42, 0.55); overflow: hidden;' },
+					$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; background: rgba(56, 189, 248, 0.1); border-bottom: 1px solid rgba(56, 189, 248, 0.18); flex-wrap: wrap;' },
+						$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+							$('span', { style: 'font-size: 11px; font-weight: 700; color: #38bdf8; font-family: var(--vscode-editor-font-family, monospace); padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35);' },
+								textOf(rv.token)
+							),
+							$('span', { style: 'font-size: 10.5px; opacity: 0.78;' },
+								'Used in: ',
+								$('strong', undefined, textOf((rv.sourceLocations || []).join(', ')))
+							),
+							$('span', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.08); opacity: 0.8;' },
+								Number(rv.charCount || 0).toLocaleString(),
+								' chars'
+							)
+						),
+						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'ref', 'data-copy-index': `${idx}`, style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;' },
+							'Copy Value'
+						)
+					),
+					$('pre', { style: 'margin: 0; padding: 10px 12px; max-height: 220px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
+						rv.resolvedValue ? textOf(rv.resolvedValue) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, '(Empty value)')
+					)
+				))
+				: [$('div', { style: 'padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;' },
+					'No ',
+					$('code', undefined, '{Field}'),
+					' or ',
+					$('code', undefined, '{{parameter}}'),
+					' tags were referenced in this prompt.'
+				)];
 
-			const userSegsHtml = userSegsInterp.length > 0
+			const userSegsContent = userSegsInterp.length > 0
 				? userSegsInterp.map((segInterp, idx) => {
 					const segRaw = userSegsRaw[idx] || segInterp;
 					const hasTokens = segRaw !== segInterp;
-					return `
-						<div style="border: 1px solid rgba(52, 211, 153, 0.25); border-radius: 6px; background: rgba(15, 23, 42, 0.45); overflow: hidden;">
-							<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; background: rgba(16, 185, 129, 0.1); border-bottom: 1px solid rgba(52, 211, 153, 0.18); flex-wrap: wrap;">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span style="font-size: 10.5px; font-weight: 700; color: #34d399; padding: 1px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); border: 1px solid rgba(52, 211, 153, 0.35);">User Input #${idx + 1} of ${userSegsInterp.length}</span>
-									<span style="font-size: 10px; opacity: 0.75;">${segInterp.length.toLocaleString()} chars</span>
-									${hasTokens ? '<span style="font-size: 9.5px; color: #38bdf8; background: rgba(56,189,248,0.12); padding: 1px 6px; border-radius: 4px;">Includes resolved {Field} tags</span>' : ''}
-								</div>
-								<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="user" data-copy-index="${idx}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;">Copy #${idx + 1}</button>
-							</div>
-							<pre style="margin: 0; padding: 10px 12px; max-height: 210px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${this._escapeHtml(segInterp)}</pre>
-						</div>
-					`;
-				}).join('')
-				: `<div style="padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;">No user input segments entered.</div>`;
+					return $('div', { style: 'border: 1px solid rgba(52, 211, 153, 0.25); border-radius: 6px; background: rgba(15, 23, 42, 0.45); overflow: hidden;' },
+						$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; background: rgba(16, 185, 129, 0.1); border-bottom: 1px solid rgba(52, 211, 153, 0.18); flex-wrap: wrap;' },
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', { style: 'font-size: 10.5px; font-weight: 700; color: #34d399; padding: 1px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); border: 1px solid rgba(52, 211, 153, 0.35);' },
+									'User Input #',
+									String(idx + 1),
+									' of ',
+									String(userSegsInterp.length)
+								),
+								$('span', { style: 'font-size: 10px; opacity: 0.75;' }, segInterp.length.toLocaleString(), ' chars'),
+								...(hasTokens ? [
+									$('span', { style: 'font-size: 9.5px; color: #38bdf8; background: rgba(56,189,248,0.12); padding: 1px 6px; border-radius: 4px;' },
+										'Includes resolved {Field} tags'
+									)
+								] : [])
+							),
+							$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'user', 'data-copy-index': `${idx}`, style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;' },
+								'Copy #',
+								String(idx + 1)
+							)
+						),
+						$('pre', { style: 'margin: 0; padding: 10px 12px; max-height: 210px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
+							textOf(segInterp)
+						)
+					);
+				})
+				: [$('div', { style: 'padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;' },
+					'No user input segments entered.'
+				)];
 
-			const bodyContentHtml = activeTab === 'structured' ? `
-				<div style="display: flex; flex-direction: column; gap: 16px;">
-					<!-- Section 1: Pre-Injected Prompt -->
-					<div style="border: 1px solid rgba(96, 165, 250, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;">
-						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(59, 130, 246, 0.14); border-bottom: 1px solid rgba(96, 165, 250, 0.22); flex-wrap: wrap;">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(59, 130, 246, 0.25); color: #60a5fa;">1. SYSTEM / TEMPLATE</span>
-								<span style="font-size: 12px; font-weight: 600; color: #93c5fd;">Pre-Injected Prompt (Template Instruction)</span>
-								<span style="font-size: 10.5px; opacity: 0.72;">(${preInterp.length.toLocaleString()} chars)</span>
-							</div>
-							<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="pre" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; padding: 3px 9px; font-size: 10.5px; color: inherit; cursor: pointer;">Copy System Instruction</button>
-						</div>
-						<div style="padding: 12px 14px;">
-							${preInterp.trim()
-					? `<pre style="margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${this._escapeHtml(preInterp)}</pre>`
-					: `<div style="font-size: 11.5px; opacity: 0.55; font-style: italic;">No Pre-Injected Prompt configured in this template.</div>`
-				}
-						</div>
-					</div>
+			const bodyContent = activeTab === 'structured' ? $('div', { style: 'display: flex; flex-direction: column; gap: 16px;' },
+				$('div', { style: 'border: 1px solid rgba(96, 165, 250, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;' },
+					$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(59, 130, 246, 0.14); border-bottom: 1px solid rgba(96, 165, 250, 0.22); flex-wrap: wrap;' },
+						$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+							$('span', { style: 'font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(59, 130, 246, 0.25); color: #60a5fa;' },
+								'1. SYSTEM / TEMPLATE'
+							),
+							$('span', { style: 'font-size: 12px; font-weight: 600; color: #93c5fd;' }, 'Pre-Injected Prompt (Template Instruction)'),
+							$('span', { style: 'font-size: 10.5px; opacity: 0.72;' }, '(', preInterp.length.toLocaleString(), ' chars)')
+						),
+						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'pre', style: 'background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; padding: 3px 9px; font-size: 10.5px; color: inherit; cursor: pointer;' },
+							'Copy System Instruction'
+						)
+					),
+					$('div', { style: 'padding: 12px 14px;' },
+						preInterp.trim() ? $('pre', { style: 'margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
+							textOf(preInterp)
+						) : $('div', { style: 'font-size: 11.5px; opacity: 0.55; font-style: italic;' }, 'No Pre-Injected Prompt configured in this template.')
+					)
+				),
+				$('div', { style: 'border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;' },
+					$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(56, 189, 248, 0.12); border-bottom: 1px solid rgba(56, 189, 248, 0.22); flex-wrap: wrap;' },
+						$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+							$('span', { style: 'font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.22); color: #38bdf8;' },
+								'2. INJECTED FIELDS'
+							),
+							$('span', { style: 'font-size: 12px; font-weight: 600; color: #7dd3fc;' }, 'Referenced {Field} & {{Input}} Values'),
+							$('span', { style: 'font-size: 10.5px; opacity: 0.75;' }, '(', String(refVars.length), ' referenced)')
+						)
+					),
+					$('div', { style: 'padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;' }, ...refVarsContent)
+				),
+				$('div', { style: 'border: 1px solid rgba(52, 211, 153, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;' },
+					$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(16, 185, 129, 0.12); border-bottom: 1px solid rgba(52, 211, 153, 0.22); flex-wrap: wrap;' },
+						$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+							$('span', { style: 'font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.22); color: #34d399;' },
+								'3. USER INPUTS'
+							),
+							$('span', { style: 'font-size: 12px; font-weight: 600; color: #6ee7b7;' }, 'User Prompt / Instruction Segments (In Order)'),
+							$('span', { style: 'font-size: 10.5px; opacity: 0.75;' },
+								'(',
+								String(userSegsInterp.length),
+								' segment',
+								...(userSegsInterp.length === 1 ? [] : ['s']),
+								')'
+							)
+						)
+					),
+					$('div', { style: 'padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;' }, ...userSegsContent)
+				),
+				$('div', { style: 'border: 1px solid rgba(192, 132, 252, 0.35); border-radius: 8px; background: rgba(30, 41, 59, 0.45); overflow: hidden;' },
+					$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(168, 85, 247, 0.15); border-bottom: 1px solid rgba(192, 132, 252, 0.25); flex-wrap: wrap;' },
+						$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+							$('span', { style: 'font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.25); color: #c084fc;' },
+								'4. FULL FINAL PAYLOAD'
+							),
+							$('span', { style: 'font-size: 12px; font-weight: 600; color: #d8b4fe;' }, 'Complete Verbatim Prompt Sent to AI'),
+							$('span', { style: 'font-size: 10.5px; opacity: 0.75;' },
+								'(',
+								totalChars.toLocaleString(),
+								' chars \u00B7 ~',
+								approxTokens.toLocaleString(),
+								' tokens)'
+							)
+						),
+						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'full', style: 'background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.4); border-radius: 4px; padding: 3px 10px; font-size: 10.5px; font-weight: 600; color: #e9d5ff; cursor: pointer;' },
+							'Copy Full Prompt'
+						)
+					),
+					$('div', { style: 'padding: 12px 14px;' },
+						$('pre', { style: 'margin: 0; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #f1f5f9; background: rgba(0, 0, 0, 0.3); padding: 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);' },
+							activeSnapshot.fullInterpolatedPrompt ? textOf(activeSnapshot.fullInterpolatedPrompt) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, '(Empty prompt)')
+						)
+					)
+				)
+			) : $('div', { style: 'display: flex; flex-direction: column; height: 100%; gap: 8px;' },
+				$('div', { style: 'display: flex; align-items: center; justify-content: space-between; font-size: 11px; opacity: 0.75; padding: 0 2px;' },
+					$('span', undefined,
+						'Exact 100% verbatim final string sent to ',
+						$('strong', undefined, textOf(targetLabel)),
+						' after merging all sections and resolving all ',
+						$('code', undefined, '{Field}'),
+						' placeholders:'
+					),
+					$('span', undefined, totalChars.toLocaleString(), ' chars (~', approxTokens.toLocaleString(), ' est. tokens)')
+				),
+				$('pre', { style: 'flex: 1; margin: 0; padding: 14px 16px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.38); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; color: #f1f5f9;' },
+					activeSnapshot.fullInterpolatedPrompt ? textOf(activeSnapshot.fullInterpolatedPrompt) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, '(Empty prompt)')
+				)
+			);
 
-					<!-- Section 2: Referenced {Field} / {{Parameter}} Injected Values -->
-					<div style="border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;">
-						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(56, 189, 248, 0.12); border-bottom: 1px solid rgba(56, 189, 248, 0.22); flex-wrap: wrap;">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.22); color: #38bdf8;">2. INJECTED FIELDS</span>
-								<span style="font-size: 12px; font-weight: 600; color: #7dd3fc;">Referenced {Field} &amp; {{Input}} Values</span>
-								<span style="font-size: 10.5px; opacity: 0.75;">(${refVars.length} referenced)</span>
-							</div>
-						</div>
-						<div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;">
-							${refVarsHtml}
-						</div>
-					</div>
+			reset(dialog,
 
-					<!-- Section 3: User Prompt Input Segments -->
-					<div style="border: 1px solid rgba(52, 211, 153, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;">
-						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(16, 185, 129, 0.12); border-bottom: 1px solid rgba(52, 211, 153, 0.22); flex-wrap: wrap;">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.22); color: #34d399;">3. USER INPUTS</span>
-								<span style="font-size: 12px; font-weight: 600; color: #6ee7b7;">User Prompt / Instruction Segments (In Order)</span>
-								<span style="font-size: 10.5px; opacity: 0.75;">(${userSegsInterp.length} segment${userSegsInterp.length === 1 ? '' : 's'})</span>
-							</div>
-						</div>
-						<div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;">
-							${userSegsHtml}
-						</div>
-					</div>
-
-					<!-- Section 4: Complete Final Merged Prompt Sent to AI -->
-					<div style="border: 1px solid rgba(192, 132, 252, 0.35); border-radius: 8px; background: rgba(30, 41, 59, 0.45); overflow: hidden;">
-						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(168, 85, 247, 0.15); border-bottom: 1px solid rgba(192, 132, 252, 0.25); flex-wrap: wrap;">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.25); color: #c084fc;">4. FULL FINAL PAYLOAD</span>
-								<span style="font-size: 12px; font-weight: 600; color: #d8b4fe;">Complete Verbatim Prompt Sent to AI</span>
-								<span style="font-size: 10.5px; opacity: 0.75;">(${totalChars.toLocaleString()} chars · ~${approxTokens.toLocaleString()} tokens)</span>
-							</div>
-							<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="full" style="background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.4); border-radius: 4px; padding: 3px 10px; font-size: 10.5px; font-weight: 600; color: #e9d5ff; cursor: pointer;">Copy Full Prompt</button>
-						</div>
-						<div style="padding: 12px 14px;">
-							<pre style="margin: 0; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #f1f5f9; background: rgba(0, 0, 0, 0.3); padding: 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);">${activeSnapshot.fullInterpolatedPrompt ? this._escapeHtml(activeSnapshot.fullInterpolatedPrompt) : '<span style="opacity: 0.45; font-style: italic;">(Empty prompt)</span>'}</pre>
-						</div>
-					</div>
-				</div>
-			` : `
-				<div style="display: flex; flex-direction: column; height: 100%; gap: 8px;">
-					<div style="display: flex; align-items: center; justify-content: space-between; font-size: 11px; opacity: 0.75; padding: 0 2px;">
-						<span>Exact 100% verbatim final string sent to <strong>${this._escapeHtml(targetLabel)}</strong> after merging all sections and resolving all <code>{Field}</code> placeholders:</span>
-						<span>${totalChars.toLocaleString()} chars (~${approxTokens.toLocaleString()} est. tokens)</span>
-					</div>
-					<pre style="flex: 1; margin: 0; padding: 14px 16px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.38); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; color: #f1f5f9;">${activeSnapshot.fullInterpolatedPrompt ? this._escapeHtml(activeSnapshot.fullInterpolatedPrompt) : '<span style="opacity: 0.45; font-style: italic;">(Empty prompt)</span>'}</pre>
-				</div>
-			`;
-
-			const modalHtml = `
-				<!-- Modal Header -->
-				<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; background: rgba(15, 23, 42, 0.75); border-bottom: 1px solid rgba(255, 255, 255, 0.1); flex-wrap: wrap;">
-					<div style="display: flex; flex-direction: column; gap: 4px;">
-						<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-							<span class="codicon codicon-eye" style="font-size: 15px; color: #38bdf8;"></span>
-							<span style="font-size: 14px; font-weight: 700; color: #f8fafc;">Sent Prompt Inspector — ${this._escapeHtml(fieldKey)}</span>
-							<span style="font-size: 10.5px; padding: 2px 8px; border-radius: 12px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600;">${this._escapeHtml(targetLabel)}</span>
-						</div>
-						<div style="display: flex; align-items: center; gap: 12px; font-size: 11px; opacity: 0.72; flex-wrap: wrap;">
-							<span>Status: <strong>${this._escapeHtml(activeSnapshot.executedAt || 'Ready')}</strong></span>
-							<span>·</span>
-							<span>Total: <strong>${totalChars.toLocaleString()} chars</strong> (~${approxTokens.toLocaleString()} tokens)</span>
-							<span>·</span>
-							<span>User Segments: <strong>${userSegsInterp.length}</strong></span>
-							<span>·</span>
-							<span>Injected Fields: <strong>${refVars.length}</strong></span>
-						</div>
-					</div>
-					<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-						<button type="button" class="inspector-open-tab-btn" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);" title="Open the structured breakdown and full prompt in a new Markdown editor tab">
-							<span class="codicon codicon-go-to-file" style="font-size: 12px;"></span>
-							<span>Open in Editor Tab</span>
-						</button>
-						<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="full" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);" title="Copy the complete final prompt sent to AI">
-							<span class="codicon codicon-copy" style="font-size: 12px;"></span>
-							<span>Copy Full Prompt</span>
-						</button>
-						<button type="button" class="inspector-close-btn" style="display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.06); color: inherit; border: 1px solid rgba(255, 255, 255, 0.14);" title="Close (Esc)">
-							<span class="codicon codicon-close" style="font-size: 14px;"></span>
-						</button>
-					</div>
-				</div>
-
-				<!-- View Mode Sub-Bar -->
-				<div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 18px; background: rgba(0, 0, 0, 0.28); border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-wrap: wrap;">
-					<div style="display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.04); padding: 3px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);">
-						<button type="button" class="inspector-tab-btn" data-tab="structured" style="padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'structured' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'structured' ? '#38bdf8' : 'inherit'};">
-							Structured Breakdown
-						</button>
-						<button type="button" class="inspector-tab-btn" data-tab="raw" style="padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'raw' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'raw' ? '#38bdf8' : 'inherit'};">
-							Full Verbatim Prompt
-						</button>
-					</div>
-					<div style="display: flex; align-items: center; gap: 8px; font-size: 11px;">
-						${savedSnapshot ? `
-							<span style="opacity: 0.7;">Snapshot Source:</span>
-							<button type="button" class="inspector-source-btn" data-source="saved" style="padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === savedSnapshot ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === savedSnapshot ? 'rgba(16, 185, 129, 0.18)' : 'transparent'}; color: ${activeSnapshot === savedSnapshot ? '#34d399' : 'inherit'};">Last Execution Snapshot</button>
-							<button type="button" class="inspector-source-btn" data-source="live" style="padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.18)' : 'transparent'}; color: ${activeSnapshot === liveSnapshot ? '#38bdf8' : 'inherit'};">Live Current Inputs</button>
-						` : `
-							<span style="opacity: 0.65; font-style: italic;">Showing full resolved prompt from current ticket fields &amp; segments</span>
-						`}
-					</div>
-				</div>
-
-				<!-- Modal Body -->
-				<div style="flex: 1; padding: 16px 18px; overflow-y: auto; box-sizing: border-box;">
-					${bodyContentHtml}
-				</div>
-			`;
-
-			if (ttPolicy) {
-				dialog.innerHTML = ttPolicy.createHTML(modalHtml) as unknown as string;
-			} else {
-				dialog.innerHTML = modalHtml;
-			}
+				$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; background: rgba(15, 23, 42, 0.75); border-bottom: 1px solid rgba(255, 255, 255, 0.1); flex-wrap: wrap;' },
+					$('div', { style: 'display: flex; flex-direction: column; gap: 4px;' },
+						$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+							$('span.codicon.codicon-eye', { style: 'font-size: 15px; color: #38bdf8;' }),
+							$('span', { style: 'font-size: 14px; font-weight: 700; color: #f8fafc;' }, 'Sent Prompt Inspector \u2014 ', textOf(fieldKey)),
+							$('span', { style: 'font-size: 10.5px; padding: 2px 8px; border-radius: 12px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600;' },
+								textOf(targetLabel)
+							)
+						),
+						$('div', { style: 'display: flex; align-items: center; gap: 12px; font-size: 11px; opacity: 0.72; flex-wrap: wrap;' },
+							$('span', undefined,
+								'Status: ',
+								$('strong', undefined, textOf(activeSnapshot.executedAt || 'Ready'))
+							),
+							$('span', undefined, '\u00B7'),
+							$('span', undefined,
+								'Total: ',
+								$('strong', undefined, totalChars.toLocaleString(), ' chars'),
+								' (~',
+								approxTokens.toLocaleString(),
+								' tokens)'
+							),
+							$('span', undefined, '\u00B7'),
+							$('span', undefined,
+								'User Segments: ',
+								$('strong', undefined, String(userSegsInterp.length))
+							),
+							$('span', undefined, '\u00B7'),
+							$('span', undefined,
+								'Injected Fields: ',
+								$('strong', undefined, String(refVars.length))
+							)
+						)
+					),
+					$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+						$<HTMLButtonElement>('button.inspector-open-tab-btn', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);', title: 'Open the structured breakdown and full prompt in a new Markdown editor tab' },
+							$('span.codicon.codicon-go-to-file', { style: 'font-size: 12px;' }),
+							$('span', undefined, 'Open in Editor Tab')
+						),
+						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'full', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);', title: 'Copy the complete final prompt sent to AI' },
+							$('span.codicon.codicon-copy', { style: 'font-size: 12px;' }),
+							$('span', undefined, 'Copy Full Prompt')
+						),
+						$<HTMLButtonElement>('button.inspector-close-btn', { type: 'button', style: 'display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.06); color: inherit; border: 1px solid rgba(255, 255, 255, 0.14);', title: 'Close (Esc)' },
+							$('span.codicon.codicon-close', { style: 'font-size: 14px;' })
+						)
+					)
+				),
+				$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 18px; background: rgba(0, 0, 0, 0.28); border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-wrap: wrap;' },
+					$('div', { style: 'display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.04); padding: 3px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);' },
+						$<HTMLButtonElement>('button.inspector-tab-btn', { type: 'button', 'data-tab': 'structured', style: `padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'structured' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'structured' ? '#38bdf8' : 'inherit'};` },
+							'Structured Breakdown'
+						),
+						$<HTMLButtonElement>('button.inspector-tab-btn', { type: 'button', 'data-tab': 'raw', style: `padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'raw' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'raw' ? '#38bdf8' : 'inherit'};` },
+							'Full Verbatim Prompt'
+						)
+					),
+					$('div', { style: 'display: flex; align-items: center; gap: 8px; font-size: 11px;' },
+						...(savedSnapshot ? [
+							$('span', { style: 'opacity: 0.7;' }, 'Snapshot Source:'),
+							' ',
+							$<HTMLButtonElement>('button.inspector-source-btn', { type: 'button', 'data-source': 'saved', style: `padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === savedSnapshot ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === savedSnapshot ? 'rgba(16, 185, 129, 0.18)' : 'transparent'}; color: ${activeSnapshot === savedSnapshot ? '#34d399' : 'inherit'};` },
+								'Last Execution Snapshot'
+							),
+							' ',
+							$<HTMLButtonElement>('button.inspector-source-btn', { type: 'button', 'data-source': 'live', style: `padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.18)' : 'transparent'}; color: ${activeSnapshot === liveSnapshot ? '#38bdf8' : 'inherit'};` },
+								'Live Current Inputs'
+							)
+						] : [
+							$('span', { style: 'opacity: 0.65; font-style: italic;' }, 'Showing full resolved prompt from current ticket fields & segments')
+						])
+					)
+				),
+				$('div', { style: 'flex: 1; padding: 16px 18px; overflow-y: auto; box-sizing: border-box;' }, bodyContent)
+			);
 
 			// Wire interactive buttons inside the dialog
 			const closeBtn = templatePart(dialog, '.inspector-close-btn') as HTMLElement | null;
@@ -14162,7 +14262,7 @@ ${rawErr}
 			copySqlOutBtn.type = 'button';
 			copySqlOutBtn.title = 'Copy complete SQL execution output';
 			copySqlOutBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
-			this._setElementHTML(copySqlOutBtn, `<span class="codicon codicon-copy" style="font-size: 11px;"></span><span>Copy</span>`);
+			reset(copySqlOutBtn, $('span.codicon.codicon-copy', { style: 'font-size: 11px;' }), $('span', undefined, 'Copy'));
 			sqlOutputActions.appendChild(copySqlOutBtn);
 
 			const clearSqlOutBtn = document.createElement('button');
@@ -14205,9 +14305,12 @@ ${rawErr}
 					return;
 				}
 				await this._clipboardService.writeText(out);
-				const prevHtml = copySqlOutBtn.innerHTML;
-				this._setElementHTML(copySqlOutBtn, `<span class="codicon codicon-check" style="font-size: 11px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
-				setTimeout(() => { if (copySqlOutBtn.isConnected) { this._setElementHTML(copySqlOutBtn, prevHtml); } }, 1500);
+				const prevContent = Array.from(copySqlOutBtn.childNodes);
+				reset(copySqlOutBtn,
+					$('span.codicon.codicon-check', { style: 'font-size: 11px; color: #4ade80;' }),
+					$('span', { style: 'color: #4ade80;' }, 'Copied!')
+				);
+				setTimeout(() => { if (copySqlOutBtn.isConnected) { reset(copySqlOutBtn, ...prevContent); } }, 1500);
 				this._notificationService.info('SQL execution output copied to clipboard.');
 			};
 
@@ -14439,14 +14542,17 @@ ${rawErr}
 								copyQueryJsonBtn.type = 'button';
 								copyQueryJsonBtn.title = 'Copy all query result rows as JSON';
 								copyQueryJsonBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10px; font-weight: 500; border-radius: 4px; background: rgba(56,189,248,0.14); color: #7dd3fc; border: 1px solid rgba(56,189,248,0.35); cursor: pointer;';
-								this._setElementHTML(copyQueryJsonBtn, `<span class="codicon codicon-copy" style="font-size: 10.5px;"></span><span>Copy JSON</span>`);
+								reset(copyQueryJsonBtn, $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }), $('span', undefined, 'Copy JSON'));
 								copyQueryJsonBtn.onclick = async (e) => {
 									e.preventDefault();
 									e.stopPropagation();
 									await this._clipboardService.writeText(JSON.stringify(allQueryRows || [], null, 2));
-									const prevHtml = copyQueryJsonBtn.innerHTML;
-									this._setElementHTML(copyQueryJsonBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
-									setTimeout(() => { if (copyQueryJsonBtn.isConnected) { this._setElementHTML(copyQueryJsonBtn, prevHtml); } }, 1500);
+									const prevContent = Array.from(copyQueryJsonBtn.childNodes);
+									reset(copyQueryJsonBtn,
+										$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+										$('span', { style: 'color: #4ade80;' }, 'Copied!')
+									);
+									setTimeout(() => { if (copyQueryJsonBtn.isConnected) { reset(copyQueryJsonBtn, ...prevContent); } }, 1500);
 									this._notificationService.info(`Copied all ${(allQueryRows || []).length} query result row(s) as JSON.`);
 								};
 								qRightControls.appendChild(copyQueryJsonBtn);
@@ -16543,19 +16649,21 @@ ${rawErr}
 						resultBlock = document.createElement('div');
 						resultBlock.className = 'python-result-block';
 						resultBlock.style.cssText = 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;';
-						this._setElementHTML(resultBlock, `
-							<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
-								<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-									<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
-									<button type="button" class="python-copy-result-btn" title="Copy complete Return Value (Output)" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;">
-										<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
-										<span>Copy</span>
-									</button>
-								</div>
-							</div>
-							<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;"></pre>
-						`);
+						reset(resultBlock,
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', { style: 'font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;' },
+									'Return Value (Output):'
+								),
+								$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
+									$('span', { style: 'font-size: 9.5px; opacity: 0.65; color: #38bdf8;' }, 'Consumed by Output Manifest & Downstream Primitives'),
+									$<HTMLButtonElement>('button.python-copy-result-btn', { type: 'button', title: 'Copy complete Return Value (Output)', style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;' },
+										$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+										$('span', undefined, 'Copy')
+									)
+								)
+							),
+							$('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' })
+						);
 						outSection.insertBefore(resultBlock, outSection.firstChild);
 					}
 				}
@@ -16728,20 +16836,29 @@ ${rawErr}
 		const listEl = templatePart(card, '.python-scripts-list') as HTMLElement | null;
 		if (!listEl) { return; }
 		if (scripts.length === 0) {
-			this._setElementHTML(listEl, `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`);
+			reset(listEl,
+				$('div.python-scripts-empty', { style: 'font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;' },
+					'No external scripts configured. Executes inline source code only.'
+				)
+			);
 			return;
 		}
-		this._setElementHTML(listEl, scripts.map((s, idx) => `
-			<div class="python-script-item" data-index="${idx}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);">
-				<div style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-					<span style="opacity: 0.5; font-size: 10px; font-weight: 600;">#${idx + 1}</span>
-					<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 1h7l3.5 3.5v10.5l-.5.5h-10l-.5-.5v-13.5l.5-.5zm6.5 4v-3h-6v13h9v-10h-3z"/></svg>
-					<span title="${this._escapeHtmlAttr(s)}" style="color: inherit;">${this._escapeHtml(s)}</span>
-				</div>
-				<button type="button" class="python-remove-script-btn" data-field-key="${this._escapeHtmlAttr(fieldKey)}" data-index="${idx}" style="padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;" title="Remove this script"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/></svg></button>
-			</div>
-		`).join(''));
+		reset(listEl, ...scripts.map((s, idx) => $('div.python-script-item', { 'data-index': `${idx}`, style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);' },
+			$('div', { style: 'display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
+				$('span', { style: 'opacity: 0.5; font-size: 10px; font-weight: 600;' }, '#', String(idx + 1)),
+				$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+					$.SVG('path', { d: 'M4.5 1h7l3.5 3.5v10.5l-.5.5h-10l-.5-.5v-13.5l.5-.5zm6.5 4v-3h-6v13h9v-10h-3z' })
+				),
+				$('span', { title: textOf(s), style: 'color: inherit;' }, textOf(s))
+			),
+			$<HTMLButtonElement>('button.python-remove-script-btn', { type: 'button', 'data-field-key': textOf(fieldKey), 'data-index': `${idx}`, style: 'padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;', title: 'Remove this script' },
+				$.SVG('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor' },
+					$.SVG('path', { d: 'M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z' })
+				)
+			)
+		)));
 	}
+
 
 	private async _browsePythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
 		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
@@ -16887,9 +17004,9 @@ ${rawErr}
 		return st;
 	}
 
-	private _renderOutputPaginationBarHtml(stateKey: string, totalRows: number, page: number, pageSize: number, unitLabel: string = 'records'): string {
+	private _renderOutputPaginationBar(stateKey: string, totalRows: number, page: number, pageSize: number, unitLabel: string = 'records'): HTMLElement | undefined {
 		if (totalRows <= 10 && pageSize === 10) {
-			return '';
+			return undefined;
 		}
 		const safePageSize = Math.max(1, pageSize || 10);
 		const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
@@ -16898,47 +17015,70 @@ ${rawErr}
 		const endIdx = Math.min(safePage * safePageSize, totalRows);
 		const canPrev = safePage > 1;
 		const canNext = safePage < totalPages;
-		const escKey = this._escapeHtmlAttr(stateKey);
 
 		const btnBaseStyle = 'padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: inherit; transition: all 0.12s ease;';
 		const prevStyle = `${btnBaseStyle} cursor: ${canPrev ? 'pointer' : 'default'}; opacity: ${canPrev ? '0.92' : '0.35'};`;
 		const nextStyle = `${btnBaseStyle} cursor: ${canNext ? 'pointer' : 'default'}; opacity: ${canNext ? '0.92' : '0.35'};`;
 
 		const pageSizes = [10, 25, 50, 100];
-		const sizeOptsHtml = pageSizes
-			.map(sz => `<option value="${sz}" ${sz === safePageSize ? 'selected' : ''}>${sz} / page</option>`)
-			.join('');
+		const sizeOpts = pageSizes
+			.map(sz => $<HTMLOptionElement>('option', { value: `${sz}`, selected: sz === safePageSize ? true : undefined }, String(sz), ' / page'));
 
-		return `
-			<div class="output-pagination-toolbar" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; margin-bottom: 6px; border-radius: 6px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(99, 102, 241, 0.25); font-size: 11px;">
-				<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-					<span style="color: #a5b4fc; font-weight: 600;">Showing ${startIdx}\u2013${endIdx} of ${totalRows} ${this._escapeHtml(unitLabel)}</span>
-					<span style="font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3);" title="Programmatic runtime receives all ${totalRows} complete records">Full ${totalRows} preserved in runtime</span>
-				</div>
-				<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="1" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="First Page">\u00AB</button>
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage - 1}" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="Previous Page">\u2039 Prev</button>
-					<span style="font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; padding: 0 4px; opacity: 0.9;">Page <strong>${safePage}</strong> / ${totalPages}</span>
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage + 1}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Next Page">Next \u203A</button>
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${totalPages}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Last Page">\u00BB</button>
-					<select class="output-page-size-select" data-state-key="${escKey}" style="padding: 2px 6px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.35); color: inherit; cursor: pointer;" title="Records per page">
-						${sizeOptsHtml}
-					</select>
-				</div>
-			</div>
-		`;
+		return $('div.output-pagination-toolbar', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; margin-bottom: 6px; border-radius: 6px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(99, 102, 241, 0.25); font-size: 11px;' },
+			$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+				$('span', { style: 'color: #a5b4fc; font-weight: 600;' },
+					'Showing ',
+					String(startIdx),
+					'\u2013',
+					String(endIdx),
+					' of ',
+					String(totalRows),
+					' ',
+					textOf(unitLabel)
+				),
+				$('span', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3);', title: `Programmatic runtime receives all ${totalRows} complete records` },
+					'Full ',
+					String(totalRows),
+					' preserved in runtime'
+				)
+			),
+			$('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' },
+				$<HTMLButtonElement>('button.output-page-btn', { type: 'button', 'data-state-key': stateKey, 'data-target-page': '1', 'data-disabled': `${!canPrev}`, disabled: !canPrev ? '' : undefined, style: prevStyle, title: 'First Page' },
+					'\u00AB'
+				),
+				$<HTMLButtonElement>('button.output-page-btn', { type: 'button', 'data-state-key': stateKey, 'data-target-page': `${safePage - 1}`, 'data-disabled': `${!canPrev}`, disabled: !canPrev ? '' : undefined, style: prevStyle, title: 'Previous Page' },
+					'\u2039 Prev'
+				),
+				$('span', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; padding: 0 4px; opacity: 0.9;' },
+					'Page ',
+					$('strong', undefined, String(safePage)),
+					' / ',
+					String(totalPages)
+				),
+				$<HTMLButtonElement>('button.output-page-btn', { type: 'button', 'data-state-key': stateKey, 'data-target-page': `${safePage + 1}`, 'data-disabled': `${!canNext}`, disabled: !canNext ? '' : undefined, style: nextStyle, title: 'Next Page' },
+					'Next \u203A'
+				),
+				$<HTMLButtonElement>('button.output-page-btn', { type: 'button', 'data-state-key': stateKey, 'data-target-page': `${totalPages}`, 'data-disabled': `${!canNext}`, disabled: !canNext ? '' : undefined, style: nextStyle, title: 'Last Page' },
+					'\u00BB'
+				),
+				$<HTMLSelectElement>('select.output-page-size-select', { 'data-state-key': stateKey, style: 'padding: 2px 6px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.35); color: inherit; cursor: pointer;', title: 'Records per page' },
+					...sizeOpts
+
+				)
+			)
+		);
 	}
 
-	private _renderOutputViewportByFormat(text: string, format: string, stateKey: string): string {
+	private _renderOutputViewportByFormat(text: string, format: string, stateKey: string): Node[] {
 		const { page, pageSize } = this._getOutputPaginationState(stateKey);
 		if (format === 'table') {
-			return this._renderResultTableHtml(text, page, pageSize, stateKey);
+			return this._renderResultTable(text, page, pageSize, stateKey);
 		} else if (format === 'markdown') {
-			return this._markdownToHtml(text);
+			return this._renderMarkdown(text);
 		} else if (format === 'json') {
-			return this._renderResultJsonHtml(text, page, pageSize, stateKey);
+			return this._renderResultJson(text, page, pageSize, stateKey);
 		} else {
-			return this._renderResultTextHtml(text, page, pageSize, stateKey);
+			return this._renderResultText(text, page, pageSize, stateKey);
 		}
 	}
 
@@ -16951,7 +17091,7 @@ ${rawErr}
 			if (viewport) {
 				const text = rawTa?.value || '';
 				const format = formatSelector?.value || 'table';
-				this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
+				reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
 			}
 			return;
 		}
@@ -16963,7 +17103,7 @@ ${rawErr}
 			if (viewport) {
 				const text = rawTa?.value || '';
 				const format = formatSelector?.value || 'table';
-				this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
+				reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
 			}
 		}
 	}
@@ -16982,7 +17122,7 @@ ${rawErr}
 		const viewport = templatePart(itemContainer, '.output-item-viewport') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
-			this._setElementHTML(viewport, this._renderOutputViewportByFormat(content, format, stateKey));
+			reset(viewport, ...this._renderOutputViewportByFormat(content, format, stateKey));
 		}
 
 		let currentData: Record<string, unknown> = {};
@@ -17018,7 +17158,7 @@ ${rawErr}
 		const viewport = templatePart(itemContainer, '.output-item-viewport') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
-			this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
+			reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
 		}
 
 		let currentData: Record<string, unknown> = {};
@@ -17205,7 +17345,7 @@ ${rawErr}
 				const viewport = templatePart(item, '.output-item-viewport') as HTMLElement | null;
 				if (viewport) {
 					viewport.setAttribute('data-state-key', stateKey);
-					this._setElementHTML(viewport, this._renderOutputViewportByFormat(resolvedText, format, stateKey));
+					reset(viewport, ...this._renderOutputViewportByFormat(resolvedText, format, stateKey));
 				}
 
 				currentData[specKey] = {
@@ -17230,7 +17370,7 @@ ${rawErr}
 		const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
-			this._setElementHTML(viewport, this._renderOutputViewportByFormat(output, format, stateKey));
+			reset(viewport, ...this._renderOutputViewportByFormat(output, format, stateKey));
 		}
 
 		const statusEl = templatePart(card, '.result-status-text') as HTMLElement | null;
@@ -17256,7 +17396,7 @@ ${rawErr}
 		const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
-			this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
+			reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
 		}
 
 		const statusEl = templatePart(card, '.result-status-text') as HTMLElement | null;
@@ -17269,9 +17409,19 @@ ${rawErr}
 		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(resultData));
 	}
 
-	private _renderResultTableHtml(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): string {
+	/** A table cell value: http(s) URLs become links, anything else plain text. */
+	private _renderResultCellValue(cellVal: string): Node | string {
+		const isLink = /^https?:\/\//i.test(cellVal.trim());
+		return isLink
+			? $<HTMLAnchorElement>('a', { href: cellVal.trim(), target: '_blank', style: 'color: #38bdf8; text-decoration: underline;' },
+				cellVal.trim()
+			)
+			: cellVal;
+	}
+
+	private _renderResultTable(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): Node[] {
 		if (!text || !text.trim()) {
-			return '<span style="opacity: 0.4; font-style: italic;">No result content to display in table.</span>';
+			return [$('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No result content to display in table.')];
 		}
 
 		const trimmed = text.trim();
@@ -17279,7 +17429,9 @@ ${rawErr}
 
 		// 0. If content is a SQL Execution Output log, preserve the full log & query preview as clean pre-formatted text
 		if (/^Status:\s*(SUCCESS|FAILED)\b/i.test(trimmed) || trimmed.includes('--- [Resolved SQL Statement] ---')) {
-			return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(trimmed)}</pre>`;
+			return [$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+				textOf(trimmed)
+			)];
 		}
 
 		// 1. Try parsing JSON array of objects (or wrapper object containing an array of objects)
@@ -17302,7 +17454,9 @@ ${rawErr}
 				if (Array.isArray(tableState.rows) && tableState.rows.length > 0) {
 					jsonObj = tableState.rows;
 				} else if (typeof tableState.sqlOutput === 'string' && tableState.sqlOutput.trim() !== '') {
-					return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(tableState.sqlOutput.trim())}</pre>`;
+					return [$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+						textOf(tableState.sqlOutput.trim())
+					)];
 				} else if (Array.isArray(tableState.rows)) {
 					jsonObj = tableState.rows;
 				}
@@ -17335,34 +17489,36 @@ ${rawErr}
 
 				const sampleForHeaders = rows.length > 50 ? [...pageRows, ...rows.slice(0, 30)] : rows;
 				const headers = Array.from(new Set(sampleForHeaders.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
-				const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
+				const paginationBar = this._renderOutputPaginationBar(stateKey, totalRows, safePage, safePageSize, 'records');
 
-				let tableHtml = paginationBar;
-				tableHtml += '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
-				tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
-				tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;">';
-				tableHtml += `<th style="padding: 8px 10px; font-weight: 600; color: #94a3b8; width: 36px; text-align: center;">#</th>`;
-				for (const h of headers) {
-					tableHtml += `<th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; text-transform: capitalize; white-space: nowrap;">${this._escapeHtml(h)}</th>`;
-				}
-				tableHtml += '</tr></thead><tbody>';
-				pageRows.forEach((r, idx) => {
+				const headerRow = $('tr', { style: 'background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;' },
+					$('th', { style: 'padding: 8px 10px; font-weight: 600; color: #94a3b8; width: 36px; text-align: center;' }, '#'),
+					...headers.map(h => $('th', { style: 'padding: 8px 12px; font-weight: 600; color: #a5b4fc; text-transform: capitalize; white-space: nowrap;' }, textOf(h)))
+				);
+				const bodyRows = pageRows.map((r, idx) => {
 					const globalIdx = startIdx + idx + 1;
 					const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
-					tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background 0.15s ease;">`;
-					tableHtml += `<td style="padding: 7px 10px; vertical-align: top; text-align: center; opacity: 0.55; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px;">${globalIdx}</td>`;
-					for (const h of headers) {
-						const cellVal = r[h] !== undefined && r[h] !== null ? (typeof r[h] === 'object' ? JSON.stringify(r[h]) : String(r[h])) : '';
-						const isLink = /^https?:\/\//i.test(cellVal.trim());
-						const displayVal = isLink
-							? `<a href="${this._escapeHtmlAttr(cellVal.trim())}" target="_blank" style="color: #38bdf8; text-decoration: underline;">${this._escapeHtml(cellVal.trim())}</a>`
-							: this._escapeHtml(cellVal);
-						tableHtml += `<td style="padding: 7px 12px; vertical-align: top; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.4;">${displayVal}</td>`;
-					}
-					tableHtml += '</tr>';
+					return $('tr', { style: `background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background 0.15s ease;` },
+						$('td', { style: 'padding: 7px 10px; vertical-align: top; text-align: center; opacity: 0.55; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px;' },
+							String(globalIdx)
+						),
+						...headers.map(h => {
+							const cellVal = r[h] !== undefined && r[h] !== null ? (typeof r[h] === 'object' ? JSON.stringify(r[h]) : String(r[h])) : '';
+							return $('td', { style: 'padding: 7px 12px; vertical-align: top; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.4;' },
+								this._renderResultCellValue(cellVal)
+							);
+						})
+					);
 				});
-				tableHtml += '</tbody></table></div>';
-				return tableHtml;
+				return [
+					...(paginationBar ? [paginationBar] : []),
+					$('div', { style: 'overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);' },
+						$('table.result-data-table', { style: 'width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;' },
+							$('thead', undefined, headerRow),
+							$('tbody', undefined, ...bodyRows)
+						)
+					)
+				];
 			}
 		}
 
@@ -17390,31 +17546,29 @@ ${rawErr}
 			const pageLines = dataLines.slice(startIdx, endIdx);
 
 			const headers = splitCells(headerLine);
-			const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'rows');
-			let tableHtml = paginationBar;
-			tableHtml += '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
-			tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
-			tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;">';
-			for (const h of headers) {
-				tableHtml += `<th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; white-space: nowrap;">${this._escapeHtml(h)}</th>`;
-			}
-			tableHtml += '</tr></thead><tbody>';
-			pageLines.forEach((line, idx) => {
+			const paginationBar = this._renderOutputPaginationBar(stateKey, totalRows, safePage, safePageSize, 'rows');
+			const headerRow = $('tr', { style: 'background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;' },
+				...headers.map(h => $('th', { style: 'padding: 8px 12px; font-weight: 600; color: #a5b4fc; white-space: nowrap;' }, textOf(h)))
+			);
+			const bodyRows = pageLines.map((line, idx) => {
 				const cells = splitCells(line);
 				const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
-				tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);">`;
+				const cellEls: HTMLElement[] = [];
 				for (let cIdx = 0; cIdx < headers.length; cIdx++) {
 					const cellVal = cells[cIdx] || '';
-					const isLink = /^https?:\/\//i.test(cellVal.trim());
-					const displayVal = isLink
-						? `<a href="${this._escapeHtmlAttr(cellVal.trim())}" target="_blank" style="color: #38bdf8; text-decoration: underline;">${this._escapeHtml(cellVal.trim())}</a>`
-						: this._escapeHtml(cellVal);
-					tableHtml += `<td style="padding: 7px 12px; vertical-align: top; line-height: 1.4;">${displayVal}</td>`;
+					cellEls.push($('td', { style: 'padding: 7px 12px; vertical-align: top; line-height: 1.4;' }, this._renderResultCellValue(cellVal)));
 				}
-				tableHtml += '</tr>';
+				return $('tr', { style: `background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);` }, ...cellEls);
 			});
-			tableHtml += '</tbody></table></div>';
-			return tableHtml;
+			return [
+				...(paginationBar ? [paginationBar] : []),
+				$('div', { style: 'overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);' },
+					$('table.result-data-table', { style: 'width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;' },
+						$('thead', undefined, headerRow),
+						$('tbody', undefined, ...bodyRows)
+					)
+				)
+			];
 		}
 
 		// 3. Fallback: Key-Value pairs check (only when text is not JSON and most non-empty lines are clean Key: Value pairs)
@@ -17428,25 +17582,35 @@ ${rawErr}
 				}
 			}
 			if (kvPairs.length >= 2 && kvPairs.length >= nonEmptyLines.length * 0.7) {
-				let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
-				tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
-				tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15);"><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; width: 30%;">Property</th><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc;">Value</th></tr></thead><tbody>';
-				kvPairs.forEach((kv, idx) => {
-					const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
-					tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);"><td style="padding: 7px 12px; font-weight: 500; opacity: 0.85;">${this._escapeHtml(kv.key)}</td><td style="padding: 7px 12px;">${this._escapeHtml(kv.val)}</td></tr>`;
-				});
-				tableHtml += '</tbody></table></div>';
-				return tableHtml;
+				return [
+					$('div', { style: 'overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);' },
+						$('table.result-data-table', { style: 'width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;' },
+							$('thead', undefined,
+								$('tr', { style: 'background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15);' },
+									$('th', { style: 'padding: 8px 12px; font-weight: 600; color: #a5b4fc; width: 30%;' }, 'Property'),
+									$('th', { style: 'padding: 8px 12px; font-weight: 600; color: #a5b4fc;' }, 'Value')
+								)
+							),
+							$('tbody', undefined, ...kvPairs.map((kv, idx) => {
+								const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
+								return $('tr', { style: `background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);` },
+									$('td', { style: 'padding: 7px 12px; font-weight: 500; opacity: 0.85;' }, textOf(kv.key)),
+									$('td', { style: 'padding: 7px 12px;' }, textOf(kv.val))
+								);
+							}))
+						)
+					)
+				];
 			}
 		}
 
 		// 4. Default fallback: Render as clean pre-formatted text (with pagination if huge)
-		return this._renderResultTextHtml(trimmed, page, pageSize, stateKey);
+		return this._renderResultText(trimmed, page, pageSize, stateKey);
 	}
 
-	private _renderResultJsonHtml(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): string {
+	private _renderResultJson(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): Node[] {
 		if (!text || !text.trim()) {
-			return '<span style="opacity: 0.4; font-style: italic;">No JSON content to display.</span>';
+			return [$('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No JSON content to display.')];
 		}
 		const trimmed = text.trim();
 		const safePageSize = Math.max(1, pageSize || 10);
@@ -17471,23 +17635,30 @@ ${rawErr}
 				const startIdx = (safePage - 1) * safePageSize;
 				const endIdx = Math.min(startIdx + safePageSize, totalRows);
 				const pageSlice = arr.slice(startIdx, endIdx);
-				const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
+				const paginationBar = this._renderOutputPaginationBar(stateKey, totalRows, safePage, safePageSize, 'records');
 				const formatted = JSON.stringify(pageSlice, null, 2);
 				const noteFooter = totalRows > safePageSize
 					? `\n// ... Showing records ${startIdx + 1}\u2013${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.`
 					: '';
-				return `${paginationBar}<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted + noteFooter)}</pre>`;
+				return [
+					...(paginationBar ? [paginationBar] : []),
+					$('pre', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);' },
+						textOf(formatted + noteFooter)
+					)
+				];
 			}
 			const formatted = JSON.stringify(parsed, null, 2);
-			return `<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted)}</pre>`;
+			return [$('pre', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);' },
+				textOf(formatted)
+			)];
 		}
 
-		return this._renderResultTextHtml(trimmed, page, pageSize, stateKey);
+		return this._renderResultText(trimmed, page, pageSize, stateKey);
 	}
 
-	private _renderResultTextHtml(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): string {
+	private _renderResultText(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): Node[] {
 		if (!text || !text.trim()) {
-			return '<span style="opacity: 0.4; font-style: italic;">No text content.</span>';
+			return [$('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No text content.')];
 		}
 		const trimmed = text.trim();
 		const safePageSize = Math.max(1, pageSize || 10);
@@ -17501,16 +17672,23 @@ ${rawErr}
 					const startIdx = (safePage - 1) * safePageSize;
 					const endIdx = Math.min(startIdx + safePageSize, totalRows);
 					const pageSlice = parsed.slice(startIdx, endIdx);
-					const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
+					const paginationBar = this._renderOutputPaginationBar(stateKey, totalRows, safePage, safePageSize, 'records');
 					const formatted = JSON.stringify(pageSlice, null, 2);
 					const noteFooter = totalRows > safePageSize
 						? `\n\n... [Showing records ${startIdx + 1}\u2013${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.]`
 						: '';
-					return `${paginationBar}<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(formatted + noteFooter)}</pre>`;
+					return [
+						...(paginationBar ? [paginationBar] : []),
+						$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+							textOf(formatted + noteFooter)
+						)
+					];
 				}
 			} catch { }
 		}
-		return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(trimmed)}</pre>`;
+		return [$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+			textOf(trimmed)
+		)];
 	}
 
 	private _exportResultToCsv(rawText: string, fieldKey: string): void {
@@ -17675,7 +17853,19 @@ ${interpolatedPrompt}`;
 		return [];
 	}
 
+	/**
+	 * Renders the editor's small markdown dialect into DOM nodes. This is the only place where an HTML string reaches the
+	 * DOM: `_markdownToHtml` HTML-escapes the source text first and only adds its own fixed tags.
+	 */
+	private _renderMarkdown(md: string): Node[] {
+		const html = this._markdownToHtml(md);
+		const holder = document.createElement('div');
+		holder.innerHTML = ttPolicy ? ttPolicy.createHTML(html) as unknown as string : html;
+		return Array.from(holder.childNodes);
+	}
+
 	private _markdownToHtml(md: string): string {
+
 		if (!md) {
 			return '<p style="opacity: 0.5; font-style: italic;">No content available</p>';
 		}
@@ -17719,14 +17909,11 @@ ${interpolatedPrompt}`;
 				continue;
 			}
 			const card = templatePart(this._container, `[data-field-id="${CSS.escape(String(f.id))}"]`) as HTMLElement | null;
-			const html = this._renderWorkflowRuntimeBlockHtml(f.__wfRuntime);
-			if (card && html && !templatePart(card, ':scope > .wf-runtime-block')) {
-				const holder = document.createElement('div');
-				this._setElementHTML(holder, html);
-				while (holder.firstElementChild) {
-					card.appendChild(holder.firstElementChild);
-				}
+			const runtimeBlock = this._renderWorkflowRuntimeBlock(f.__wfRuntime);
+			if (card && runtimeBlock && !templatePart(card, ':scope > .wf-runtime-block')) {
+				card.appendChild(runtimeBlock);
 			}
+
 		}
 	}
 
@@ -17748,37 +17935,48 @@ ${interpolatedPrompt}`;
 	}
 
 	/** Full-width box with a last-run value and a one-click Copy (copies the complete value, not the truncated view). */
-	private _renderWorkflowValueBoxHtml(caption: string, value: unknown): string {
+	private _renderWorkflowValueBox(caption: string, value: unknown): HTMLElement {
 		const full = value === undefined ? '' : this._formatWorkflowRuntimeValue(value, 500000);
 		const body = value === undefined
-			? '<div class="wf-value-empty">Not run yet</div>'
-			: `<pre class="wf-step-code wf-value-pre">${this._escapeHtml(this._formatWorkflowRuntimeValue(value, 6000))}</pre><textarea class="wf-value-raw" hidden>${this._escapeHtml(full)}</textarea>`;
-		return `
-			<div class="wf-value-box">
-				<div class="wf-value-head">
-					<span>${this._escapeHtml(caption)}</span>
-					${value === undefined ? '' : '<button type="button" class="wf-value-copy-btn" title="Copy the full value"><span class="codicon codicon-copy"></span><span>Copy</span></button>'}
-				</div>
-				${body}
-			</div>
-		`;
+			? [$('div.wf-value-empty', undefined, 'Not run yet')]
+			: [
+				$('pre.wf-step-code.wf-value-pre', undefined, textOf(this._formatWorkflowRuntimeValue(value, 6000))),
+				$<HTMLTextAreaElement>('textarea.wf-value-raw', { hidden: '' }, textOf(full))
+			];
+		return $('div.wf-value-box', undefined,
+			$('div.wf-value-head', undefined,
+				$('span', undefined, textOf(caption)),
+				...(value === undefined ? [] : [
+					$<HTMLButtonElement>('button.wf-value-copy-btn', { type: 'button', title: 'Copy the full value' },
+						$('span.codicon.codicon-copy'),
+						$('span', undefined, 'Copy')
+					)
+				])
+			),
+			...body
+		);
 	}
 
-	/** "Last run" block appended to a node-view card (value + error), or '' when the capsule has not run. */
-	private _renderWorkflowRuntimeBlockHtml(runtime: IWfStepRuntime | undefined): string {
+	/** "Last run" block appended to a node-view card (value + error), or `undefined` when the capsule has not run. */
+	private _renderWorkflowRuntimeBlock(runtime: IWfStepRuntime | undefined): HTMLElement | undefined {
 		if (!runtime || (runtime.value === undefined && !runtime.error)) {
-			return '';
+			return undefined;
 		}
-		const err = runtime.error ? `<div style="margin-top: 6px; padding: 6px 10px; border-radius: 6px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.35); color: #fda4af; font-size: 11.5px; white-space: pre-wrap; word-break: break-word;">\u2717 ${this._escapeHtml(String(runtime.error))}</div>` : '';
-		const val = runtime.value !== undefined ? this._renderWorkflowValueBoxHtml('Last Run Value', runtime.value) : '';
-		return `<div class="wf-runtime-block" style="margin-top: 12px;">${val}${err}</div>`;
+		const err = runtime.error ? $('div', { style: 'margin-top: 6px; padding: 6px 10px; border-radius: 6px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.35); color: #fda4af; font-size: 11.5px; white-space: pre-wrap; word-break: break-word;' },
+			'\u2717 ',
+			textOf(String(runtime.error))
+		) : undefined;
+		const val = runtime.value !== undefined ? this._renderWorkflowValueBox('Last Run Value', runtime.value) : undefined;
+		return $('div.wf-runtime-block', { style: 'margin-top: 12px;' }, ...(val ? [val] : []), ...(err ? [err] : []));
 	}
 
-	private _renderWorkflowStepCardHtml(step: IWfStepInfo, label: string, rawKey: string, fieldId: string, stepCardClass: string, stepBadgeHtml: string, runtime?: IWfStepRuntime): string {
-		const esc = (v: unknown) => this._escapeHtml(String(v ?? ''));
+	private _renderWorkflowStepCard(step: IWfStepInfo, label: string, rawKey: string, fieldId: string, stepCardClass: string, stepBadge: Node[], runtime?: IWfStepRuntime): HTMLElement {
 		const kindLabel = String(step?.kindLabel || step?.kind || 'Step');
-		const target = step?.targetVariable ? `<span style="font-size: 0.78em; opacity: 0.75; font-family: var(--vscode-editor-font-family, monospace);">→ ${esc(step.targetVariable)}</span>` : '';
-		let body = '';
+		const target = step?.targetVariable ? $('span', { style: 'font-size: 0.78em; opacity: 0.75; font-family: var(--vscode-editor-font-family, monospace);' },
+			'\u2192 ',
+			textOf(step.targetVariable)
+		) : undefined;
+		let body: Node[];
 		const sw = step?.subWorkflow;
 		if (sw) {
 			const inputs: Record<string, string> = sw.inputs || {};
@@ -17792,17 +17990,19 @@ ${interpolatedPrompt}`;
 				}
 			}
 			// Stacked items (name → variable / expression → full-width last-run value), not a 3-column table
-			const ioItem = (title: string, subLabel: string, subValue: string, value: unknown) => `
-				<div class="wf-io-item">
-					<div class="wf-io-title">${esc(title)}</div>
-					<div class="wf-io-sub">${subLabel} ${subValue ? `<code>${esc(subValue)}</code>` : '<span style="opacity: 0.45; font-style: italic;">not set</span>'}</div>
-					${hasRun ? this._renderWorkflowValueBoxHtml('Last run', value) : ''}
-				</div>
-			`;
+			const ioItem = (title: string, subLabel: string, subValue: string, value: unknown) => $('div.wf-io-item', undefined,
+				$('div.wf-io-title', undefined, textOf(title)),
+				$('div.wf-io-sub', undefined,
+					subLabel,
+					' ',
+					subValue ? $('code', undefined, textOf(subValue)) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'not set')
+				),
+				...(hasRun ? [this._renderWorkflowValueBox('Last run', value)] : [])
+			);
 			const inputRows = inputNames.map(name => {
 				const def = inputDefs.find(d => d.name === name);
 				return ioItem(def?.label || name, 'Passed in:', String(inputs[name] ?? def?.defaultValue ?? ''), lastInputs?.[name]);
-			}).join('');
+			});
 			const outputDefs: Array<{ label: string; varName: string }> = Array.isArray(sw.outputDefs) ? sw.outputDefs : [];
 			const outValue = runtime?.value;
 			const outputValueOf = (varName: string): unknown => {
@@ -17811,46 +18011,65 @@ ${interpolatedPrompt}`;
 				}
 				return outputDefs.length === 1 ? outValue : undefined;
 			};
-			const outputRows = outputDefs.map(o => ioItem(o.label || o.varName, 'Variable:', o.varName, outputValueOf(o.varName))).join('');
-			body = `
-				<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
-					<div style="font-size: 12px;">Calls <b>${esc(sw.name || sw.id)}</b></div>
-					${sw.id ? `<button type="button" class="btn-secondary wf-step-open-subworkflow" data-sub-workflow-id="${this._escapeHtmlAttr(String(sw.id))}" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;"><span class="codicon codicon-type-hierarchy-sub" style="font-size: 12px;"></span><span>Show flowchart</span></button>` : ''}
-				</div>
-				<div style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; opacity: 0.6; margin: 6px 0 4px;">Inputs</div>
-				${inputRows || '<div style="font-size: 12px; opacity: 0.5; font-style: italic;">No inputs</div>'}
-				<div style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; opacity: 0.6; margin: 12px 0 4px;">Outputs</div>
-				${outputRows || '<div style="font-size: 12px; opacity: 0.5; font-style: italic;">No outputs</div>'}
-				${runtime?.error ? this._renderWorkflowRuntimeBlockHtml({ error: runtime.error }) : ''}
-			`;
+			const outputRows = outputDefs.map(o => ioItem(o.label || o.varName, 'Variable:', o.varName, outputValueOf(o.varName)));
+			const runtimeErrorBlock = runtime?.error ? this._renderWorkflowRuntimeBlock({ error: runtime.error }) : undefined;
+			body = [
+				$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;' },
+					$('div', { style: 'font-size: 12px;' },
+						'Calls ',
+						$('b', undefined, textOf(sw.name || sw.id))
+					),
+					...(sw.id ? [
+						$<HTMLButtonElement>('button.btn-secondary.wf-step-open-subworkflow', { type: 'button', 'data-sub-workflow-id': textOf(String(sw.id)), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;' },
+							$('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 12px;' }),
+							$('span', undefined, 'Show flowchart')
+						)
+					] : [])
+				),
+				$('div', { style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; opacity: 0.6; margin: 6px 0 4px;' }, 'Inputs'),
+				...(inputRows.length ? inputRows : [$('div', { style: 'font-size: 12px; opacity: 0.5; font-style: italic;' }, 'No inputs')]),
+				$('div', { style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; opacity: 0.6; margin: 12px 0 4px;' }, 'Outputs'),
+				...(outputRows.length ? outputRows : [$('div', { style: 'font-size: 12px; opacity: 0.5; font-style: italic;' }, 'No outputs')]),
+				...(runtimeErrorBlock ? [runtimeErrorBlock] : [])
+			];
 		} else {
 			const code = String(step?.code || '').trim();
-			body = (code ? `<pre class="wf-step-code">${esc(code)}</pre>` : '<div style="font-size: 12px; opacity: 0.5; font-style: italic;">No code</div>') + this._renderWorkflowRuntimeBlockHtml(runtime);
+			const runtimeBlock = this._renderWorkflowRuntimeBlock(runtime);
+			body = [
+				code ? $('pre.wf-step-code', undefined, textOf(code)) : $('div', { style: 'font-size: 12px; opacity: 0.5; font-style: italic;' }, 'No code'),
+				...(runtimeBlock ? [runtimeBlock] : [])
+			];
 		}
-		return `
-			<div class="section-card custom-property-card wf-step-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldId)}" data-field-label="${this._escapeHtmlAttr(label)}" data-field-type="${this._escapeHtmlAttr(String(step?.kind || 'step'))}"${step?.disabled ? ' style="opacity: 0.6;"' : ''}>
-				<div class="section-title" style="flex-wrap: wrap; gap: 8px;">
-					<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;">
-						<span>${esc(label)}</span>
-						<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(45, 212, 191, 0.16); color: #5eead4; font-weight: 700; text-transform: uppercase;">${esc(kindLabel)}</span>
-						${step?.disabled ? '<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; font-weight: 700; text-transform: uppercase;">Disabled</span>' : ''}
-						${target}
-					</div>
-					<div style="display: flex; align-items: center; gap: 6px;">${stepBadgeHtml}</div>
-				</div>
-				${body}
-			</div>
-		`;
+		return $('div', { class: `section-card custom-property-card wf-step-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldId), 'data-field-label': textOf(label), 'data-field-type': textOf(String(step?.kind || 'step')), style: step?.disabled ? 'opacity: 0.6;' : undefined },
+			$('div.section-title', { style: 'flex-wrap: wrap; gap: 8px;' },
+				$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;' },
+					$('span', undefined, textOf(label)),
+					$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(45, 212, 191, 0.16); color: #5eead4; font-weight: 700; text-transform: uppercase;' },
+						textOf(kindLabel)
+					),
+					...(step?.disabled ? [
+						$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; font-weight: 700; text-transform: uppercase;' },
+							'Disabled'
+						)
+					] : []),
+					' ',
+					...(target ? [target] : [])
+				),
+				$('div', { style: 'display: flex; align-items: center; gap: 6px;' }, ...stepBadge)
+			),
+			...body
+		);
 	}
 
-	private _generateHtml(
+
+	private _buildContent(
 		data: IParsedTicketData,
 		workLog: string,
 		attachments: string[],
 		customModule?: ITicketTemplateModule | null,
 		agents: IAgentItem[] = [],
 		allTickets: ILinkableTicket[] = []
-	): string {
+	): Array<Node | string> {
 		const typeUpper = (data.ticketType || 'task').toUpperCase();
 		// A workflow node shown like a ticket (from the Workflow Outline): read-only, no template / ticket actions
 		const wfNode = this._isPreviewMode ? (customModule?.__wfNode as { nodeLabel: string; workflowName: string } | undefined) : undefined;
@@ -17911,32 +18130,13 @@ ${interpolatedPrompt}`;
 		};
 		const pColor = pColors[(data.priority || 'medium').toLowerCase()] || '#94a3b8';
 
-		// 4. Attachments HTML
-		let attachmentsHtml = '';
-		if (attachments.length === 0) {
-			attachmentsHtml = '<p style="opacity: 0.45; font-style: italic; font-size: 0.88em; margin: 8px 0;">No attachments linked yet.</p>';
-		} else {
-			attachmentsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-top: 10px;">';
-			for (const file of attachments) {
-				attachmentsHtml += `
-					<div class="attachment-card" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 8px 12px; border-radius: 6px;">
-						<div class="attachment-card-download" data-file-name="${this._escapeHtmlAttr(file)}" style="display: flex; align-items: center; gap: 8px; overflow: hidden; cursor: pointer; flex: 1;" title="Download attachment">
-							<span style="font-size: 0.88em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${this._escapeHtmlAttr(file)}</span>
-						</div>
-						<span class="delete-attachment" data-file-name="${this._escapeHtmlAttr(file)}" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">\u2715</span>
-					</div>
-				`;
-			}
-			attachmentsHtml += '</div>';
-		}
-
 		// 5. Timeline HTML
-		let workLogHtml = '';
+		let workLogContent: HTMLElement;
 		const logsList = workLog.split(/\r?\n##\s+/);
 		if (logsList.length <= 1 && !workLog.trim().startsWith('##')) {
-			workLogHtml = '<p style="opacity: 0.45; font-style: italic; font-size: 0.88em; margin: 8px 0;">No work logs recorded yet.</p>';
+			workLogContent = $('p', { style: 'opacity: 0.45; font-style: italic; font-size: 0.88em; margin: 8px 0;' }, 'No work logs recorded yet.');
 		} else {
-			workLogHtml = '<div class="timeline" style="border-left: 2px solid rgba(255,255,255,0.08); margin-left: 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 16px; margin-top: 15px; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;">';
+			const timeline = workLogContent = $('div.timeline', { style: 'border-left: 2px solid rgba(255,255,255,0.08); margin-left: 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 16px; margin-top: 15px; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;' });
 			for (let entry of logsList) {
 				entry = entry.trim();
 				if (!entry) { continue; }
@@ -17956,7 +18156,7 @@ ${interpolatedPrompt}`;
 				const body = lines.slice(1).join('\n').trim();
 				const bodyLines = body ? body.split('\n') : [];
 				const isLongWorkLog = body.length > 360 || bodyLines.length > 6;
-				const bodyHtml = this._markdownToHtml(body);
+				const renderedBody = this._renderMarkdown(body);
 
 				if (isLongWorkLog) {
 					let previewRaw = bodyLines.slice(0, 5).join('\n');
@@ -17967,33 +18167,43 @@ ${interpolatedPrompt}`;
 					if (openBackticks % 2 !== 0) {
 						previewRaw += '`';
 					}
-					const previewHtml = this._markdownToHtml(previewRaw + ' ...');
-					workLogHtml += `
-						<div class="timeline-item" style="position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;">
-							<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
-							<div style="font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;">${header}</div>
-							<div class="timeline-body worklog-preview-content" style="font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">${previewHtml}</div>
-							<div class="timeline-body worklog-full-content" style="display: none; font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">${bodyHtml}</div>
-							<div style="margin-top: 6px;">
-								<button type="button" class="worklog-expand-toggle-btn" data-expanded="false" data-char-count="${body.length}" style="font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); cursor: pointer;">Show Full Log (${body.length} chars)</button>
-							</div>
-						</div>
-					`;
+					const renderedPreview = this._renderMarkdown(previewRaw + ' ...');
+					timeline.append($('div.timeline-item', { style: 'position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;' },
+						$('div.timeline-dot', { style: 'position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);' }),
+						$('div', { style: 'font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;' },
+							header
+						),
+						$('div.timeline-body.worklog-preview-content', { style: 'font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
+							...renderedPreview
+						),
+						$('div.timeline-body.worklog-full-content', { style: 'display: none; font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
+							...renderedBody
+						),
+						$('div', { style: 'margin-top: 6px;' },
+							$<HTMLButtonElement>('button.worklog-expand-toggle-btn', { type: 'button', 'data-expanded': 'false', 'data-char-count': `${body.length}`, style: 'font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); cursor: pointer;' },
+								'Show Full Log (',
+								String(body.length),
+								' chars)'
+							)
+						)
+					));
 				} else {
-					workLogHtml += `
-						<div class="timeline-item" style="position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;">
-							<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
-							<div style="font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;">${header}</div>
-							<div class="timeline-body" style="font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">${bodyHtml}</div>
-						</div>
-					`;
+					timeline.append($('div.timeline-item', { style: 'position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;' },
+						$('div.timeline-dot', { style: 'position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);' }),
+						$('div', { style: 'font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;' },
+							header
+						),
+						$('div.timeline-body', { style: 'font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
+							...renderedBody
+						)
+					));
 				}
 			}
-			workLogHtml += '</div>';
 		}
 
 		// 6. Custom Fields Section
-		let customFieldsHtml = '';
+		const customFieldsContent: Node[] = [];
+
 		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
 		const rawCustomMap = new Map<string, unknown>(Object.entries(data.customMetadata || {}));
 		for (const k of internalLifecycleKeys) {
@@ -18292,14 +18502,17 @@ ${interpolatedPrompt}`;
 					(r.fieldId && rawKey && r.fieldId.toLowerCase() === rawKey.toLowerCase())
 				);
 				const stepCardClass = lastStepRes ? (lastStepRes.status === 'success' ? ' ticket-step-success' : ' ticket-step-failed') : '';
-				const stepBadgeHtml = lastStepRes ? `
-					<div class="ticket-step-badge-container" style="display: inline-flex; align-items: center; margin-left: auto; margin-right: 8px;">
-						<span class="ticket-step-badge ${lastStepRes.status}" ${lastStepRes.error ? `title="${this._escapeHtmlAttr(lastStepRes.error)}"` : ''}>
-							<span class="codicon codicon-${lastStepRes.status === 'success' ? 'check' : 'error'}" style="font-size: 11px;"></span>
-							<span>${lastStepRes.status === 'success' ? `Done (${lastStepRes.durationMs}ms)` : `Failed (${lastStepRes.durationMs}ms)`}</span>
-						</span>
-					</div>
-				` : '';
+				const stepBadge = (): HTMLElement[] => lastStepRes ? [$('div.ticket-step-badge-container', { style: 'display: inline-flex; align-items: center; margin-left: auto; margin-right: 8px;' },
+					$('span', { class: `ticket-step-badge ${lastStepRes.status}`, title: lastStepRes.error ? textOf(lastStepRes.error) : undefined },
+						' ',
+						$('span', { class: `codicon codicon-${lastStepRes.status === 'success' ? 'check' : 'error'}`, style: 'font-size: 11px;' }),
+						' ',
+						$('span', undefined,
+							...(lastStepRes.status === 'success' ? ['Done (', String(lastStepRes.durationMs), 'ms)'] : ['Failed (', String(lastStepRes.durationMs), 'ms)'])
+						),
+						' '
+					)
+				)] : [];
 
 				// 1:1 DEDICATED ATTACHMENT COMPONENT - ATOMIC, NEVER TREATED AS DYNAMIC LIST OR CONTAINER
 				const isAttachmentField = fType === 'attachment' ||
@@ -18326,50 +18539,58 @@ ${interpolatedPrompt}`;
 						parsedAttachmentList = [v as { name: string; size?: number }];
 					}
 
-					let fileItemsHtml = '';
+					let fileItemsContent: HTMLElement;
 					const filesToRender: Array<{ name: string; size?: number }> = parsedAttachmentList || (v && String(v).trim() !== '' && String(v).trim() !== 'None' ? [{ name: String(v) }] : []);
 					if (filesToRender.length === 0) {
-						fileItemsHtml = '<div style="opacity: 0.5; font-style: italic; font-size: 0.88em; padding: 6px 0;">No attachments linked to this field yet.</div>';
+						fileItemsContent = $('div', { style: 'opacity: 0.5; font-style: italic; font-size: 0.88em; padding: 6px 0;' }, 'No attachments linked to this field yet.');
 					} else {
-						fileItemsHtml = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px;">';
+						fileItemsContent = $('div', { style: 'display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px;' });
 						for (const f of filesToRender) {
 							const isImg = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.name);
 							const isPdf = /\.pdf$/i.test(f.name);
 							const iconSvg = isImg
-								? '<svg width="13" height="13" viewBox="0 0 16 16" fill="#10b981"><path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v8.793l3.146-3.147a.5.5 0 0 1 .708 0L8 10.293l3.646-3.647a.5.5 0 0 1 .708 0L14 8.293V2.5a.5.5 0 0 0-.5-.5h-11zm11.5 7.707-2.146-2.147-3.646 3.647a.5.5 0 0 1-.708 0L5.354 9.06 2 12.414V13.5a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-3.793z"/></svg>'
+								? $.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: '#10b981' },
+									$.SVG('path', { d: 'M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v8.793l3.146-3.147a.5.5 0 0 1 .708 0L8 10.293l3.646-3.647a.5.5 0 0 1 .708 0L14 8.293V2.5a.5.5 0 0 0-.5-.5h-11zm11.5 7.707-2.146-2.147-3.646 3.647a.5.5 0 0 1-.708 0L5.354 9.06 2 12.414V13.5a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-3.793z' })
+								)
 								: (isPdf
-									? '<svg width="13" height="13" viewBox="0 0 16 16" fill="#ef4444"><path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/></svg>'
-									: '<svg width="13" height="13" viewBox="0 0 16 16" fill="#10b981"><path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/></svg>');
+									? $.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: '#ef4444' },
+										$.SVG('path', { d: 'M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z' })
+									)
+									: $.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: '#10b981' },
+										$.SVG('path', { d: 'M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z' })
+									));
 
-							fileItemsHtml += `
-								<div class="attachment-card-download" data-file-name="${this._escapeHtmlAttr(f.name)}" style="display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease;" title="Download attachment">
-									${iconSvg}
-									<span style="font-size: 0.9em; font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this._escapeHtmlAttr(f.name)}</span>
-									${f.size ? `<span style="font-size: 0.75em; opacity: 0.5;">(${(f.size / 1024).toFixed(0)} KB)</span>` : ''}
-								</div>
-							`;
+							fileItemsContent.append($('div.attachment-card-download', { 'data-file-name': textOf(f.name), style: 'display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease;', title: 'Download attachment' },
+								iconSvg,
+								$('span', { style: 'font-size: 0.9em; font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
+									textOf(f.name)
+								),
+								...(f.size ? [
+									$('span', { style: 'font-size: 0.75em; opacity: 0.5;' }, '(', (f.size / 1024).toFixed(0), ' KB)')
+								] : [])
+							));
 						}
-						fileItemsHtml += '</div>';
 					}
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;">Attachment</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="attachment" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(parsedAttachmentList ? JSON.stringify(parsedAttachmentList) : String(v || ''))}" title="Edit ${k} with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div class="custom-field-view">
-								${fileItemsHtml}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;' },
+									'Attachment'
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'attachment', 'data-ai-field-label': k, 'data-ai-current-value': textOf(parsedAttachmentList ? JSON.stringify(parsedAttachmentList) : String(v || '')), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div.custom-field-view', undefined, fileItemsContent)
+
+					));
 				} else if (fType === 'dynamic_list' || ((fType === 'text' || !fType) && typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']'))) {
 					let parsedArray: IJsonObject[] | null = null;
 					if (typeof v === 'string' && v.trim().startsWith('[')) {
@@ -18386,133 +18607,141 @@ ${interpolatedPrompt}`;
 					}
 
 					// Dynamic List Container
-					let subCardsViewHtml = '';
+					const subCardsView: HTMLElement[] = [];
 
 					if (!parsedArray || parsedArray.length === 0) {
-						subCardsViewHtml = '<div style="opacity: 0.45; font-style: italic; padding: 6px 0;">No entries in this list.</div>';
+						subCardsView.push($('div', { style: 'opacity: 0.45; font-style: italic; padding: 6px 0;' }, 'No entries in this list.'));
 					} else {
 						parsedArray.forEach((item, idx: number) => {
 							const idxNum = item._index || (idx + 1);
 							const itemTitle = item._title || item.title || item.name || item.company || `Entry #${idxNum}`;
 
-							let itemSubFieldsView = '';
+							const itemSubFieldsView: Node[] = [];
 							const itemEntries = Object.entries(item).filter(([subK]) => subK !== '_index' && subK !== '_title');
 
 							if (itemEntries.length === 0) {
-								itemSubFieldsView = '<div style="opacity: 0.5; font-size: 0.85em;">No sub-fields recorded.</div>';
+								itemSubFieldsView.push($('div', { style: 'opacity: 0.5; font-size: 0.85em;' }, 'No sub-fields recorded.'));
 							} else {
 								for (const [subK, subValRaw] of itemEntries) {
 									const subVal = String(subValRaw || '');
 									const isDateOrRange = subVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(subVal);
 									const isLong = subVal.length > 80 || subVal.includes('\n');
 
-									itemSubFieldsView += `
-										<div class="dynamic-subfield-row" style="margin-bottom: 6px; display: flex; flex-direction: ${isLong ? 'column' : 'row'}; gap: ${isLong ? '4px' : '8px'}; align-items: ${isLong ? 'flex-start' : 'center'}; justify-content: space-between;">
-											<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-												<span style="font-size: 0.82em; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em;">${subK}:</span>
-												<div class="dynamic-subfield-val" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-item-idx="${idx}" data-sub-key="${this._escapeHtmlAttr(subK)}" data-multiline="false" style="cursor: text; display: inline-block;" title="Click to edit ${this._escapeHtmlAttr(subK)} manually">
-													${isDateOrRange ? `
-														<span class="range-badge" style="font-size: 0.82em; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 4px;">
-															${subVal}
-														</span>
-													` : `
-														<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
-													`}
-												</div>
-											</div>
-											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}/${idxNum}/${subK}" data-ai-field-type="${isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')}" data-ai-field-label="${subK}" data-ai-current-value="${this._escapeHtmlAttr(subVal)}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
-												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-											</button>
-										</div>
-										${isLong ? `
-											<div class="dynamic-subfield-val desc-content-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-item-idx="${idx}" data-sub-key="${this._escapeHtmlAttr(subK)}" data-multiline="true" style="margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px; cursor: text;" title="Click to edit ${this._escapeHtmlAttr(subK)} manually">
-												${this._markdownToHtml(subVal)}
-											</div>
-										` : ''}
-									`;
+									itemSubFieldsView.push(
+										$('div.dynamic-subfield-row', { style: `margin-bottom: 6px; display: flex; flex-direction: ${isLong ? 'column' : 'row'}; gap: ${isLong ? '4px' : '8px'}; align-items: ${isLong ? 'flex-start' : 'center'}; justify-content: space-between;` },
+											$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+												$('span', { style: 'font-size: 0.82em; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em;' }, subK, ':'),
+												$('div.dynamic-subfield-val', { 'data-field-key': textOf(rawKey), 'data-item-idx': `${idx}`, 'data-sub-key': textOf(subK), 'data-multiline': 'false', style: 'cursor: text; display: inline-block;', title: `Click to edit ${textOf(subK)} manually` },
+													isDateOrRange ? $('span.range-badge', { style: 'font-size: 0.82em; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 4px;' },
+														subVal
+													) : $('span', { style: 'font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);' },
+														subVal || $('span', { style: 'opacity:0.4; font-style:italic;' }, 'None')
+													)
+												)
+											),
+											$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}/${idxNum}/${subK}`, 'data-ai-field-type': (isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')), 'data-ai-field-label': subK, 'data-ai-current-value': textOf(subVal), title: `Edit ${subK} with AI`, style: 'padding: 2px 5px; font-size: 0.75em;' },
+												$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+													$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+												)
+											)
+										),
+										...(isLong ? [
+											$('div.dynamic-subfield-val.desc-content-box', { 'data-field-key': textOf(rawKey), 'data-item-idx': `${idx}`, 'data-sub-key': textOf(subK), 'data-multiline': 'true', style: 'margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px; cursor: text;', title: `Click to edit ${textOf(subK)} manually` },
+												...this._renderMarkdown(subVal)
+											)
+										] : [])
+									);
 								}
 							}
 
-							subCardsViewHtml += `
-								<div class="dynamic-sub-card" style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 8px; margin-bottom: 10px;">
-										<div style="display: flex; align-items: center; gap: 8px;">
-											<span style="font-size: 0.75em; font-weight: 700; background: rgba(56,189,248,0.18); color: #38bdf8; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;">#${idxNum}</span>
-											<span style="font-size: 0.95em; font-weight: 600; color: var(--vscode-editor-foreground);">${itemTitle}</span>
-										</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}/${idxNum}" data-ai-field-type="composite" data-ai-field-label="${itemTitle}" data-ai-current-value="${this._escapeHtmlAttr(itemTitle)}" title="Edit ${itemTitle} with AI">
-											<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										</button>
-									</div>
-									<div class="subcard-body">
-										${itemSubFieldsView}
-									</div>
-								</div>
-							`;
+							subCardsView.push($('div.dynamic-sub-card', { style: 'background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 8px; margin-bottom: 10px;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+										$('span', { style: 'font-size: 0.75em; font-weight: 700; background: rgba(56,189,248,0.18); color: #38bdf8; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;' },
+											'#',
+											String(idxNum)
+										),
+										$('span', { style: 'font-size: 0.95em; font-weight: 600; color: var(--vscode-editor-foreground);' }, String(itemTitle))
+									),
+									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}/${idxNum}`, 'data-ai-field-type': 'composite', 'data-ai-field-label': `${itemTitle}`, 'data-ai-current-value': textOf(itemTitle), title: `Edit ${itemTitle} with AI` },
+										$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+										)
+									)
+								),
+								$('div.subcard-body', undefined, ...itemSubFieldsView)
+							));
 						});
 					}
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 700; text-transform: uppercase;">Dynamic List</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="dynamic_list" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(typeof v === 'string' ? v : JSON.stringify(v))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view">
-								${subCardsViewHtml}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 700; text-transform: uppercase;' },
+									'Dynamic List'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'dynamic_list', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(v)), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', undefined, ...subCardsView)
+
+					));
 				} else if (fType === 'switch' || fType === 'boolean' || k.toLowerCase().includes('flag')) {
 					const isChecked = String(v).trim().toLowerCase() === 'true';
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: ${isChecked ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)'}; color: ${isChecked ? '#10b981' : '#94a3b8'}; font-weight: 700; text-transform: uppercase;">Switch</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="switch" data-ai-field-label="${k}" data-ai-current-value="${isChecked ? 'true' : 'false'}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view custom-switch-view" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-current-val="${isChecked ? 'true' : 'false'}" style="display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;" title="Click to toggle ${this._escapeHtmlAttr(k)}">
-								<div style="width: 36px; height: 20px; border-radius: 10px; background: ${isChecked ? '#10b981' : 'rgba(255,255,255,0.14)'}; position: relative; border: 1px solid ${isChecked ? '#059669' : 'rgba(255,255,255,0.2)'};">
-									<div style="width: 14px; height: 14px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: ${isChecked ? '18px' : '2px'}; box-shadow: 0 1px 3px rgba(0,0,0,0.4);"></div>
-								</div>
-								<span style="font-size: 0.9em; font-weight: 600; color: ${isChecked ? '#10b981' : '#94a3b8'};">
-									${isChecked ? 'ON (true)' : 'OFF (false)'}
-								</span>
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: `font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: ${isChecked ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)'}; color: ${isChecked ? '#10b981' : '#94a3b8'}; font-weight: 700; text-transform: uppercase;` },
+									'Switch'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'switch', 'data-ai-field-label': k, 'data-ai-current-value': (isChecked ? 'true' : 'false'), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view.custom-switch-view', { 'data-field-key': textOf(rawKey), 'data-current-val': (isChecked ? 'true' : 'false'), style: 'display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;', title: `Click to toggle ${textOf(k)}` },
+							$('div', { style: `width: 36px; height: 20px; border-radius: 10px; background: ${isChecked ? '#10b981' : 'rgba(255,255,255,0.14)'}; position: relative; border: 1px solid ${isChecked ? '#059669' : 'rgba(255,255,255,0.2)'};` },
+								$('div', { style: `width: 14px; height: 14px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: ${isChecked ? '18px' : '2px'}; box-shadow: 0 1px 3px rgba(0,0,0,0.4);` })
+							),
+							$('span', { style: `font-size: 0.9em; font-weight: 600; color: ${isChecked ? '#10b981' : '#94a3b8'};` },
+								' ',
+								isChecked ? 'ON (true)' : 'OFF (false)',
+								' '
+							)
+						)
+					));
 				} else if (fType === 'select' || fType === 'single_select') {
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Select</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="select" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(fieldItem.options || []))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view custom-select-view" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-select-options="${this._escapeHtmlAttr(JSON.stringify(fieldItem.options || []))}" data-current-val="${this._escapeHtmlAttr(String(v || ''))}" style="padding: 4px 0; cursor: pointer;" title="Click to change ${this._escapeHtmlAttr(k)}">
-								${v ? `
-									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;">
-										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>
-										${v}
-									</span>
-								` : '<span style="opacity: 0.45; font-style: italic;">No option selected. Click to select.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
+									'Select'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'select', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view.custom-select-view', { 'data-field-key': textOf(rawKey), 'data-select-options': textOf(JSON.stringify(fieldItem.options || [])), 'data-current-val': textOf(String(v || '')), style: 'padding: 4px 0; cursor: pointer;', title: `Click to change ${textOf(k)}` },
+							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;' },
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z' })
+								),
+								String(v)
+							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No option selected. Click to select.')
+						)
+					));
 				} else if (fType === 'multiselect' || fType === 'tags') {
 					let selectedArr: string[] = [];
 					if (Array.isArray(v)) {
@@ -18525,89 +18754,95 @@ ${interpolatedPrompt}`;
 							selectedArr = tr.split(',').map(s => s.trim()).filter(Boolean);
 						}
 					}
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(99,102,241,0.15); color: #818cf8; font-weight: 700; text-transform: uppercase;">Multiselect</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="multiselect" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(fieldItem.options || []))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view" style="display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;">
-								${selectedArr.length > 0 ? selectedArr.map(item => `
-									<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 12px; background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); font-size: 0.85em; font-weight: 500;">
-										<span class="codicon codicon-tag" style="font-size: 11px; margin-right: 4px;"></span>${this._escapeHtmlAttr(String(item))}
-									</span>
-								`).join('') : '<span style="opacity: 0.45; font-style: italic;">No options selected.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(99,102,241,0.15); color: #818cf8; font-weight: 700; text-transform: uppercase;' },
+									'Multiselect'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'multiselect', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;' },
+							...(selectedArr.length > 0 ? [
+								...selectedArr.map(item => $('span', { style: 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 12px; background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); font-size: 0.85em; font-weight: 500;' },
+									$('span.codicon.codicon-tag', { style: 'font-size: 11px; margin-right: 4px;' }),
+									textOf(String(item))
+								))
+							] : [$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No options selected.')])
+						)
+					));
 				} else if (fType === 'date') {
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Date</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="date" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view" style="padding: 4px 0;">
-								${v ? `
-									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;">
-										\uD83D\uDCC5 ${v}
-									</span>
-								` : '<span style="opacity: 0.45; font-style: italic;">No date set.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
+									'Date'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'date', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;' },
+								'\uD83D\uDCC5 ',
+								String(v)
+							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No date set.')
+						)
+					));
 				} else if (fType === 'time') {
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234,179,8,0.15); color: #facc15; font-weight: 700; text-transform: uppercase;">Time</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="time" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view" style="padding: 4px 0;">
-								${v ? `
-									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(234,179,8,0.12); color: #facc15; border: 1px solid rgba(234,179,8,0.25); font-size: 0.9em; font-weight: 500;">
-										\uD83D\uDD52 ${v}
-									</span>
-								` : '<span style="opacity: 0.45; font-style: italic;">No time set.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234,179,8,0.15); color: #facc15; font-weight: 700; text-transform: uppercase;' },
+									'Time'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'time', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(234,179,8,0.12); color: #facc15; border: 1px solid rgba(234,179,8,0.25); font-size: 0.9em; font-weight: 500;' },
+								'\uD83D\uDD52 ',
+								String(v)
+							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No time set.')
+						)
+					));
 				} else if (fType === 'datetime') {
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(168,85,247,0.15); color: #c084fc; font-weight: 700; text-transform: uppercase;">DateTime</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="datetime" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view" style="padding: 4px 0;">
-								${v ? `
-									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(168,85,247,0.12); color: #c084fc; border: 1px solid rgba(168,85,247,0.25); font-size: 0.9em; font-weight: 500;">
-										\uD83D\uDCC5 \uD83D\uDD52 ${v}
-									</span>
-								` : '<span style="opacity: 0.45; font-style: italic;">No datetime set.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(168,85,247,0.15); color: #c084fc; font-weight: 700; text-transform: uppercase;' },
+									'DateTime'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'datetime', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(168,85,247,0.12); color: #c084fc; border: 1px solid rgba(168,85,247,0.25); font-size: 0.9em; font-weight: 500;' },
+								'\uD83D\uDCC5 \uD83D\uDD52 ',
+								String(v)
+							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No datetime set.')
+						)
+					));
 				} else if (
 					fType === 'date_range' ||
 					fType === 'time_range' ||
@@ -18615,26 +18850,26 @@ ${interpolatedPrompt}`;
 					((fType === 'text' || !fType) && typeof v === 'string' && !v.trim().startsWith('{') && !v.trim().startsWith('[') && v.length < 64 && /^\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}/.test(v.trim()) && (v.includes('~') || /^\d{4}-\d{2}-\d{2}$/.test(v.trim())))
 				) {
 					const rangeType = fType || 'date_range';
-					customFieldsHtml += `
-						<div class="section-card custom-property-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;">Range</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="${rangeType}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view" style="padding: 4px 0;">
-								${v ? `
-									<span class="range-badge" style="font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;">
-										${v}
-									</span>
-								` : '<span style="opacity: 0.45; font-style: italic;">No range set.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;' },
+									'Range'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': rangeType, 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							v ? $('span.range-badge', { style: 'font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;' },
+								String(v)
+							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No range set.')
+						)
+					));
 				} else if (fType === 'button_group') {
 					const buttonsList: IActionButton[] = (fieldItem.buttons && fieldItem.buttons.length > 0)
 						? fieldItem.buttons
@@ -18643,37 +18878,27 @@ ${interpolatedPrompt}`;
 							{ id: 'btn_2', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
 						];
 
-					const buttonsHtml = buttonsList.map(btn => {
+					const buttonsNodes = buttonsList.map(btn => {
 						const btnColor = btn.color || '#3b82f6';
 						const targetStatus = btn.targetStatus || '';
-						return `
-							<button type="button" class="ticket-action-transition-btn"
-								data-action-id="${this._escapeHtmlAttr(btn.id)}"
-								data-action-label="${this._escapeHtmlAttr(btn.label)}"
-								data-target-status="${this._escapeHtmlAttr(targetStatus)}"
-								data-field-key="${this._escapeHtmlAttr(rawKey)}"
-								style="--btn-accent-color: ${btnColor};"
-								title="${targetStatus ? `Trigger '${btn.label}' and transition to '${targetStatus}'` : `Trigger '${btn.label}'`}">
-								<span class="action-btn-text">${this._escapeHtmlAttr(btn.label)}</span>
-							</button>
-						`;
-					}).join('');
+						return $<HTMLButtonElement>('button.ticket-action-transition-btn', { type: 'button', 'data-action-id': textOf(btn.id), 'data-action-label': textOf(btn.label), 'data-target-status': textOf(targetStatus), 'data-field-key': textOf(rawKey), style: `--btn-accent-color: ${btnColor};`, title: (targetStatus ? `Trigger '${btn.label}' and transition to '${targetStatus}'` : `Trigger '${btn.label}'`) },
+							$('span.action-btn-text', undefined, textOf(btn.label))
+						);
+					});
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card action-button-group-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Actions</span>
-								</div>
-							</div>
-							<div class="custom-field-view" style="padding: 6px 0;">
-								<div class="action-buttons-group-row">
-									${buttonsHtml}
-								</div>
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card.action-button-group-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
+									'Actions'
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'padding: 6px 0;' },
+							$('div.action-buttons-group-row', undefined, ...buttonsNodes)
+						)
+					));
 				} else if (fType === 'number') {
 					let formattedVal = '';
 					const numVal = (v !== undefined && v !== null && String(v).trim() !== '') ? Number(v) : NaN;
@@ -18694,27 +18919,31 @@ ${interpolatedPrompt}`;
 							formattedVal = formattedNum;
 						}
 					}
-					customFieldsHtml += `
-						<div class="section-card custom-property-card number-field-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234, 179, 8, 0.18); color: #facc15; font-weight: 700; text-transform: uppercase;">Number</span>
-									${fieldItem.unit ? `<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: #94a3b8; font-weight: 600;">${this._escapeHtmlAttr(fieldItem.unit)}</span>` : ''}
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="number" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v ?? ''))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view number-field-view" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-multiline="false" style="padding: 4px 0; cursor: text;" title="Click to edit ${this._escapeHtmlAttr(k)} manually">
-								${formattedVal ? `
-									<div style="display: inline-flex; align-items: baseline; gap: 6px; background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25); border-radius: 6px; padding: 6px 14px;">
-										<span style="font-size: 1.25em; font-weight: 700; color: #facc15; font-variant-numeric: tabular-nums;">${formattedVal}</span>
-									</div>
-								` : '<span style="opacity: 0.45; font-style: italic;">No number set. Click to edit.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card.number-field-card', undefined,
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234, 179, 8, 0.18); color: #facc15; font-weight: 700; text-transform: uppercase;' },
+									'Number'
+								),
+								...(fieldItem.unit ? [
+									$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: #94a3b8; font-weight: 600;' },
+										textOf(fieldItem.unit)
+									)
+								] : [])
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'number', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v ?? '')), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view.number-field-view', { 'data-field-key': textOf(rawKey), 'data-multiline': 'false', style: 'padding: 4px 0; cursor: text;', title: `Click to edit ${textOf(k)} manually` },
+							formattedVal ? $('div', { style: 'display: inline-flex; align-items: baseline; gap: 6px; background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25); border-radius: 6px; padding: 6px 14px;' },
+								$('span', { style: 'font-size: 1.25em; font-weight: 700; color: #facc15; font-variant-numeric: tabular-nums;' }, formattedVal)
+							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No number set. Click to edit.')
+						)
+					));
 				} else if (fType === 'git') {
 					// Git primitive is integrated into the dedicated sidebar Git repository binding
 					continue;
@@ -18737,71 +18966,71 @@ ${interpolatedPrompt}`;
 						}
 					}
 
-					const rowsHtml = paramDefs.map(param => {
+					const rowsNodes = paramDefs.map(param => {
 						const rawVal = paramValues[param.name];
 						const hasNonEmptyVal = rawVal !== undefined && rawVal !== null && (typeof rawVal !== 'string' || rawVal.trim() !== '');
 						const currentVal = hasNonEmptyVal ? rawVal : (param.defaultValue || '');
 						const hasOptions = Array.isArray(param.options) && param.options.length > 0;
 						const copyToken = `{{${param.name}}}`;
 
-						let controlHtml = '';
+						let control: HTMLElement;
 						if (hasOptions) {
-							const optionsHtml = param.options!.map(opt => {
-								const selected = String(opt) === String(currentVal) ? 'selected' : '';
-								return `<option value="${this._escapeHtmlAttr(opt)}" ${selected}>${this._escapeHtml(opt)}</option>`;
-							}).join('');
-							controlHtml = `
-								<select class="ticket-parameter-input monaco-select-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-param-name="${this._escapeHtmlAttr(param.name)}" style="flex: 1; min-width: 140px; padding: 5px 8px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;">
-									${optionsHtml}
-								</select>
-							`;
+							const optionsNodes = param.options!.map(opt => {
+								const selected = String(opt) === String(currentVal);
+								return $<HTMLOptionElement>('option', { value: textOf(opt), selected: selected ? true : undefined }, textOf(opt));
+							});
+							control = $<HTMLSelectElement>('select.ticket-parameter-input.monaco-select-box', { 'data-field-key': textOf(rawKey), 'data-param-name': textOf(param.name), style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;' },
+								...optionsNodes
+							);
 						} else {
-							controlHtml = `
-								<input type="text" class="ticket-parameter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-param-name="${this._escapeHtmlAttr(param.name)}" value="${this._escapeHtmlAttr(currentVal)}" placeholder="${this._escapeHtmlAttr(param.defaultValue || '')}" style="flex: 1; min-width: 140px; padding: 5px 10px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);" />
-							`;
+							control = $<HTMLInputElement>('input.ticket-parameter-input.monaco-inputbox', { type: 'text', 'data-field-key': textOf(rawKey), 'data-param-name': textOf(param.name), value: textOf(currentVal), placeholder: textOf(param.defaultValue || ''), style: 'flex: 1; min-width: 140px; padding: 5px 10px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);' });
 						}
 
-						return `
-							<div class="ticket-parameter-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.06);">
-								<div style="display: flex; flex-direction: column; gap: 2px; min-width: 130px;">
-									<div style="display: flex; align-items: center; gap: 6px;">
-										<span style="font-size: 12px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);">${this._escapeHtml(param.name)}</span>
-										<button type="button" class="ticket-param-copy-tag" data-token="${this._escapeHtmlAttr(copyToken)}" title="Click to copy '${copyToken}'" style="border: 1px solid rgba(168, 85, 247, 0.35); background: rgba(168, 85, 247, 0.12); color: #c084fc; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 1px 6px; cursor: pointer; transition: all 0.15s ease;">
-											${this._escapeHtml(copyToken)}
-										</button>
-									</div>
-									${(param.description && param.description !== 'Zero-based pagination start index') ? `<span style="font-size: 10px; opacity: 0.55;">${this._escapeHtml(param.description)}</span>` : ''}
-								</div>
-								<div style="display: flex; align-items: center; gap: 8px; flex: 1; max-width: 380px;">
-									${controlHtml}
-								</div>
-							</div>
-						`;
-					}).join('');
+						return $('div.ticket-parameter-row', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.06);' },
+							$('div', { style: 'display: flex; flex-direction: column; gap: 2px; min-width: 130px;' },
+								$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+									$('span', { style: 'font-size: 12px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);' }, textOf(param.name)),
+									$<HTMLButtonElement>('button.ticket-param-copy-tag', { type: 'button', 'data-token': textOf(copyToken), title: `Click to copy '${copyToken}'`, style: 'border: 1px solid rgba(168, 85, 247, 0.35); background: rgba(168, 85, 247, 0.12); color: #c084fc; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 1px 6px; cursor: pointer; transition: all 0.15s ease;' },
+										textOf(copyToken)
+									)
+								),
+								...((param.description && param.description !== 'Zero-based pagination start index') ? [$('span', { style: 'font-size: 10px; opacity: 0.55;' }, textOf(param.description))] : [])
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; max-width: 380px;' }, control)
+						);
+					});
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card ticket-parameters-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="parameters">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;">Inputs</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); color: #a1a1aa; font-weight: 600;">${paramDefs.length} Vars</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 8px;">
-									${stepBadgeHtml}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="parameters" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(typeof v === 'string' ? v : JSON.stringify(paramValues))}" title="Edit ${k} with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div style="font-size: 11px; opacity: 0.65; margin-bottom: 8px;">
-								Runtime parameters can be referenced across URLs, prompts, and actions using <code>{{variable_name}}</code>.
-							</div>
-							<div class="parameters-rows-container" style="display: flex; flex-direction: column; gap: 6px;">
-								${rowsHtml || '<span style="opacity: 0.4; font-style: italic;">No parameters defined in schema.</span>'}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div', { class: `section-card custom-property-card ticket-parameters-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'parameters' },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;' },
+									'Inputs'
+								),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); color: #a1a1aa; font-weight: 600;' },
+									String(paramDefs.length),
+									' Vars'
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'parameters', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(paramValues)), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div', { style: 'font-size: 11px; opacity: 0.65; margin-bottom: 8px;' },
+							'Runtime parameters can be referenced across URLs, prompts, and actions using ',
+							$('code', undefined, '{{variable_name}}'),
+							'.'
+						),
+						$('div.parameters-rows-container', { style: 'display: flex; flex-direction: column; gap: 6px;' },
+							...(rowsNodes.length ? rowsNodes : [$('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No parameters defined in schema.')])
+
+						)
+					));
 				} else if (fType === 'python') {
 					let pythonPath = fieldItem.pythonPath || '';
 					let pythonCode = fieldItem.pythonCode || '';
@@ -18888,8 +19117,12 @@ ${interpolatedPrompt}`;
 						: 'Ready to execute';
 
 					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
-					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
-					const outputChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="&#10;OUTPUT = " data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)">+ OUTPUT =</button>`;
+					const baseChipHtml = $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': 'TICKET_CONTEXT[\'\']', 'data-cursor-offset': '-2', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert TICKET_CONTEXT[\'\'] into script' },
+						'+ TICKET_CONTEXT[\'\']'
+					);
+					const outputChipHtml = $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': '\nOUTPUT = ', 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)' },
+						'+ OUTPUT ='
+					);
 
 					const pythonContextExprs: string[] = [];
 					for (const ofField of otherFields) {
@@ -18918,173 +19151,220 @@ ${interpolatedPrompt}`;
 					const visibleExprs = pythonContextExprs.slice(0, maxInitialVisible);
 					const hiddenExprs = pythonContextExprs.slice(maxInitialVisible);
 
-					const visibleChipsHtml = visibleExprs.map(expr => {
-						return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(expr)}" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(expr)}">+ ${this._escapeHtml(expr)}</button>`;
-					}).join('');
+					const visibleChipsNodes = visibleExprs.map(expr => {
+						return $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
+							'+ ',
+							textOf(expr)
+						);
+					});
 
-					let hiddenChipsHtml = '';
-					let moreBtnHtml = '';
+					const hiddenChipsNodes: HTMLElement[] = [];
 					if (hiddenExprs.length > 0) {
-						hiddenChipsHtml = `
-							<span class="python-ctx-hidden-group" style="display: none;">
-								${hiddenExprs.map(expr => {
-							return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(expr)}" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(expr)}">+ ${this._escapeHtml(expr)}</button>`;
-						}).join('')}
-							</span>
-						`;
-						moreBtnHtml = `<button type="button" class="python-ctx-more-btn" data-count="${hiddenExprs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Toggle more context fields">+${hiddenExprs.length} More...</button>`;
+						hiddenChipsNodes.push($('span.python-ctx-hidden-group', { style: 'display: none;' },
+							...hiddenExprs.flatMap(expr => {
+								return [
+									$<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
+										'+ ',
+										textOf(expr)
+									)
+								];
+							})
+						), $<HTMLButtonElement>('button.python-ctx-more-btn', { type: 'button', 'data-count': `${hiddenExprs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Toggle more context fields' },
+							'+',
+							String(hiddenExprs.length),
+							' More...'
+						));
 					}
 
-					const externalScriptsListHtml = externalScripts.length === 0
-						? `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`
-						: externalScripts.map((s, idx) => `
-							<div class="python-script-item" data-index="${idx}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);">
-								<div style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-									<span style="opacity: 0.5; font-size: 10px; font-weight: 600;">#${idx + 1}</span>
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 1h7l3.5 3.5v10.5l-.5.5h-10l-.5-.5v-13.5l.5-.5zm6.5 4v-3h-6v13h9v-10h-3z"/></svg>
-									<span title="${this._escapeHtmlAttr(s)}" style="color: inherit;">${this._escapeHtml(s)}</span>
-								</div>
-								<button type="button" class="python-remove-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-index="${idx}" style="padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;" title="Remove this script"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/></svg></button>
-							</div>
-						`).join('');
+					const externalScriptsList = externalScripts.length === 0
+						? [$('div.python-scripts-empty', { style: 'font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;' },
+							'No external scripts configured. Executes inline source code only.'
+						)]
+						: externalScripts.map((s, idx) => $('div.python-script-item', { 'data-index': `${idx}`, style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);' },
+							$('div', { style: 'display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
+								$('span', { style: 'opacity: 0.5; font-size: 10px; font-weight: 600;' }, '#', String(idx + 1)),
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M4.5 1h7l3.5 3.5v10.5l-.5.5h-10l-.5-.5v-13.5l.5-.5zm6.5 4v-3h-6v13h9v-10h-3z' })
+								),
+								$('span', { title: textOf(s), style: 'color: inherit;' }, textOf(s))
+							),
+							$<HTMLButtonElement>('button.python-remove-script-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-index': `${idx}`, style: 'padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;', title: 'Remove this script' },
+								$.SVG('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z' })
+								)
+							)
+						));
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card python-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="python" data-external-scripts="${this._escapeHtmlAttr(JSON.stringify(externalScripts))}" data-python-code="${this._escapeHtmlAttr(pythonCode)}" data-python-locked="${pythonLocked ? 'true' : 'false'}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Python</span>
-									<span class="python-env-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;">${this._escapeHtml(pythonPath || '.venv / python3')}</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 8px;">
-									${stepBadgeHtml}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="python" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(pythonCode)}" title="Edit ${k} with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
+					const pythonCodeDisplay = $('div.python-code-display', { style: 'position: relative; width: 100%; min-height: 140px; pointer-events: none !important; user-select: none !important; -webkit-user-select: none !important; overflow: hidden; padding: 8px 10px 26px 10px; margin: 0; border: none; font-size: 12px; font-family: var(--monaco-monospace-font, \'SF Mono\', Menlo, Monaco, Consolas, \'Courier New\', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; tab-size: 4; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; color: #d4d4d4; box-sizing: border-box; z-index: 1;' });
+					renderHighlightedPythonToDOM(pythonCodeDisplay, pythonCode, { showLineNumbers: false, isLiveBackdrop: true, placeholder: 'Enter Python script to execute...' });
 
-							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
-								<!-- Virtual Environment & Interpreter Row -->
-								<div style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-										<label style="font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit; display: flex; align-items: center; gap: 6px;">
-											<span>Virtual Environment / Interpreter:</span>
-										</label>
-										<span class="python-test-status" style="font-size: 10px; opacity: 0.65;"></span>
-									</div>
-									<!-- Row 1: Path Input & Browse -->
-									<div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
-										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="Auto-detect (.venv or system python3) — or click Browse to select" style="flex: 1; min-width: 160px; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
-										<button type="button" class="python-browse-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Select Python Interpreter or Virtualenv Folder" style="padding: 5px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z"/></svg><span>Browse</span></button>
-									</div>
-									<!-- Row 2: Status Badge & Actions -->
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px;">
-										<div class="python-env-badge" style="font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7); word-break: break-all;">${this._escapeHtml(pythonPath ? `Path: ${pythonPath}` : 'Auto-detect: System / Active .venv')}</div>
-										<div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-left: auto;">
-											<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
-											<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(0,122,204,0.15); color: #38bdf8; border: 1px solid rgba(0,122,204,0.4); white-space: nowrap;">+ Create Virtualenv</button>
-										</div>
-									</div>
-								</div>
-
-								<!-- External Scripts Pipeline Row -->
-								<div class="python-scripts-container" style="display: flex; flex-direction: column; gap: 6px; background: rgba(0, 0, 0, 0.16); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 10px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-										<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">External Python Scripts (Executed sequentially prior to inline code):</span>
-										<button type="button" class="python-add-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 3px 10px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;" title="Select an external Python script file (.py) to execute in order">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/></svg>
-											<span>Add Script File...</span>
-										</button>
-									</div>
-									<div class="python-scripts-list" style="display: flex; flex-direction: column; gap: 4px;">
-										${externalScriptsListHtml}
-									</div>
-								</div>
-
-								<!-- Python Source Code Textarea -->
-								<div style="display: flex; flex-direction: column; gap: 4px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Source Code:</label>
-										<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-											<span style="font-size: 10px; opacity: 0.55; margin-right: 2px;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
-											<button type="button" class="python-copy-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); user-select: none; -webkit-user-select: none;" title="Copy complete Python source code to clipboard">
-												<span class="codicon codicon-copy" style="font-size: 12.5px;"></span>
-											</button>
-											<button type="button" class="python-paste-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); opacity: ${pythonLocked ? '0.4' : '1'}; user-select: none; -webkit-user-select: none;" title="${pythonLocked ? 'Locked — Click the lock icon to unlock before pasting' : 'Paste clipboard content into Python source code'}">
-												<span class="codicon codicon-clippy" style="font-size: 12.5px;"></span>
-											</button>
-											<button type="button" class="python-lock-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: ${pythonLocked ? 'rgba(251, 191, 36, 0.12)' : 'rgba(52, 211, 153, 0.1)'}; color: ${pythonLocked ? '#fbbf24' : '#34d399'}; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(52, 211, 153, 0.4)'}; user-select: none; -webkit-user-select: none;" title="${pythonLocked ? 'Locked (Read-Only) — Click to Unlock for editing' : 'Unlocked (Editable) — Click to Lock and protect from accidental edits'}">
-												<span class="codicon ${pythonLocked ? 'codicon-lock' : 'codicon-unlock'}" style="font-size: 12.5px;"></span>
-											</button>
-										</div>
-									</div>
-									<div class="python-code-wrapper" style="display: flex; align-items: stretch; position: relative; width: 100%; border-radius: 6px; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255,255,255,0.15)'}; background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; user-select: none; -webkit-user-select: none;">
-										<div class="python-line-numbers-gutter" style="user-select: none !important; -webkit-user-select: none !important; pointer-events: none !important; color: rgba(255, 255, 255, 0.28); text-align: right; padding: 8px 8px 26px 6px; border-right: 1px solid rgba(255, 255, 255, 0.08); background: rgba(0, 0, 0, 0.18); font-size: 11px; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); line-height: 18px; flex-shrink: 0; min-width: 32px; white-space: pre; overflow: hidden; box-sizing: border-box;">${this._escapeHtml(buildPythonLineNumbersText(pythonCode))}</div>
-										<div class="python-code-stage" style="position: relative; flex: 1; min-width: 0; min-height: 140px; display: block;">
-											<div class="python-code-display" style="position: relative; width: 100%; min-height: 140px; pointer-events: none !important; user-select: none !important; -webkit-user-select: none !important; overflow: hidden; padding: 8px 10px 26px 10px; margin: 0; border: none; font-size: 12px; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; tab-size: 4; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; color: #d4d4d4; box-sizing: border-box; z-index: 1;">${highlightPythonToHTML(pythonCode, { showLineNumbers: false, isLiveBackdrop: true, placeholder: 'Enter Python script to execute...' })}</div>
-											<textarea class="python-code-textarea" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" ${pythonLocked ? 'readonly' : ''} spellcheck="false" autocapitalize="off" autocomplete="off" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; display: block; width: 100%; height: 100%; min-height: 140px; max-height: none !important; overflow: hidden !important; padding: 8px 10px 26px 10px; margin: 0; font-size: 12px; border: none; outline: none; background: transparent !important; color: transparent !important; -webkit-text-fill-color: transparent !important; caret-color: #38bdf8 !important; box-sizing: border-box; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; resize: none !important; tab-size: 4; user-select: text !important; -webkit-user-select: text !important; pointer-events: auto !important; cursor: ${pythonLocked ? 'default' : 'text'};">${this._escapeHtml((pythonCode || '').replace(/\r\n?/g, '\n'))}</textarea>
-										</div>
-									</div>
-									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; opacity: ${pythonLocked ? '0.45' : '1'};">
-										<span style="font-size: 10.5px; opacity: 0.65;">Insert Context:</span>
-										${baseChipHtml}
-										${outputChipHtml}
-										${visibleChipsHtml}
-										${hiddenChipsHtml}
-										${moreBtnHtml}
-									</div>
-								</div>
-
-								<!-- Action Buttons Row -->
-								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-									<div style="display: flex; gap: 8px; align-items: center;">
-										<button type="button" class="python-run-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); transition: all 0.15s ease;" title="Run Python script in virtualenv or interpreter">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5l9 5.5-9 5.5v-11z"/></svg>
-											<span>Run Script</span>
-										</button>
-										<button type="button" class="python-save-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);" title="Save code without running">
-											<span>Save Code</span>
-										</button>
-									</div>
-									<span class="python-status-text" style="font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.7;">${statusTag}</span>
-								</div>
-
-								<!-- Debug & Execution Output Box -->
-								<div class="python-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
-									${pythonResult !== undefined ? `
-										<div class="python-result-block" style="background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;">
-											<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-												<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
-												<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-													<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
-													<button type="button" class="python-copy-result-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy complete Return Value (Output)" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;">
-														<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
-														<span>Copy</span>
-													</button>
-												</div>
-											</div>
-											<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;">${this._escapeHtml(typeof pythonResult === 'object' ? JSON.stringify(pythonResult, null, 2) : String(pythonResult))}</pre>
-										</div>
-									` : ''}
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
-										<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">Console Logs & Execution:</span>
-											${exitCode !== undefined ? `<span style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: ${exitCode === 0 ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color: ${exitCode === 0 ? '#4ade80' : '#f87171'};">Exit code: ${exitCode}</span>` : ''}
-										</div>
-										<div style="display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;">
-											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy complete Console Logs" style="display: inline-flex; align-items: center; gap: 4px; background: transparent; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.85; cursor: pointer; color: inherit;">
-												<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
-												<span>Copy Logs</span>
-											</button>
-											<button type="button" class="python-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
-										</div>
-									</div>
-									<div class="python-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${pythonOutput ? this._escapeHtml(pythonOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>'}</div>
-								</div>
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div', { class: `section-card custom-property-card python-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'python', 'data-external-scripts': textOf(JSON.stringify(externalScripts)), 'data-python-code': textOf(pythonCode), 'data-python-locked': (pythonLocked ? 'true' : 'false') },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; font-weight: 700; text-transform: uppercase;' },
+									'Python'
+								),
+								$('span.python-env-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;' },
+									textOf(pythonPath || '.venv / python3')
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'python', 'data-ai-field-label': k, 'data-ai-current-value': textOf(pythonCode), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+							$('div', { style: 'background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+									$('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit; display: flex; align-items: center; gap: 6px;' },
+										$('span', undefined, 'Virtual Environment / Interpreter:')
+									),
+									$('span.python-test-status', { style: 'font-size: 10px; opacity: 0.65;' })
+								),
+								$('div', { style: 'display: flex; gap: 6px; align-items: center; flex-wrap: wrap;' },
+									$<HTMLInputElement>('input.python-interpreter-input.monaco-inputbox', { type: 'text', 'data-field-key': textOf(rawKey), value: textOf(pythonPath), placeholder: 'Auto-detect (.venv or system python3) \u2014 or click Browse to select', style: 'flex: 1; min-width: 160px; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);' }),
+									$<HTMLButtonElement>('button.python-browse-interpreter-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Select Python Interpreter or Virtualenv Folder', style: 'padding: 5px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;' },
+										$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z' })
+										),
+										$('span', undefined, 'Browse')
+									)
+								),
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px;' },
+									$('div.python-env-badge', { style: 'font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7); word-break: break-all;' },
+										textOf(pythonPath ? `Path: ${pythonPath}` : 'Auto-detect: System / Active .venv')
+									),
+									$('div', { style: 'display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-left: auto;' },
+										$<HTMLButtonElement>('button.python-test-interpreter-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Test Python binary and check version', style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;' },
+											'Test'
+										),
+										$<HTMLButtonElement>('button.python-create-venv-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Initialize a local virtual environment (.venv) via python3 -m venv', style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(0,122,204,0.15); color: #38bdf8; border: 1px solid rgba(0,122,204,0.4); white-space: nowrap;' },
+											'+ Create Virtualenv'
+										)
+									)
+								)
+							),
+							$('div.python-scripts-container', { style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(0, 0, 0, 0.16); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 10px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+									$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' },
+										'External Python Scripts (Executed sequentially prior to inline code):'
+									),
+									$<HTMLButtonElement>('button.python-add-script-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'padding: 3px 10px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;', title: 'Select an external Python script file (.py) to execute in order' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z' })
+										),
+										$('span', undefined, 'Add Script File...')
+									)
+								),
+								$('div.python-scripts-list', { style: 'display: flex; flex-direction: column; gap: 4px;' }, ...externalScriptsList)
+							),
+							$('div', { style: 'display: flex; flex-direction: column; gap: 4px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+									$('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Source Code:'),
+									$('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' },
+										$('span', { style: 'font-size: 10px; opacity: 0.55; margin-right: 2px;' }, 'Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT'),
+										$<HTMLButtonElement>('button.python-copy-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); user-select: none; -webkit-user-select: none;', title: 'Copy complete Python source code to clipboard' },
+											$('span.codicon.codicon-copy', { style: 'font-size: 12.5px;' })
+										),
+										$<HTMLButtonElement>('button.python-paste-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); opacity: ${pythonLocked ? '0.4' : '1'}; user-select: none; -webkit-user-select: none;`, title: (pythonLocked ? 'Locked — Click the lock icon to unlock before pasting' : 'Paste clipboard content into Python source code') },
+											$('span.codicon.codicon-clippy', { style: 'font-size: 12.5px;' })
+										),
+										$<HTMLButtonElement>('button.python-lock-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: ${pythonLocked ? 'rgba(251, 191, 36, 0.12)' : 'rgba(52, 211, 153, 0.1)'}; color: ${pythonLocked ? '#fbbf24' : '#34d399'}; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(52, 211, 153, 0.4)'}; user-select: none; -webkit-user-select: none;`, title: (pythonLocked ? 'Locked (Read-Only) — Click to Unlock for editing' : 'Unlocked (Editable) — Click to Lock and protect from accidental edits') },
+											$('span', { class: `codicon ${pythonLocked ? 'codicon-lock' : 'codicon-unlock'}`, style: 'font-size: 12.5px;' })
+										)
+									)
+								),
+								$('div.python-code-wrapper', { style: `display: flex; align-items: stretch; position: relative; width: 100%; border-radius: 6px; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255,255,255,0.15)'}; background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; user-select: none; -webkit-user-select: none;` },
+									$('div.python-line-numbers-gutter', { style: 'user-select: none !important; -webkit-user-select: none !important; pointer-events: none !important; color: rgba(255, 255, 255, 0.28); text-align: right; padding: 8px 8px 26px 6px; border-right: 1px solid rgba(255, 255, 255, 0.08); background: rgba(0, 0, 0, 0.18); font-size: 11px; font-family: var(--monaco-monospace-font, \'SF Mono\', Menlo, Monaco, Consolas, \'Courier New\', monospace); line-height: 18px; flex-shrink: 0; min-width: 32px; white-space: pre; overflow: hidden; box-sizing: border-box;' },
+										textOf(buildPythonLineNumbersText(pythonCode))
+									),
+									$('div.python-code-stage', { style: 'position: relative; flex: 1; min-width: 0; min-height: 140px; display: block;' },
+										pythonCodeDisplay,
+										$<HTMLTextAreaElement>('textarea.python-code-textarea', { 'data-field-key': textOf(rawKey), rows: '6', readonly: pythonLocked ? '' : undefined, spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', style: `position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; display: block; width: 100%; height: 100%; min-height: 140px; max-height: none !important; overflow: hidden !important; padding: 8px 10px 26px 10px; margin: 0; font-size: 12px; border: none; outline: none; background: transparent !important; color: transparent !important; -webkit-text-fill-color: transparent !important; caret-color: #38bdf8 !important; box-sizing: border-box; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; resize: none !important; tab-size: 4; user-select: text !important; -webkit-user-select: text !important; pointer-events: auto !important; cursor: ${pythonLocked ? 'default' : 'text'};` },
+											textOf((pythonCode || '').replace(/\r\n?/g, '\n'))
+										)
+									)
+								),
+								$('div.python-ctx-chips-bar', { style: `display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; opacity: ${pythonLocked ? '0.45' : '1'};` },
+									$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Context:'),
+									baseChipHtml,
+									' ',
+									outputChipHtml,
+									' ',
+									...visibleChipsNodes,
+									' ',
+									...hiddenChipsNodes
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;' },
+								$('div', { style: 'display: flex; gap: 8px; align-items: center;' },
+									$<HTMLButtonElement>('button.python-run-script-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); transition: all 0.15s ease;', title: 'Run Python script in virtualenv or interpreter' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M4 2.5l9 5.5-9 5.5v-11z' })
+										),
+										$('span', undefined, 'Run Script')
+									),
+									$<HTMLButtonElement>('button.python-save-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);', title: 'Save code without running' },
+										$('span', undefined, 'Save Code')
+									)
+								),
+								$('span.python-status-text', { style: 'font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.7;' },
+									statusTag
+								)
+							),
+							$('div.python-output-section', { style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;' },
+								...(pythonResult !== undefined ? [
+									$('div.python-result-block', { style: 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;' },
+										$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+											$('span', { style: 'font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;' },
+												'Return Value (Output):'
+											),
+											$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
+												$('span', { style: 'font-size: 9.5px; opacity: 0.65; color: #38bdf8;' }, 'Consumed by Output Manifest & Downstream Primitives'),
+												$<HTMLButtonElement>('button.python-copy-result-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy complete Return Value (Output)', style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;' },
+													$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+													$('span', undefined, 'Copy')
+												)
+											)
+										),
+										$('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' },
+											textOf(typeof pythonResult === 'object' ? JSON.stringify(pythonResult, null, 2) : String(pythonResult))
+										)
+									)
+								] : []),
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+										$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Console Logs & Execution:'),
+										...(exitCode !== undefined ? [
+											$('span', { style: `font-size: 10px; padding: 1px 6px; border-radius: 3px; background: ${exitCode === 0 ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color: ${exitCode === 0 ? '#4ade80' : '#f87171'};` },
+												'Exit code: ',
+												String(exitCode)
+											)
+										] : [])
+									),
+									$('div', { style: 'display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;' },
+										$<HTMLButtonElement>('button.python-copy-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy complete Console Logs', style: 'display: inline-flex; align-items: center; gap: 4px; background: transparent; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.85; cursor: pointer; color: inherit;' },
+											$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+											$('span', undefined, 'Copy Logs')
+										),
+										$<HTMLButtonElement>('button.python-clear-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
+											'Clear'
+										)
+									)
+								),
+								$('div.python-output-display.desc-content-box', { style: 'max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
+									pythonOutput ? textOf(pythonOutput) : $('span', { style: 'opacity: 0.4; font-style: italic;' },
+										'No execution logs yet. Click "Run Script" above to execute the automation code.'
+									)
+								)
+							)
+						)
+					));
 				} else if (fType === 'browser') {
 					let browserUrl = fieldItem.defaultUrl || '';
 					let browserCreds: ICredentialPair[] = fieldItem.credentials || [];
@@ -19144,93 +19424,126 @@ ${interpolatedPrompt}`;
 					}
 					const renderBrowserChipBtn = (refLabel: string) => {
 						const token = `{${refLabel}}`;
-						return `<button type="button" class="browser-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(token)}" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(token)} into URL">+ ${this._escapeHtml(token)}</button>`;
+						return $<HTMLButtonElement>('button.browser-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(token), style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(token)} into URL` },
+							'+ ',
+							textOf(token)
+						);
 					};
 					const maxVisibleBrowserChips = 4;
 					const visibleBrowserRefs = browserRefChips.slice(0, maxVisibleBrowserChips);
 					const hiddenBrowserRefs = browserRefChips.slice(maxVisibleBrowserChips);
-					const visibleBrowserChipsHtml = visibleBrowserRefs.map(renderBrowserChipBtn).join('');
-					const hiddenBrowserChipsHtml = hiddenBrowserRefs.length > 0
-						? `<span class="browser-ctx-hidden-group" style="display: none;">${hiddenBrowserRefs.map(renderBrowserChipBtn).join('')}</span><button type="button" class="browser-ctx-more-btn" data-count="${hiddenBrowserRefs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Show / hide more referenceable outputs">+${hiddenBrowserRefs.length} More...</button>`
-						: '';
-					const browserChipsHtml = visibleBrowserChipsHtml + hiddenBrowserChipsHtml;
+					const visibleBrowserChipsNodes = visibleBrowserRefs.map(renderBrowserChipBtn);
+					const hiddenBrowserChipsNodes = hiddenBrowserRefs.length > 0
+						? [
+							$('span.browser-ctx-hidden-group', { style: 'display: none;' }, ...hiddenBrowserRefs.map(renderBrowserChipBtn)),
+							$<HTMLButtonElement>('button.browser-ctx-more-btn', { type: 'button', 'data-count': `${hiddenBrowserRefs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Show / hide more referenceable outputs' },
+								'+',
+								String(hiddenBrowserRefs.length),
+								' More...'
+							)
+						]
+						: [];
+					const browserChipsNodes = [...visibleBrowserChipsNodes, ...hiddenBrowserChipsNodes];
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card browser-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="browser">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Browser</span>
-									${browserCreds.length > 0 ? `<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;">\uD83D\uDD11 ${browserCreds.length} Credentials</span>` : ''}
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									${stepBadgeHtml}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="browser" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(browserUrl)}" title="Edit ${k} with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
+					customFieldsContent.push($('div', { class: `section-card custom-property-card browser-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'browser' },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;' },
+									'Browser'
+								),
+								...(browserCreds.length > 0 ? [
+									$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;' },
+										'\uD83D\uDD11 ',
+										String(browserCreds.length),
+										' Credentials'
+									)
+								] : [])
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'browser', 'data-ai-field-label': k, 'data-ai-current-value': textOf(browserUrl), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div', { style: 'width: 100%; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px;' },
+							$<HTMLInputElement>('input.browser-url-input', { type: 'text', value: textOf(browserUrl), placeholder: 'https://example.com... (Supports {Field Label} or {param} references)', style: 'width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);' }),
+							...(browserChipsNodes.length ? [
+								$('div.browser-ctx-chips-bar', { style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center;' },
+									$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Output:'),
+									...browserChipsNodes
 
-							<!-- URL Input Bar (Full Width) -->
-							<div style="width: 100%; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px;">
-								<input type="text" class="browser-url-input" value="${this._escapeHtmlAttr(browserUrl)}" placeholder="https://example.com... (Supports {Field Label} or {param} references)" style="width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
-								${browserChipsHtml ? `<div class="browser-ctx-chips-bar" style="display: flex; flex-wrap: wrap; gap: 5px; align-items: center;"><span style="font-size: 10.5px; opacity: 0.65;">Insert Output:</span>${browserChipsHtml}</div>` : ''}
-							</div>
-
-							<!-- Action Buttons Row (Below URL) -->
-							<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
-								<!-- Silent Fetch Button -->
-								<button type="button" class="browser-silent-fetch-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Fetch webpage in background and extract text/HTML for AI" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12l-4-4h2.5V3h3v5H12l-4 4zm-7 2h14v1.5H1V14z"/></svg>
-									<span>Fetch (Silent)</span>
-								</button>
-								<!-- Open in Tab Button -->
-								<button type="button" class="browser-open-tab-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Open webpage in a new VS Code browser tab" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); transition: all 0.15s ease;">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 2.5A1.5 1.5 0 0 1 3 1h10a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5v-11zM3 2a.5.5 0 0 0-.5.5V4h11V2.5a.5.5 0 0 0-.5-.5H3zm11 3H2v8.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V5z"/></svg>
-									<span>Open in Tab</span>
-								</button>
-								<!-- New Tab Button -->
-								<button type="button" class="browser-new-tab-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Open a new independent browser tab beside (e.g. for login, cookies, or manual navigation)" style="display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); transition: all 0.15s ease;">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2z"/></svg>
-									<span>New Tab</span>
-								</button>
-							</div>
-
-							<!-- Credentials Drawer -->
-							${browserCreds.length > 0 ? `
-								<div style="background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px;">
-									<div style="font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px;">
-										<span>\uD83D\uDD11 Credentials / Authentication</span>
-										<span style="font-size: 9.5px; opacity: 0.5; font-weight: normal; text-transform: none;">(Available for AI automated navigation)</span>
-									</div>
-									<div style="display: flex; flex-wrap: wrap; gap: 8px;">
-										${browserCreds.map(c => `
-											<div class="browser-cred-item" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;">
-												<span style="opacity: 0.7; font-weight: 600;">${this._escapeHtmlAttr(c.key)}:</span>
-												<span class="cred-secret-text" data-real="${this._escapeHtmlAttr(c.value)}" style="font-family: monospace;">••••••••</span>
-												<span class="cred-toggle-eye" style="cursor: pointer; opacity: 0.6; font-size: 11px;" title="Click to show/hide">\uD83D\uDC41️</span>
-											</div>
-										`).join('')}
-									</div>
-								</div>
-							` : ''}
-
-							<!-- Web Content Display Area -->
-							<div class="browser-content-container" style="display: flex; flex-direction: column; gap: 6px;">
-								<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-									<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-										<span style="font-size: 11px; font-weight: 600; opacity: 0.75; text-transform: uppercase;">Extracted Web Content (AI-Ready):</span>
-										<span class="browser-fetch-status" style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;">${lastFetchedText ? `Last fetched: ${this._escapeHtmlAttr(lastFetchedText)}` : 'Not fetched yet'}</span>
-									</div>
-									<div style="display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;">
-										<button type="button" class="browser-copy-content-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy Text</button>
-										<button type="button" class="browser-clear-content-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
-									</div>
-								</div>
-								<div class="browser-content-display desc-content-box" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${browserContent ? this._escapeHtml(browserContent) : '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>'}</div>
-							</div>
-						</div>
-					`;
+								)
+							] : [])
+						),
+						$('div', { style: 'display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;' },
+							$<HTMLButtonElement>('button.browser-silent-fetch-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Fetch webpage in background and extract text/HTML for AI', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;' },
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M8 12l-4-4h2.5V3h3v5H12l-4 4zm-7 2h14v1.5H1V14z' })
+								),
+								$('span', undefined, 'Fetch (Silent)')
+							),
+							$<HTMLButtonElement>('button.browser-open-tab-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Open webpage in a new VS Code browser tab', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); transition: all 0.15s ease;' },
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M1.5 2.5A1.5 1.5 0 0 1 3 1h10a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5v-11zM3 2a.5.5 0 0 0-.5.5V4h11V2.5a.5.5 0 0 0-.5-.5H3zm11 3H2v8.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V5z' })
+								),
+								$('span', undefined, 'Open in Tab')
+							),
+							$<HTMLButtonElement>('button.browser-new-tab-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Open a new independent browser tab beside (e.g. for login, cookies, or manual navigation)', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); transition: all 0.15s ease;' },
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M8 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2z' })
+								),
+								$('span', undefined, 'New Tab')
+							)
+						),
+						' ',
+						...(browserCreds.length > 0 ? [
+							$('div', { style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px;' },
+								$('div', { style: 'font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px;' },
+									$('span', undefined, '\uD83D\uDD11 Credentials / Authentication'),
+									$('span', { style: 'font-size: 9.5px; opacity: 0.5; font-weight: normal; text-transform: none;' },
+										'(Available for AI automated navigation)'
+									)
+								),
+								$('div', { style: 'display: flex; flex-wrap: wrap; gap: 8px;' },
+									...browserCreds.map(c => $('div.browser-cred-item', { style: 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;' },
+										$('span', { style: 'opacity: 0.7; font-weight: 600;' }, textOf(c.key), ':'),
+										$('span.cred-secret-text', { 'data-real': textOf(c.value), style: 'font-family: monospace;' },
+											'\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'
+										),
+										$('span.cred-toggle-eye', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;', title: 'Click to show/hide' }, '\uD83D\uDC41\uFE0F')
+									))
+								)
+							)
+						] : []),
+						' ',
+						$('div.browser-content-container', { style: 'display: flex; flex-direction: column; gap: 6px;' },
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+									$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.75; text-transform: uppercase;' }, 'Extracted Web Content (AI-Ready):'),
+									$('span.browser-fetch-status', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;' },
+										...(lastFetchedText ? ['Last fetched: ', textOf(lastFetchedText)] : ['Not fetched yet'])
+									)
+								),
+								$('div', { style: 'display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;' },
+									$<HTMLButtonElement>('button.browser-copy-content-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
+										'Copy Text'
+									),
+									$<HTMLButtonElement>('button.browser-clear-content-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
+										'Clear'
+									)
+								)
+							),
+							$('div.browser-content-display.desc-content-box', { style: 'max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
+								browserContent ? textOf(browserContent) : $('span', { style: 'opacity: 0.4; font-style: italic;' },
+									'No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.'
+								)
+							)
+						)
+					));
 				} else if (fType === 'prompt') {
 					const preInjectedPrompt = fieldItem.defaultContent || '';
 					const isPreInjectedVisible = Boolean(fieldItem.promptPreInjectedVisible);
@@ -19371,11 +19684,6 @@ ${interpolatedPrompt}`;
 					if (this._isModelFromAnotherProvider(promptModel, promptProvider)) {
 						promptModel = activeProviderModels[0]?.id || 'gpt-4o';
 					}
-					const hasPresetMatch = activeProviderModels.some(pm => pm.id === promptModel);
-					let modelOptionsHtml = activeProviderModels.map(pm => `<option value="${this._escapeHtmlAttr(pm.id)}" ${pm.id === promptModel ? 'selected' : ''}>${this._escapeHtml(pm.label)}</option>`).join('');
-					if (!hasPresetMatch && promptModel && promptModel !== 'custom') {
-						modelOptionsHtml = `<option value="${this._escapeHtmlAttr(promptModel)}" selected>Custom: ${this._escapeHtml(promptModel)}</option>` + modelOptionsHtml;
-					}
 
 					const isAgentMode = promptMode === 'agent';
 					const targetBadgeText = isAgentMode
@@ -19384,11 +19692,18 @@ ${interpolatedPrompt}`;
 					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(59, 130, 246, 0.15)';
 					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#60a5fa';
 
-					const agentOptionsHtml = `<option value="" ${!promptAgentId ? 'selected' : ''}>-- Select AI Agent --</option>` + (
-						agents.length > 0
-							? agents.map(ag => `<option value="${this._escapeHtmlAttr(ag.id)}" ${ag.id === promptAgentId ? 'selected' : ''}>${this._escapeHtml(ag.name)} (${this._escapeHtml(ag.role || 'Agent')})</option>`).join('')
-							: '<option value="" disabled>-- No AI Agents configured --</option>'
-					);
+					const agentOptionsNodes = [
+						$<HTMLOptionElement>('option', { value: '', selected: !promptAgentId ? true : undefined }, '-- Select AI Agent --'),
+						...(
+							agents.length > 0
+								? agents.map(ag => $<HTMLOptionElement>('option', { value: textOf(ag.id), selected: ag.id === promptAgentId ? true : undefined },
+									textOf(ag.name),
+									' (',
+									textOf(ag.role || 'Agent'),
+									')'
+								))
+								: [$<HTMLOptionElement>('option', { value: '', disabled: '' }, '-- No AI Agents configured --')])
+					];
 
 					const standardProviders = [
 						{ id: 'openai', label: 'OpenAI' },
@@ -19398,7 +19713,7 @@ ${interpolatedPrompt}`;
 						{ id: 'ollama', label: 'Ollama Local' },
 						{ id: 'custom-openai', label: 'Custom Endpoint' }
 					];
-					const providerOptionsHtml = standardProviders.map(sp => `<option value="${this._escapeHtmlAttr(sp.id)}" ${sp.id === promptProvider ? 'selected' : ''}>${this._escapeHtml(sp.label)}</option>`).join('');
+					const providerOptionsNodes = standardProviders.map(sp => $<HTMLOptionElement>('option', { value: textOf(sp.id), selected: sp.id === promptProvider ? true : undefined }, textOf(sp.label)));
 
 					const promptRefFields: Array<{ label: string }> = [
 						{ label: 'Title' },
@@ -19429,19 +19744,28 @@ ${interpolatedPrompt}`;
 					}
 					const renderPromptChipBtn = (rf: { label: string }) => {
 						const tokenStr = `{${rf.label}}`;
-						return `<button type="button" class="prompt-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(tokenStr)}" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(tokenStr)}">+ ${this._escapeHtml(tokenStr)}</button>`;
+						return $<HTMLButtonElement>('button.prompt-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(tokenStr), style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(tokenStr)}` },
+							'+ ',
+							textOf(tokenStr)
+						);
 					};
 					const maxVisiblePromptChips = 4;
 					const visiblePromptRefs = promptRefFields.slice(0, maxVisiblePromptChips);
 					const hiddenPromptRefs = promptRefFields.slice(maxVisiblePromptChips);
-					const visibleChipsHtml = visiblePromptRefs.map(renderPromptChipBtn).join('');
-					const hiddenChipsHtml = hiddenPromptRefs.length > 0
-						? `<span class="prompt-ctx-hidden-group" style="display: none;">${hiddenPromptRefs.map(renderPromptChipBtn).join('')}</span><button type="button" class="prompt-ctx-more-btn" data-count="${hiddenPromptRefs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Show / hide more referenceable fields">+${hiddenPromptRefs.length} More...</button>`
-						: '';
-					const promptChipsHtml = visibleChipsHtml + hiddenChipsHtml;
+					// Each User Input box gets its own copy of the "Insert Output" chips
+					const promptChips = (): HTMLElement[] => [
+						...visiblePromptRefs.map(renderPromptChipBtn),
+						...(hiddenPromptRefs.length > 0 ? [
+							$('span.prompt-ctx-hidden-group', { style: 'display: none;' }, ...hiddenPromptRefs.map(renderPromptChipBtn)),
+							$<HTMLButtonElement>('button.prompt-ctx-more-btn', { type: 'button', 'data-count': `${hiddenPromptRefs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Show / hide more referenceable fields' },
+								'+',
+								String(hiddenPromptRefs.length),
+								' More...'
+							)
+						] : [])
+					];
 
 					const preInjectedPlaceholder = 'No pre-injected prompt configured in template.';
-					const preInjectedTokenizedHtml = this._renderPromptTokenizedHtml(preInjectedPrompt || '', preInjectedPlaceholder);
 					const isPreInjectedLong = this._isPromptBoxContentLong(preInjectedPrompt || '');
 					const maxPromptBoxH = EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT;
 					const effectivePreInjectedLocked = typeof preInjectedLockedState === 'boolean'
@@ -19459,166 +19783,190 @@ ${interpolatedPrompt}`;
 					const preMicTitle = effectivePreInjectedLocked
 						? 'Locked — Unlock this prompt box first to record voice input'
 						: 'Record voice input (Speech-to-Text)';
-					const preInjectedBlockHtml = isPreInjectedVisible ? `
-								<!-- Pre-Injected Prompt (Visible in Ticket) -->
-								<div class="prompt-preinjected-section" style="display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 6px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.22);">
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-										<div style="display: flex; align-items: center; gap: 8px;">
-											<label style="font-size: 11px; font-weight: 600; color: #60a5fa;">Pre-Injected Prompt (Template Instruction):</label>
-										</div>
-										<span style="font-size: 10px; color: #38bdf8;">Pre-configured in module template</span>
-									</div>
-									<div class="voice-input-textarea-wrapper" data-expanded="false" data-locked="${effectivePreInjectedLocked ? 'true' : 'false'}" style="position: relative; width: 100%;">
-										<div class="prompt-user-input-top-actions" style="position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;">
-											<button type="button" class="prompt-lock-box-btn" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${preLockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="${preLockTitle}">
-												<span class="codicon ${preLockIcon}" style="font-size: 12px;"></span>
-											</button>
-											<button type="button" class="prompt-expand-box-btn" style="display: ${isPreInjectedLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="Expand input box to show full content">
-												<span class="codicon codicon-chevron-down" style="font-size: 13px;"></span>
-											</button>
-										</div>
-										<div class="prompt-tokenized-display" data-placeholder="${this._escapeHtmlAttr(preInjectedPlaceholder)}" title="${preDisplayTitle}" style="width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;">${preInjectedTokenizedHtml}</div>
-										<textarea class="prompt-preinjected-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="5" placeholder="${this._escapeHtmlAttr(preInjectedPlaceholder)}" style="width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; height: 140px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;">${this._escapeHtml(preInjectedPrompt)}</textarea>
-										<button type="button" class="prompt-expand-bottom-pill" style="display: none;"></button>
-										<div class="prompt-voice-input-controls" style="position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;">
-											<div class="prompt-voice-recording-indicator" style="display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;">
-												<span class="prompt-voice-recording-dot" style="width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;"></span>
-												<span class="prompt-voice-recording-time">0:00 / 5:00</span>
-											</div>
-											<button type="button" class="prompt-voice-mic-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-voice-target="preinjected" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${preMicOpacity}; padding: 0; transition: all 120ms ease;" title="${preMicTitle}">
-												<span class="codicon codicon-mic" style="font-size: 12.5px;"></span>
-											</button>
-										</div>
-									</div>
-								</div>
-					` : '';
+					const preInjectedBlock = isPreInjectedVisible ? $('div.prompt-preinjected-section', { style: 'display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 6px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.22);' },
+						$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'Pre-Injected Prompt (Template Instruction):')
+							),
+							$('span', { style: 'font-size: 10px; color: #38bdf8;' }, 'Pre-configured in module template')
+						),
+						$('div.voice-input-textarea-wrapper', { 'data-expanded': 'false', 'data-locked': (effectivePreInjectedLocked ? 'true' : 'false'), style: 'position: relative; width: 100%;' },
+							$('div.prompt-user-input-top-actions', { style: 'position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;' },
+								$<HTMLButtonElement>('button.prompt-lock-box-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${preLockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: preLockTitle },
+									$('span', { class: `codicon ${preLockIcon}`, style: 'font-size: 12px;' })
+								),
+								$<HTMLButtonElement>('button.prompt-expand-box-btn', { type: 'button', style: `display: ${isPreInjectedLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: 'Expand input box to show full content' },
+									$('span.codicon.codicon-chevron-down', { style: 'font-size: 13px;' })
+								)
+							),
+							$('div.prompt-tokenized-display', { 'data-placeholder': textOf(preInjectedPlaceholder), title: preDisplayTitle, style: `width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;` },
+								...this._renderPromptTokenized(preInjectedPrompt || '', preInjectedPlaceholder)
+							),
+							$<HTMLTextAreaElement>('textarea.prompt-preinjected-textarea.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '5', placeholder: textOf(preInjectedPlaceholder), style: `width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; height: 140px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;` },
+								textOf(preInjectedPrompt)
+							),
+							$<HTMLButtonElement>('button.prompt-expand-bottom-pill', { type: 'button', style: 'display: none;' }),
+							$('div.prompt-voice-input-controls', { style: 'position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;' },
+								$('div.prompt-voice-recording-indicator', { style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;' },
+									$('span.prompt-voice-recording-dot', { style: 'width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;' }),
+									' ',
+									$('span.prompt-voice-recording-time', undefined, '0:00 / 5:00')
+								),
+								$<HTMLButtonElement>('button.prompt-voice-mic-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-voice-target': 'preinjected', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${preMicOpacity}; padding: 0; transition: all 120ms ease;`, title: preMicTitle },
+									$('span.codicon.codicon-mic', { style: 'font-size: 12.5px;' })
+								)
+							)
+						)
+					) : undefined;
 
-					const targetSelectorRowHtml = isAgentMode ? `
-								<!-- Target AI Agent Selector (Mode locked by template, Agent selectable by ticket user) -->
-								<div style="display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.22);">
-									<label style="font-size: 11px; font-weight: 600; color: #38bdf8;">Target AI Agent:</label>
-									<select class="prompt-agent-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: rgba(0,0,0,0.25); color: inherit;">
-										${agentOptionsHtml}
-									</select>
-								</div>
-					` : `
-								<!-- Target AI Model Selector (Mode locked by template, Provider & Searchable Model Picker consistent with Agent Central & Settings) -->
-								<div style="display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.22);">
-									<label style="font-size: 11px; font-weight: 600; color: #60a5fa;">Target AI Model:</label>
-									<div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-										<select class="prompt-provider-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="min-width: 170px; padding: 6px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer;" title="Select AI Provider / Configured Credential">
-											${providerOptionsHtml}
-										</select>
-										<input type="hidden" class="prompt-model-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(promptModel)}" />
-										<div class="prompt-model-picker-container" style="flex: 1; min-width: 220px; position: relative;">
-											<button type="button" class="prompt-model-picker-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;" title="Select or search AI model from your configured provider credentials (consistent with Agent Central)">
-												<span style="display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-													<svg width="12" height="12" viewBox="0 0 16 16" fill="#60a5fa"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-													<span class="prompt-selected-model-text" style="font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);">${this._escapeHtml(promptModel)}</span>
-												</span>
-												<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="opacity: 0.7;"><path d="M4 6l4 4 4-4H4z"/></svg>
-											</button>
-											<div class="prompt-model-dropdown" style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(59,130,246,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;">
-												<div style="display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);">
-													<span class="codicon codicon-search" style="font-size: 12px; opacity: 0.65;"></span>
-													<input type="text" class="prompt-model-search-input" placeholder="Search models (e.g. flash, sonnet, 4o, gpt-5) or enter ID..." style="flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;" />
-													<span class="prompt-dropdown-provider-badge" style="font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(59,130,246,0.2); color: #60a5fa; text-transform: uppercase;">${this._escapeHtml((promptProvider || 'openai').toUpperCase())}</span>
-												</div>
-												<div class="prompt-model-list" style="max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;"></div>
-											</div>
-										</div>
-									</div>
-								</div>
-					`;
+					const targetSelectorRow = isAgentMode ? $('div', { style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.22);' },
+						$('label', { style: 'font-size: 11px; font-weight: 600; color: #38bdf8;' }, 'Target AI Agent:'),
+						$<HTMLSelectElement>('select.prompt-agent-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: rgba(0,0,0,0.25); color: inherit;' },
+							...agentOptionsNodes
+						)
+					) : $('div', { style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.22);' },
+						$('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'Target AI Model:'),
+						$('div', { style: 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap;' },
+							$<HTMLSelectElement>('select.prompt-provider-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'min-width: 170px; padding: 6px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer;', title: 'Select AI Provider / Configured Credential' },
+								...providerOptionsNodes
+							),
+							$<HTMLInputElement>('input.prompt-model-select', { type: 'hidden', 'data-field-key': textOf(rawKey), value: textOf(promptModel) }),
+							$('div.prompt-model-picker-container', { style: 'flex: 1; min-width: 220px; position: relative;' },
+								$<HTMLButtonElement>('button.prompt-model-picker-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;', title: 'Select or search AI model from your configured provider credentials (consistent with Agent Central)' },
+									$('span', { style: 'display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
+										$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: '#60a5fa' },
+											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+										),
+										$('span.prompt-selected-model-text', { style: 'font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);' },
+											textOf(promptModel)
+										)
+									),
+									$.SVG('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor', style: 'opacity: 0.7;' },
+										$.SVG('path', { d: 'M4 6l4 4 4-4H4z' })
+									)
+								),
+								$('div.prompt-model-dropdown', { style: 'display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(59,130,246,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);' },
+										$('span.codicon.codicon-search', { style: 'font-size: 12px; opacity: 0.65;' }),
+										$<HTMLInputElement>('input.prompt-model-search-input', { type: 'text', placeholder: 'Search models (e.g. flash, sonnet, 4o, gpt-5) or enter ID...', style: 'flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;' }),
+										$('span.prompt-dropdown-provider-badge', { style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(59,130,246,0.2); color: #60a5fa; text-transform: uppercase;' },
+											textOf((promptProvider || 'openai').toUpperCase())
+										)
+									),
+									$('div.prompt-model-list', { style: 'max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;' })
+								)
+							)
+						)
+					);
 
-					const userInputsItemsHtml = userPromptsList.map((boxVal, boxIdx) =>
-						this._buildPromptUserInputItemHtml(rawKey, boxIdx, userPromptsList.length, boxVal, promptChipsHtml, userPromptsLockedList[boxIdx])
-					).join('');
-					const userPromptSectionHtml = isUserInputVisible ? `
-								<!-- User Prompt Input Space (Supports 1 or Multiple Sequential Input Boxes) -->
-								<div class="prompt-user-inputs-section" style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.22);">
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
-										<div style="display: flex; align-items: center; gap: 8px;">
-											<label style="font-size: 11px; font-weight: 600; color: #60a5fa;">User Prompt / Instructions:</label>
-											<span class="prompt-user-inputs-count-badge" style="font-size: 9.5px; padding: 1px 6px; border-radius: 10px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: ${userPromptsList.length > 1 ? 'inline-block' : 'none'};">${userPromptsList.length} Inputs</span>
-										</div>
-										<span style="font-size: 10px; color: #38bdf8;">Combined in order when sent to AI · Supports {{param_name}} or {Field Label}</span>
-									</div>
-									<div class="prompt-user-inputs-list" style="display: ${userPromptsList.length > 0 ? 'flex' : 'none'}; flex-direction: column; gap: 10px;">
-										${userInputsItemsHtml}
-									</div>
-									<div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px;">
-										<button type="button" class="prompt-add-user-input-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: linear-gradient(135deg, #059669, #10b981); color: #ffffff; border: 1px solid #34d399; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); transition: all 0.15s ease;" title="Add a user prompt input box below to enter or voice-dictate an input segment">
-											<span class="codicon codicon-add" style="font-size: 12px;"></span>
-											<span>Add User Prompt Input Box</span>
-										</button>
-									</div>
-								</div>
-					` : '';
+					const userInputsItemsNodes = userPromptsList.map((boxVal, boxIdx) =>
+						this._buildPromptUserInputItem(rawKey, boxIdx, userPromptsList.length, boxVal, promptChips(), userPromptsLockedList[boxIdx])
+					);
+					const userPromptSection = isUserInputVisible ? $('div.prompt-user-inputs-section', { style: 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.22);' },
+						$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'User Prompt / Instructions:'),
+								$('span.prompt-user-inputs-count-badge', { style: `font-size: 9.5px; padding: 1px 6px; border-radius: 10px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: ${userPromptsList.length > 1 ? 'inline-block' : 'none'};` },
+									String(userPromptsList.length),
+									' Inputs'
+								)
+							),
+							$('span', { style: 'font-size: 10px; color: #38bdf8;' },
+								'Combined in order when sent to AI \u00B7 Supports {{param_name}} or {Field Label}'
+							)
+						),
+						$('div.prompt-user-inputs-list', { style: `display: ${userPromptsList.length > 0 ? 'flex' : 'none'}; flex-direction: column; gap: 10px;` },
+							...userInputsItemsNodes
+						),
+						$('div', { style: 'display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px;' },
+							$<HTMLButtonElement>('button.prompt-add-user-input-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: linear-gradient(135deg, #059669, #10b981); color: #ffffff; border: 1px solid #34d399; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); transition: all 0.15s ease;', title: 'Add a user prompt input box below to enter or voice-dictate an input segment' },
+								$('span.codicon.codicon-add', { style: 'font-size: 12px;' }),
+								$('span', undefined, 'Add User Prompt Input Box')
+							)
+						)
+					) : undefined;
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card prompt-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="prompt" data-target-mode="${this._escapeHtmlAttr(promptMode)}" data-target-provider="${this._escapeHtmlAttr(promptProvider)}" data-target-model="${this._escapeHtmlAttr(promptModel)}" data-user-customized-target="${userCustomizedTarget ? 'true' : 'false'}" data-pre-injected-prompt="${this._escapeHtmlAttr(preInjectedPrompt)}" data-pre-injected-visible="${isPreInjectedVisible ? 'true' : 'false'}" data-user-input-visible="${isUserInputVisible ? 'true' : 'false'}" data-prompt-chips-html="${this._escapeHtmlAttr(promptChipsHtml)}" data-last-sent-payload="${this._escapeHtmlAttr(lastSentPayloadJson)}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(59,130,246,0.18); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Prompt</span>
-									<span class="prompt-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;">${this._escapeHtml(targetBadgeText)}</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									${stepBadgeHtml}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(userPromptText)}" title="Edit ${k} with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
-${targetSelectorRowHtml}
-${preInjectedBlockHtml}
-${userPromptSectionHtml}
-
-								<!-- Action Buttons Row -->
-								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-									<div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-										<button type="button" class="prompt-run-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59,130,246,0.18); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); ${isAgentMode ? 'display: none;' : ''}" title="Execute prompt with selected model">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5l9 5.5-9 5.5v-11z"/></svg>
-											<span>Run with Model</span>
-										</button>
-										<button type="button" class="prompt-dispatch-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.18); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); ${!isAgentMode ? 'display: none;' : ''}" title="Dispatch task to selected AI Agent">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L2 5v6l6 4 6-4V5L8 1z"/></svg>
-											<span>Dispatch to Agent</span>
-										</button>
-										<button type="button" class="prompt-open-agent-central-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.35);" title="Open Agent Central Chat with this prompt">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1H2a1 1 0 00-1 1v9a1 1 0 001 1h3v3l3.5-3H14a1 1 0 001-1V2a1 1 0 00-1-1z"/></svg>
-											<span>Agent Central</span>
-										</button>
-									</div>
-									<button type="button" class="prompt-save-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);" title="Save prompt instruction & settings">
-										<span>Save Prompt</span>
-									</button>
-								</div>
-
-								<!-- Output Area -->
-								<div class="prompt-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px; gap: 8px; flex-wrap: wrap;">
-										<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">AI Execution Output:</span>
-											<span class="prompt-status-text" style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;">${lastExecutedText ? `Executed: ${this._escapeHtmlAttr(lastExecutedText)}` : 'Ready'}</span>
-										</div>
-										<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;">
-											<button type="button" class="prompt-inspect-sent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; cursor: pointer; color: #38bdf8;" title="Inspect the complete prompt sent to AI (Structured breakdown + Full verbatim prompt)">
-												<span class="codicon codicon-eye" style="font-size: 11.5px;"></span>
-												<span>View Sent Prompt</span>
-											</button>
-											<button type="button" class="prompt-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy</button>
-											<button type="button" class="prompt-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
-										</div>
-									</div>
-									<textarea class="prompt-raw-output" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(promptOutput)}</textarea>
-									<div class="prompt-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${promptOutput ? this._escapeHtml(this._formatPromptOutputPreviewText(promptOutput)) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'}</div>
-								</div>
-							</div>
-						</div>
-					`;
+					const promptCard = $('div', { class: `section-card custom-property-card prompt-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'prompt', 'data-target-mode': textOf(promptMode), 'data-target-provider': textOf(promptProvider), 'data-target-model': textOf(promptModel), 'data-user-customized-target': (userCustomizedTarget ? 'true' : 'false'), 'data-pre-injected-prompt': textOf(preInjectedPrompt), 'data-pre-injected-visible': (isPreInjectedVisible ? 'true' : 'false'), 'data-user-input-visible': (isUserInputVisible ? 'true' : 'false'), 'data-last-sent-payload': textOf(lastSentPayloadJson) },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(59,130,246,0.18); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
+									'Prompt'
+								),
+								$('span.prompt-target-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;` },
+									textOf(targetBadgeText)
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'prompt', 'data-ai-field-label': k, 'data-ai-current-value': textOf(userPromptText), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+							targetSelectorRow,
+							...(preInjectedBlock ? [preInjectedBlock] : []),
+							...(userPromptSection ? [userPromptSection] : []),
+							$('div', { style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;' },
+								$('div', { style: 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap;' },
+									$<HTMLButtonElement>('button.prompt-run-model-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59,130,246,0.18); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); ${isAgentMode ? 'display: none;' : ''}`, title: 'Execute prompt with selected model' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M4 2.5l9 5.5-9 5.5v-11z' })
+										),
+										$('span', undefined, 'Run with Model')
+									),
+									$<HTMLButtonElement>('button.prompt-dispatch-agent-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.18); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); ${!isAgentMode ? 'display: none;' : ''}`, title: 'Dispatch task to selected AI Agent' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M8 1L2 5v6l6 4 6-4V5L8 1z' })
+										),
+										$('span', undefined, 'Dispatch to Agent')
+									),
+									$<HTMLButtonElement>('button.prompt-open-agent-central-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.35);', title: 'Open Agent Central Chat with this prompt' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M14 1H2a1 1 0 00-1 1v9a1 1 0 001 1h3v3l3.5-3H14a1 1 0 001-1V2a1 1 0 00-1-1z' })
+										),
+										$('span', undefined, 'Agent Central')
+									)
+								),
+								$<HTMLButtonElement>('button.prompt-save-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);', title: 'Save prompt instruction & settings' },
+									$('span', undefined, 'Save Prompt')
+								)
+							),
+							$('div.prompt-output-section', { style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px; gap: 8px; flex-wrap: wrap;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+										$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'AI Execution Output:'),
+										$('span.prompt-status-text', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;' },
+											...(lastExecutedText ? ['Executed: ', textOf(lastExecutedText)] : ['Ready'])
+										)
+									),
+									$('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;' },
+										$<HTMLButtonElement>('button.prompt-inspect-sent-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; cursor: pointer; color: #38bdf8;', title: 'Inspect the complete prompt sent to AI (Structured breakdown + Full verbatim prompt)' },
+											$('span.codicon.codicon-eye', { style: 'font-size: 11.5px;' }),
+											$('span', undefined, 'View Sent Prompt')
+										),
+										$<HTMLButtonElement>('button.prompt-copy-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
+											'Copy'
+										),
+										$<HTMLButtonElement>('button.prompt-clear-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
+											'Clear'
+										)
+									)
+								),
+								$<HTMLTextAreaElement>('textarea.prompt-raw-output', { 'data-field-key': textOf(rawKey), style: 'display: none;' }, textOf(promptOutput)),
+								$('div.prompt-output-display.desc-content-box', { style: 'max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
+									promptOutput ? textOf(this._formatPromptOutputPreviewText(promptOutput)) : $('span', { style: 'opacity: 0.4; font-style: italic;' },
+										'No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.'
+									)
+								)
+							)
+						)
+					);
+					cardRuntimeState(promptCard).promptChips = promptChips;
+					customFieldsContent.push(promptCard);
 				} else if (fType === 'tts') {
 					let ttsText = fieldItem.defaultContent || '';
 					let ttsDisplayText = fieldItem.ttsDisplayText || '';
@@ -19710,139 +20058,153 @@ ${userPromptSectionHtml}
 					const interpolatedSpeechText = this._interpolateParameters(ttsText);
 					const interpolatedDisplayText = this._interpolateParameters(ttsDisplayText);
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card tts-primitive-card"
-							data-field-key="${this._escapeHtmlAttr(rawKey)}"
-							data-llm-text="${this._escapeHtmlAttr(ttsText)}"
-							data-show-speech-text="${ttsShowSpeechTextInTicket ? 'true' : 'false'}"
-							data-template-audio="${this._escapeHtmlAttr(fieldItem.ttsAudioDataUrl || '')}"
-							data-cred-id="${this._escapeHtmlAttr(ttsCredentialId)}"
-							data-provider="${this._escapeHtmlAttr(ttsProvider)}"
-							data-model="${this._escapeHtmlAttr(ttsModel)}"
-							data-format="${this._escapeHtmlAttr(ttsFormat)}"
-							data-voice="${this._escapeHtmlAttr(ttsVoice)}"
-							data-autoplay="${ttsAutoPlay ? 'true' : 'false'}"
-							data-playback-rate="${this._escapeHtmlAttr(String(ttsPlaybackRate))}"
-							data-audio-file="${this._escapeHtmlAttr(audioFileName)}"
-							data-audio-path="${this._escapeHtmlAttr(audioRelativePath)}"
-							data-last-synthesized="${this._escapeHtmlAttr(lastSynthesizedText)}"
-							data-last-generated="${this._escapeHtmlAttr(lastGenerated)}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.18); color: #f472b6; font-weight: 700; text-transform: uppercase;">Audio / TTS</span>
-									<span class="tts-header-model-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.12); color: #f9a8d4; font-weight: 600;">Model: ${this._escapeHtml(ttsModel)} (${this._escapeHtml(ttsFormat.toUpperCase())})</span>
-									<span class="tts-cached-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(34,197,94,0.15); color: #4ade80; font-weight: 600; display: ${audioRelativePath ? 'inline-block' : 'none'};">Saved Locally (${this._escapeHtml(audioFileName || ttsFormat.toUpperCase())})</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="tts" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(ttsDisplayText)}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-
-							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
-								<!-- Zone 1: Expandable / Collapsible AI Model Settings + Speech Synthesis Source + Send & Delete Audio Controls -->
-								<div style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(236, 72, 153, 0.05); border: 1px solid rgba(236, 72, 153, 0.22);">
-									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
-										<div style="display: flex; align-items: center; gap: 6px;">
-											<label style="font-size: 11px; font-weight: 600; color: #f472b6;">AI Model &amp; Speech Synthesis Script:</label>
-											<span style="font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(236,72,153,0.14); color: #f9a8d4;">Model Config &amp; Speech Source</span>
-										</div>
-										<button type="button" class="tts-toggle-speech-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(236, 72, 153, 0.15); border: 1px solid rgba(236, 72, 153, 0.35); color: #f9a8d4;" title="Expand or collapse AI model settings, speech synthesis text, and generation buttons">${ttsShowSpeechTextInTicket ? 'Collapse AI Section' : 'Show AI Section'}</button>
-									</div>
-									<div class="tts-speech-text-body" style="display: ${ttsShowSpeechTextInTicket ? 'flex' : 'none'}; flex-direction: column; gap: 8px;">
-										<!-- Agent Central-Style Provider/Credential + Searchable Model Selector + Format + Voice + Auto-Play -->
-										<div style="display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.22); padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(236,72,153,0.2);">
-											<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-												<span style="font-size: 11px; font-weight: 600; color: #f472b6; min-width: 65px;">AI Model:</span>
-												<select class="tts-cred-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="min-width: 170px; padding: 5px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer;" title="Select AI Provider / Credential (Agent Central)">
-													<option value="${this._escapeHtmlAttr(ttsProvider)}">${this._escapeHtml(ttsProvider.toUpperCase())}</option>
-												</select>
-												<div class="tts-model-picker-container" style="flex: 1; min-width: 210px; position: relative;">
-													<button type="button" class="tts-model-picker-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 5px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;" title="Select or search voice / TTS model (consistent with Agent Central)">
-														<span style="display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-															<svg width="11" height="11" viewBox="0 0 16 16" fill="#f472b6"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-															<span class="tts-selected-model-text" style="font-weight: 600;">${this._escapeHtml(ttsModel)}</span>
-														</span>
-														<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="opacity: 0.7;"><path d="M4 6l4 4 4-4H4z"/></svg>
-													</button>
-													<div class="tts-model-dropdown" style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(236,72,153,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;">
-														<div style="display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);">
-															<input type="text" class="tts-model-search-input" placeholder="Search or enter model ID..." style="flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;" />
-															<span class="tts-dropdown-provider-badge" style="font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(236,72,153,0.2); color: #f472b6; text-transform: uppercase;">${this._escapeHtml(ttsProvider.toUpperCase())}</span>
-														</div>
-														<div class="tts-model-list" style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;"></div>
-													</div>
-												</div>
-											</div>
-
-											<div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.05);">
-												<div style="display: flex; align-items: center; gap: 6px;">
-													<span style="font-size: 11px; font-weight: 600; opacity: 0.8;">Format:</span>
-													<select class="tts-format-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;">
-														<option value="mp3" ${ttsFormat === 'mp3' ? 'selected' : ''}>MP3 (Default)</option>
-														<option value="wav" ${ttsFormat === 'wav' ? 'selected' : ''}>WAV</option>
-														<option value="opus" ${ttsFormat === 'opus' ? 'selected' : ''}>OPUS</option>
-														<option value="aac" ${ttsFormat === 'aac' ? 'selected' : ''}>AAC</option>
-													</select>
-												</div>
-												<div style="display: flex; align-items: center; gap: 6px;">
-													<span style="font-size: 11px; font-weight: 600; opacity: 0.8;">Voice:</span>
-													<select class="tts-voice-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;">
-														<option value="${this._escapeHtmlAttr(ttsVoice)}">${this._escapeHtml(ttsVoice)}</option>
-													</select>
-												</div>
-												<label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; user-select: none; margin-left: auto; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);" title="Automatically play this MP3 audio when viewing this module">
-													<input type="checkbox" class="tts-autoplay-checkbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" ${ttsAutoPlay ? 'checked' : ''} style="cursor: pointer; margin: 0;" />
-													<span>Auto-Play Audio</span>
-												</label>
-											</div>
-										</div>
-
-										<textarea class="tts-llm-text-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="3" placeholder="Pure listening text sent to AI model for speech synthesis..." style="width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;">${this._escapeHtml(interpolatedSpeechText)}</textarea>
-										<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-											<span class="tts-status-text" style="font-size: 10.5px; opacity: 0.78;">${audioRelativePath ? `Saved: ${this._escapeHtml(audioFileName || audioRelativePath)}${lastGenerated ? ` (${this._escapeHtml(lastGenerated)})` : ''}` : 'No audio file saved yet'}</span>
-											<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-												<button type="button" class="tts-send-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.22); color: #f472b6; border: 1px solid rgba(236,72,153,0.5); transition: all 0.15s ease;" title="Send Speech Synthesis Text to AI model API to generate MP3 audio (consumes model tokens)">
-													<span class="codicon codicon-send" style="font-size: 11px;"></span>
-													<span>Send &amp; Generate Audio</span>
-												</button>
-												<button type="button" class="tts-delete-audio-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: ${audioRelativePath ? 'inline-flex' : 'none'}; align-items: center; gap: 4px; padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4);" title="Delete saved MP3 audio file from this component">
-													<span class="codicon codicon-trash" style="font-size: 11px;"></span>
-													<span>Delete Audio</span>
-												</button>
-											</div>
-										</div>
-									</div>
-								</div>
-
-								<!-- Zone 2: Isolated Reading Content & Study Notes + Dedicated Audio Player Bar -->
-								<div style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(56, 189, 248, 0.04); border: 1px solid rgba(56, 189, 248, 0.22);">
-									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
-										<div style="display: flex; align-items: center; gap: 6px;">
-											<label style="font-size: 11px; font-weight: 600; color: #93c5fd;">Reading Content &amp; Study Notes:</label>
-											<span style="font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(59,130,246,0.14); color: #60a5fa;">Notes &amp; Annotations</span>
-										</div>
-										<div style="display: flex; align-items: center; gap: 6px;">
-											<button type="button" class="tts-copy-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(0, 122, 204, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: #7dd3fc;" title="Copy all reading content to clipboard">
-												<span class="codicon codicon-copy" style="font-size: 11px;"></span>
-												<span class="tts-copy-btn-label">Copy</span>
-											</button>
-											<button type="button" class="tts-edit-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.18); color: inherit;" title="Click Edit to unlock and modify or clear reading content (auto-saves changes)">
-												<span class="tts-edit-btn-icon codicon codicon-edit" style="font-size: 11px;"></span>
-												<span class="tts-edit-btn-label">Edit</span>
-											</button>
-											<button type="button" class="tts-clear-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #f87171;" title="Clear reading content">
-												<span class="codicon codicon-clear-all" style="font-size: 11px;"></span>
-												<span>Clear</span>
-											</button>
-										</div>
-									</div>
-									<textarea class="tts-text-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="4" readonly placeholder="Reading passage with vocabulary notes and translations..." style="width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;">${this._escapeHtml(interpolatedDisplayText)}</textarea>
-									<div class="tts-audio-player-mount" style="width: 100%; display: flex; align-items: center;"></div>
-								</div>
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card.tts-primitive-card', { 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.18); color: #f472b6; font-weight: 700; text-transform: uppercase;' },
+									'Audio / TTS'
+								),
+								$('span.tts-header-model-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.12); color: #f9a8d4; font-weight: 600;' },
+									'Model: ',
+									textOf(ttsModel),
+									' (',
+									textOf(ttsFormat.toUpperCase()),
+									')'
+								),
+								$('span.tts-cached-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(34,197,94,0.15); color: #4ade80; font-weight: 600; display: ${audioRelativePath ? 'inline-block' : 'none'};` },
+									'Saved Locally (',
+									textOf(audioFileName || ttsFormat.toUpperCase()),
+									')'
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'tts', 'data-ai-field-label': k, 'data-ai-current-value': textOf(ttsDisplayText), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+							$('div', { style: 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(236, 72, 153, 0.05); border: 1px solid rgba(236, 72, 153, 0.22);' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+										$('label', { style: 'font-size: 11px; font-weight: 600; color: #f472b6;' }, 'AI Model & Speech Synthesis Script:'),
+										$('span', { style: 'font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(236,72,153,0.14); color: #f9a8d4;' },
+											'Model Config & Speech Source'
+										)
+									),
+									$<HTMLButtonElement>('button.tts-toggle-speech-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'padding: 2px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(236, 72, 153, 0.15); border: 1px solid rgba(236, 72, 153, 0.35); color: #f9a8d4;', title: 'Expand or collapse AI model settings, speech synthesis text, and generation buttons' },
+										ttsShowSpeechTextInTicket ? 'Collapse AI Section' : 'Show AI Section'
+									)
+								),
+								$('div.tts-speech-text-body', { style: `display: ${ttsShowSpeechTextInTicket ? 'flex' : 'none'}; flex-direction: column; gap: 8px;` },
+									$('div', { style: 'display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.22); padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(236,72,153,0.2);' },
+										$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+											$('span', { style: 'font-size: 11px; font-weight: 600; color: #f472b6; min-width: 65px;' }, 'AI Model:'),
+											$<HTMLSelectElement>('select.tts-cred-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'min-width: 170px; padding: 5px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer;', title: 'Select AI Provider / Credential (Agent Central)' },
+												$<HTMLOptionElement>('option', { value: textOf(ttsProvider) }, textOf(ttsProvider.toUpperCase()))
+											),
+											$('div.tts-model-picker-container', { style: 'flex: 1; min-width: 210px; position: relative;' },
+												$<HTMLButtonElement>('button.tts-model-picker-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 5px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;', title: 'Select or search voice / TTS model (consistent with Agent Central)' },
+													$('span', { style: 'display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
+														$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: '#f472b6' },
+															$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+														),
+														$('span.tts-selected-model-text', { style: 'font-weight: 600;' }, textOf(ttsModel))
+													),
+													$.SVG('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor', style: 'opacity: 0.7;' },
+														$.SVG('path', { d: 'M4 6l4 4 4-4H4z' })
+													)
+												),
+												$('div.tts-model-dropdown', { style: 'display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(236,72,153,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;' },
+													$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);' },
+														$<HTMLInputElement>('input.tts-model-search-input', { type: 'text', placeholder: 'Search or enter model ID...', style: 'flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;' }),
+														$('span.tts-dropdown-provider-badge', { style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(236,72,153,0.2); color: #f472b6; text-transform: uppercase;' },
+															textOf(ttsProvider.toUpperCase())
+														)
+													),
+													$('div.tts-model-list', { style: 'max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;' })
+												)
+											)
+										),
+										$('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.05);' },
+											$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+												$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.8;' }, 'Format:'),
+												$<HTMLSelectElement>('select.tts-format-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
+													$<HTMLOptionElement>('option', { value: 'mp3', selected: ttsFormat === 'mp3' ? true : undefined }, 'MP3 (Default)'),
+													$<HTMLOptionElement>('option', { value: 'wav', selected: ttsFormat === 'wav' ? true : undefined }, 'WAV'),
+													$<HTMLOptionElement>('option', { value: 'opus', selected: ttsFormat === 'opus' ? true : undefined }, 'OPUS'),
+													$<HTMLOptionElement>('option', { value: 'aac', selected: ttsFormat === 'aac' ? true : undefined }, 'AAC')
+												)
+											),
+											$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+												$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.8;' }, 'Voice:'),
+												$<HTMLSelectElement>('select.tts-voice-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
+													$<HTMLOptionElement>('option', { value: textOf(ttsVoice) }, textOf(ttsVoice))
+												)
+											),
+											$('label', { style: 'display: inline-flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; user-select: none; margin-left: auto; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);', title: 'Automatically play this MP3 audio when viewing this module' },
+												$<HTMLInputElement>('input.tts-autoplay-checkbox', { type: 'checkbox', 'data-field-key': textOf(rawKey), checked: ttsAutoPlay ? '' : undefined, style: 'cursor: pointer; margin: 0;' }),
+												$('span', undefined, 'Auto-Play Audio')
+											)
+										)
+									),
+									$<HTMLTextAreaElement>('textarea.tts-llm-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '3', placeholder: 'Pure listening text sent to AI model for speech synthesis...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
+										textOf(interpolatedSpeechText)
+									),
+									$('div', { style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;' },
+										$('span.tts-status-text', { style: 'font-size: 10.5px; opacity: 0.78;' },
+											...(audioRelativePath ? [
+												'Saved: ',
+												textOf(audioFileName || audioRelativePath),
+												...(lastGenerated ? [' (', textOf(lastGenerated), ')'] : [])
+											] : ['No audio file saved yet'])
+										),
+										$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
+											$<HTMLButtonElement>('button.tts-send-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.22); color: #f472b6; border: 1px solid rgba(236,72,153,0.5); transition: all 0.15s ease;', title: 'Send Speech Synthesis Text to AI model API to generate MP3 audio (consumes model tokens)' },
+												$('span.codicon.codicon-send', { style: 'font-size: 11px;' }),
+												$('span', undefined, 'Send & Generate Audio')
+											),
+											$<HTMLButtonElement>('button.tts-delete-audio-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: ${audioRelativePath ? 'inline-flex' : 'none'}; align-items: center; gap: 4px; padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4);`, title: 'Delete saved MP3 audio file from this component' },
+												$('span.codicon.codicon-trash', { style: 'font-size: 11px;' }),
+												' ',
+												$('span', undefined, 'Delete Audio')
+											)
+										)
+									)
+								)
+							),
+							$('div', { style: 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(56, 189, 248, 0.04); border: 1px solid rgba(56, 189, 248, 0.22);' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+										$('label', { style: 'font-size: 11px; font-weight: 600; color: #93c5fd;' }, 'Reading Content & Study Notes:'),
+										$('span', { style: 'font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(59,130,246,0.14); color: #60a5fa;' },
+											'Notes & Annotations'
+										)
+									),
+									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+										$<HTMLButtonElement>('button.tts-copy-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(0, 122, 204, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: #7dd3fc;', title: 'Copy all reading content to clipboard' },
+											$('span.codicon.codicon-copy', { style: 'font-size: 11px;' }),
+											$('span.tts-copy-btn-label', undefined, 'Copy')
+										),
+										$<HTMLButtonElement>('button.tts-edit-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.18); color: inherit;', title: 'Click Edit to unlock and modify or clear reading content (auto-saves changes)' },
+											$('span.tts-edit-btn-icon.codicon.codicon-edit', { style: 'font-size: 11px;' }),
+											$('span.tts-edit-btn-label', undefined, 'Edit')
+										),
+										$<HTMLButtonElement>('button.tts-clear-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: none; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #f87171;', title: 'Clear reading content' },
+											$('span.codicon.codicon-clear-all', { style: 'font-size: 11px;' }),
+											' ',
+											$('span', undefined, 'Clear')
+										)
+									)
+								),
+								$<HTMLTextAreaElement>('textarea.tts-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '4', readonly: '', placeholder: 'Reading passage with vocabulary notes and translations...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
+									textOf(interpolatedDisplayText)
+								),
+								$('div.tts-audio-player-mount', { style: 'width: 100%; display: flex; align-items: center;' })
+							)
+						)
+					));
 				} else if (fType === 'media_player') {
 					let mediaFilePath = fieldItem.mediaFilePath || '';
 					let mediaFileName = fieldItem.mediaFileName || '';
@@ -19892,30 +20254,29 @@ ${userPromptSectionHtml}
 					const resolvedFileName = mediaFileName || (interpolatedMediaPath ? (interpolatedMediaPath.split(/[\\/]/).pop() || interpolatedMediaPath) : '');
 					const detected = detectMediaFileInfo(resolvedFileName || interpolatedMediaPath, mediaMimeType);
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card media-player-primitive-card"
-							data-field-key="${this._escapeHtmlAttr(rawKey)}"
-							data-media-path="${this._escapeHtmlAttr(interpolatedMediaPath)}"
-							data-media-name="${this._escapeHtmlAttr(resolvedFileName)}"
-							data-media-kind="${this._escapeHtmlAttr(detected.kind || mediaKind)}"
-							data-media-mime="${this._escapeHtmlAttr(detected.mimeType || mediaMimeType)}"
-							data-playback-rate="${this._escapeHtmlAttr(String(mediaPlaybackRate))}"
-							data-autoplay="${mediaAutoPlay ? 'true' : 'false'}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(245, 158, 11, 0.18); color: #fbbf24; font-weight: 700; text-transform: uppercase;">MP3 / MP4 Player</span>
-									<span class="media-player-header-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #38bdf8; font-weight: 600; display: ${resolvedFileName ? 'inline-block' : 'none'};">${this._escapeHtml(detected.kind.toUpperCase())} · ${this._escapeHtml((detected.ext || 'MEDIA').toUpperCase())}</span>
-								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="media_player" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(interpolatedMediaPath)}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
-								<div class="media-player-card-mount" style="width: 100%; display: flex; flex-direction: column; gap: 10px;"></div>
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div.section-card.custom-property-card.media-player-primitive-card', { 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false') },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(245, 158, 11, 0.18); color: #fbbf24; font-weight: 700; text-transform: uppercase;' },
+									'MP3 / MP4 Player'
+								),
+								$('span.media-player-header-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #38bdf8; font-weight: 600; display: ${resolvedFileName ? 'inline-block' : 'none'};` },
+									textOf(detected.kind.toUpperCase()),
+									' \u00B7 ',
+									textOf((detected.ext || 'MEDIA').toUpperCase())
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'media_player', 'data-ai-field-label': k, 'data-ai-current-value': textOf(interpolatedMediaPath), title: `Edit ${k} with AI` },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+							$('div.media-player-card-mount', { style: 'width: 100%; display: flex; flex-direction: column; gap: 10px;' })
+						)
+					));
 				} else if (fType === 'voice_note') {
 					let voiceClips: IVoiceNoteClip[] = Array.isArray(fieldItem.voiceClips) ? fieldItem.voiceClips : [];
 					let voiceTranscript: string = fieldItem.voiceTranscript || '';
@@ -19935,30 +20296,44 @@ ${userPromptSectionHtml}
 							if (typeof stored.voiceTranscript === 'string') { voiceTranscript = stored.voiceTranscript; }
 						}
 					}
-					const clipsHtml = voiceClips.length === 0
-						? `<div style="font-size: 11.5px; color: rgba(255,255,255,0.5); padding: 8px 10px; border: 1px dashed rgba(148,163,184,0.3); border-radius: 6px;">No voice recordings yet.</div>`
-						: voiceClips.map((c, ci: number) => `
-							<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.24); border: 1px solid rgba(148,163,184,0.22);">
-								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-									<span style="font-size: 10.5px; font-weight: 700; color: #cbd5e1; background: rgba(148,163,184,0.16); padding: 1px 6px; border-radius: 4px;">#${ci + 1}</span>
-									${c?.audioDataUrl ? `<audio controls preload="metadata" src="${this._escapeHtmlAttr(c.audioDataUrl)}" style="height: 28px; flex: 1; min-width: 160px;"></audio>` : ''}
-								</div>
-								${c?.transcript ? `<div style="font-size: 11.5px; line-height: 1.45; color: var(--vscode-foreground); white-space: pre-wrap;">${this._escapeHtml(String(c.transcript))}</div>` : ''}
-							</div>
-						`).join('');
-					customFieldsHtml += `
-						<div class="custom-field-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-type="voice_note" style="background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;">
-							<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span class="codicon codicon-mic" style="color: #94a3b8;"></span>
-									<span style="font-weight: 600; font-size: 13px;">${this._escapeHtml(k)}</span>
-									<span style="font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.32);">VOICE NOTE (${voiceClips.length})</span>
-								</div>
-							</div>
-							<div style="display: flex; flex-direction: column; gap: 6px;">${clipsHtml}</div>
-							${voiceTranscript && voiceClips.length === 0 ? `<div style="font-size: 11.5px; color: var(--vscode-foreground); white-space: pre-wrap;">${this._escapeHtml(voiceTranscript)}</div>` : ''}
-						</div>
-					`;
+					const clipNodes = voiceClips.length === 0
+						? [$('div', { style: 'font-size: 11.5px; color: rgba(255,255,255,0.5); padding: 8px 10px; border: 1px dashed rgba(148,163,184,0.3); border-radius: 6px;' },
+							'No voice recordings yet.'
+						)]
+						: voiceClips.map((c, ci: number) => $('div', { style: 'display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.24); border: 1px solid rgba(148,163,184,0.22);' },
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', { style: 'font-size: 10.5px; font-weight: 700; color: #cbd5e1; background: rgba(148,163,184,0.16); padding: 1px 6px; border-radius: 4px;' },
+									'#',
+									String(ci + 1)
+								),
+								...(c?.audioDataUrl ? [
+									$<HTMLAudioElement>('audio', { controls: '', preload: 'metadata', src: textOf(c.audioDataUrl), style: 'height: 28px; flex: 1; min-width: 160px;' })
+								] : [])
+							),
+							...(c?.transcript ? [
+								$('div', { style: 'font-size: 11.5px; line-height: 1.45; color: var(--vscode-foreground); white-space: pre-wrap;' },
+									textOf(String(c.transcript))
+								)
+							] : [])
+						));
+					customFieldsContent.push($('div.custom-field-card', { 'data-field-key': textOf(rawKey), 'data-field-type': 'voice_note', style: 'background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;' },
+						$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px;' },
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span.codicon.codicon-mic', { style: 'color: #94a3b8;' }),
+								$('span', { style: 'font-weight: 600; font-size: 13px;' }, textOf(k)),
+								$('span', { style: 'font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.32);' },
+									'VOICE NOTE (',
+									String(voiceClips.length),
+									')'
+								)
+							)
+						),
+						$('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }, ...clipNodes),
+
+						...(voiceTranscript && voiceClips.length === 0 ? [
+							$('div', { style: 'font-size: 11.5px; color: var(--vscode-foreground); white-space: pre-wrap;' }, textOf(voiceTranscript))
+						] : [])
+					));
 				} else if (fType === 'table') {
 					let tableColumns: ITableColumnDefinition[] = Array.isArray(fieldItem.tableColumns) && fieldItem.tableColumns.length > 0
 						? fieldItem.tableColumns
@@ -20074,24 +20449,28 @@ ${userPromptSectionHtml}
 					const dbShort = dbPath ? ` · SQLite: ${dbPath.split(/[/\\]/).pop()}` : '';
 					const statsText = `${tableColumns.length} cols · ${tableRows.length} rows${dbShort}`;
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card table-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="table" data-table-json="${this._escapeHtmlAttr(tablePayloadStr)}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(20, 184, 166, 0.18); color: #2dd4bf; font-weight: 700; text-transform: uppercase;">Data Table</span>
-									<span class="table-header-stats-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #5eead4; font-family: monospace;">${this._escapeHtml(statsText)}</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									${stepBadgeHtml}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="table" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(tablePayloadStr)}" title="Operate ${k} table & SQLite with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div class="custom-field-view table-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
-						</div>
-					`;
+					customFieldsContent.push($('div', { class: `section-card custom-property-card table-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'table', 'data-table-json': textOf(tablePayloadStr) },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(20, 184, 166, 0.18); color: #2dd4bf; font-weight: 700; text-transform: uppercase;' },
+									'Data Table'
+								),
+								$('span.table-header-stats-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #5eead4; font-family: monospace;' },
+									textOf(statsText)
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'table', 'data-ai-field-label': k, 'data-ai-current-value': textOf(tablePayloadStr), title: `Operate ${k} table & SQLite with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div.custom-field-view.table-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' })
+					));
 				} else if (fType === 'ssh') {
 					let sshHost: string = fieldItem.sshHost || '';
 					let sshPort: number | string = fieldItem.sshPort || 22;
@@ -20163,24 +20542,28 @@ ${userPromptSectionHtml}
 					});
 					const connTargetLabel = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort}` : 'Not Connected';
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card ssh-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="ssh" data-ssh-json="${this._escapeHtmlAttr(sshPayloadStr)}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); color: #34d399; font-weight: 700; text-transform: uppercase;">SSH Terminal</span>
-									<span class="ssh-header-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #6ee7b7; font-family: monospace;">${this._escapeHtml(connTargetLabel)}</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									${stepBadgeHtml}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="ssh" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(sshCommand)}" title="Edit ${k} SSH command with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div class="custom-field-view ssh-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
-						</div>
-					`;
+					customFieldsContent.push($('div', { class: `section-card custom-property-card ssh-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'ssh', 'data-ssh-json': textOf(sshPayloadStr) },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); color: #34d399; font-weight: 700; text-transform: uppercase;' },
+									'SSH Terminal'
+								),
+								$('span.ssh-header-target-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #6ee7b7; font-family: monospace;' },
+									textOf(connTargetLabel)
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'ssh', 'data-ai-field-label': k, 'data-ai-current-value': textOf(sshCommand), title: `Edit ${k} SSH command with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div.custom-field-view.ssh-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' })
+					));
 				} else if (fType === 'output') {
 					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
 					let savedMap: Record<string, unknown> = {};
@@ -20217,7 +20600,7 @@ ${userPromptSectionHtml}
 						}
 					}
 
-					let itemsHtml = '';
+					const itemNodes: HTMLElement[] = [];
 
 					if (enabledSpecs.length > 0) {
 						let savedMapNeedsSync = false;
@@ -20392,91 +20775,103 @@ ${userPromptSectionHtml}
 							}
 
 							const specStateKey = `${rawKey}::${spec.fieldKey}`;
-							let itemViewportHtml = '';
+							let itemViewport: Node[];
 							if (!itemText) {
 								const notReadyHint = isBrowserField
 									? 'Web content not fetched yet. Click "Fetch (Silent)" in the Browser card above to extract content.'
 									: (isPromptField
 										? 'No AI output generated yet. Run Model or Agent in the Prompt card above or run workflow.'
 										: 'No output data recorded yet.');
-								itemViewportHtml = `<div style="opacity: 0.45; font-style: italic; font-size: 11px; margin: 0;">${notReadyHint}</div>`;
+								itemViewport = [$('div', { style: 'opacity: 0.45; font-style: italic; font-size: 11px; margin: 0;' }, notReadyHint)];
 							} else {
-								itemViewportHtml = this._renderOutputViewportByFormat(itemText, itemFormat, specStateKey);
+								itemViewport = this._renderOutputViewportByFormat(itemText, itemFormat, specStateKey);
 							}
 
-							itemsHtml += `
-								<div class="output-spec-item" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: flex; flex-direction: column; gap: 4px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
-										<div style="display: flex; align-items: center; gap: 6px;">
-											<span style="font-weight: 600; font-size: 12px; color: #a5b4fc;">${this._escapeHtml(spec.label)}</span>
-										</div>
-										<div style="display: flex; align-items: center; gap: 6px;">
-											<span style="font-size: 10.5px; opacity: 0.65;">Format:</span>
-											<select class="output-item-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
-												<option value="text" ${itemFormat === 'text' ? 'selected' : ''}>Text</option>
-												<option value="markdown" ${itemFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
-												<option value="table" ${itemFormat === 'table' ? 'selected' : ''}>Table</option>
-												<option value="json" ${itemFormat === 'json' ? 'selected' : ''}>JSON</option>
-											</select>
-											<button type="button" class="output-item-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" title="Copy output content" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy</button>
-										</div>
-									</div>
-									<textarea class="output-item-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: none;">${this._escapeHtml(itemText)}</textarea>
-									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" data-state-key="${this._escapeHtmlAttr(specStateKey)}" style="padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;">${itemViewportHtml}</div>
-								</div>
-							`;
+							itemNodes.push($('div.output-spec-item', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'display: flex; flex-direction: column; gap: 4px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;' },
+									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+										$('span', { style: 'font-weight: 600; font-size: 12px; color: #a5b4fc;' }, textOf(spec.label))
+									),
+									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+										$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Format:'),
+										$<HTMLSelectElement>('select.output-item-format-selector', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;' },
+											$<HTMLOptionElement>('option', { value: 'text', selected: itemFormat === 'text' ? true : undefined }, 'Text'),
+											$<HTMLOptionElement>('option', { value: 'markdown', selected: itemFormat === 'markdown' ? true : undefined }, 'Markdown'),
+											$<HTMLOptionElement>('option', { value: 'table', selected: itemFormat === 'table' ? true : undefined }, 'Table'),
+											$<HTMLOptionElement>('option', { value: 'json', selected: itemFormat === 'json' ? true : undefined }, 'JSON')
+										),
+										$<HTMLButtonElement>('button.output-item-copy-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), title: 'Copy output content', style: 'background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;' },
+											'Copy'
+										)
+									)
+								),
+								$<HTMLTextAreaElement>('textarea.output-item-raw-content', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'display: none;' },
+									textOf(itemText)
+								),
+								$('div.output-item-viewport.desc-content-box', { 'data-spec-key': textOf(spec.fieldKey), 'data-state-key': textOf(specStateKey), style: 'padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;' },
+									...itemViewport
+								)
+							));
 						}
 						if (savedMapNeedsSync && !this._isPreviewMode && this._lastParsedData?.customMetadata) {
 							this._lastParsedData.customMetadata[rawKey] = JSON.stringify(savedMap);
 						}
 					} else {
 						const singleStateKey = `${rawKey}::__single__`;
-						const initialViewportHtml = this._renderOutputViewportByFormat(singleResultText, singleResultFormat, singleStateKey);
+						const initialViewport = this._renderOutputViewportByFormat(singleResultText, singleResultFormat, singleStateKey);
 
-						itemsHtml = `
-							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-								<div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
-									<span style="opacity: 0.65; font-weight: 500;">Format:</span>
-									<select class="result-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
-										<option value="text" ${singleResultFormat === 'text' ? 'selected' : ''}>Text</option>
-										<option value="markdown" ${singleResultFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
-										<option value="table" ${singleResultFormat === 'table' ? 'selected' : ''}>Table</option>
-										<option value="json" ${singleResultFormat === 'json' ? 'selected' : ''}>JSON</option>
-									</select>
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									<button type="button" class="result-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy Result Text to Clipboard" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy</button>
-									<button type="button" class="result-sync-prompt-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync latest output from AI Prompt" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync</button>
-								</div>
-							</div>
-							<textarea class="result-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(singleResultText)}</textarea>
-							<div class="result-viewport-container desc-content-box" data-state-key="${this._escapeHtmlAttr(singleStateKey)}" style="padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;">${initialViewportHtml}</div>
-						`;
+						itemNodes.push(
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;' },
+								$('div', { style: 'display: flex; align-items: center; gap: 4px; font-size: 11px;' },
+									$('span', { style: 'opacity: 0.65; font-weight: 500;' }, 'Format:'),
+									$<HTMLSelectElement>('select.result-format-selector', { 'data-field-key': textOf(rawKey), style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;' },
+										$<HTMLOptionElement>('option', { value: 'text', selected: singleResultFormat === 'text' ? true : undefined }, 'Text'),
+										$<HTMLOptionElement>('option', { value: 'markdown', selected: singleResultFormat === 'markdown' ? true : undefined }, 'Markdown'),
+										$<HTMLOptionElement>('option', { value: 'table', selected: singleResultFormat === 'table' ? true : undefined }, 'Table'),
+										$<HTMLOptionElement>('option', { value: 'json', selected: singleResultFormat === 'json' ? true : undefined }, 'JSON')
+									)
+								),
+								$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+									$<HTMLButtonElement>('button.result-copy-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy Result Text to Clipboard', style: 'background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;' },
+										'Copy'
+									),
+									$<HTMLButtonElement>('button.result-sync-prompt-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Sync latest output from AI Prompt', style: 'background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;' },
+										'Sync'
+									)
+								)
+							),
+							$<HTMLTextAreaElement>('textarea.result-raw-content', { 'data-field-key': textOf(rawKey), style: 'display: none;' },
+								textOf(singleResultText)
+							),
+							$('div.result-viewport-container.desc-content-box', { 'data-state-key': textOf(singleStateKey), style: 'padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;' },
+								...initialViewport
+							)
+						);
 					}
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="output">
-							<!-- Card Header -->
-							<div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${this._escapeHtml(k)}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; font-weight: 700; text-transform: uppercase;">OUTPUT</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									${stepBadgeHtml}
-									<button type="button" class="output-sync-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync outputs from ticket primitives" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync Outputs</button>
-									<button type="button" class="output-copy-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy all output data as JSON" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy All</button>
-								</div>
-							</div>
+					customFieldsContent.push($('div', { class: `section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'output' },
+						$('div.section-title', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;' },
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, textOf(k)),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; font-weight: 700; text-transform: uppercase;' },
+									'OUTPUT'
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								$<HTMLButtonElement>('button.output-sync-all-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Sync outputs from ticket primitives', style: 'background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;' },
+									'Sync Outputs'
+								),
+								$<HTMLButtonElement>('button.output-copy-all-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy all output data as JSON', style: 'background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;' },
+									'Copy All'
+								)
+							)
+						),
+						$('div.output-items-container', { style: 'display: flex; flex-direction: column; gap: 12px;' }, ...itemNodes)
 
-							<!-- Body Items Container -->
-							<div class="output-items-container" style="display: flex; flex-direction: column; gap: 12px;">
-								${itemsHtml}
-							</div>
-						</div>
-					`;
+					));
 				} else if (fieldItem.wfStep) {
-					customFieldsHtml += this._renderWorkflowStepCardHtml(fieldItem.wfStep, k, rawKey, fieldItem.id || '', stepCardClass, stepBadgeHtml, fieldItem.wfRuntime);
+					customFieldsContent.push(this._renderWorkflowStepCard(fieldItem.wfStep, k, rawKey, fieldItem.id || '', stepCardClass, stepBadge(), fieldItem.wfRuntime));
 				} else {
 					// Textarea or Single-line Text
 					const isMultiline = fType === 'textarea' || (typeof v === 'string' && (v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub))));
@@ -20497,34 +20892,42 @@ ${userPromptSectionHtml}
 					}
 
 					const displayContent = isJson
-						? `<pre style="margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;">${this._escapeHtml(formattedJson)}</pre>`
-						: (v ? this._markdownToHtml(String(v)) : '<span style="opacity: 0.45; font-style: italic;">No content provided. Click to edit.</span>');
+						? [$('pre', { style: 'margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;' },
+							textOf(formattedJson)
+						)]
+						: (v ? this._renderMarkdown(String(v)) : [$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No content provided. Click to edit.')]);
 
-					customFieldsHtml += `
-						<div class="section-card custom-property-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="${fType}">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>${k}</span>
-									${isMultiline ? '<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.08); color: #ccc; font-weight: 700; text-transform: uppercase;">Textarea</span>' : ''}
-								</div>
-								<div style="display: flex; align-items: center; gap: 6px;">
-									${stepBadgeHtml}
-									${(isMultiline || isJson || fType === 'http_request' || (typeof v === 'string' && v.length > 40)) ? `
-									<button type="button" class="btn-secondary custom-field-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy full content to clipboard" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; display: inline-flex; align-items: center; gap: 4px;">
-										<span class="codicon codicon-copy" style="font-size: 11px;"></span>
-										<span>Copy</span>
-									</button>
-									` : ''}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="${isMultiline ? 'textarea' : 'text'}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div class="custom-field-view desc-content-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-multiline="${isMultiline ? 'true' : 'false'}" style="cursor: text; max-height: 240px; overflow-y: auto; overflow-x: hidden; word-break: break-word;" title="Click to edit manually">
-								${displayContent}
-							</div>
-						</div>
-					`;
+					customFieldsContent.push($('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': fType },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, k),
+								...(isMultiline ? [
+									$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.08); color: #ccc; font-weight: 700; text-transform: uppercase;' },
+										'Textarea'
+									)
+								] : [])
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								' ',
+								...((isMultiline || isJson || fType === 'http_request' || (typeof v === 'string' && v.length > 40)) ? [
+									$<HTMLButtonElement>('button.btn-secondary.custom-field-copy-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy full content to clipboard', style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; display: inline-flex; align-items: center; gap: 4px;' },
+										$('span.codicon.codicon-copy', { style: 'font-size: 11px;' }),
+										$('span', undefined, 'Copy')
+									)
+								] : []),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': (isMultiline ? 'textarea' : 'text'), 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div.custom-field-view.desc-content-box', { 'data-field-key': textOf(rawKey), 'data-multiline': (isMultiline ? 'true' : 'false'), style: 'cursor: text; max-height: 240px; overflow-y: auto; overflow-x: hidden; word-break: break-word;', title: 'Click to edit manually' },
+							...displayContent
+
+						)
+					));
 				}
 			}
 		}
@@ -20566,1093 +20969,600 @@ ${userPromptSectionHtml}
 			}
 		}
 
-		return `
-			<style>
-				.entity-detail-editor,
-				.entity-detail-editor * {
-					user-select: text !important;
-					-webkit-user-select: text !important;
-				}
-				.entity-detail-editor * {
-					box-sizing: border-box;
-				}
-				.entity-detail-editor .codicon,
-				.entity-detail-editor .python-code-display,
-				.entity-detail-editor .python-code-display *,
-				.entity-detail-editor .python-line-numbers-gutter {
-					user-select: none !important;
-					-webkit-user-select: none !important;
-					pointer-events: none !important;
-				}
-				.entity-detail-editor input,
-				.entity-detail-editor textarea,
-				.entity-detail-editor .python-code-textarea,
-				.entity-detail-editor .desc-content-box,
-				.entity-detail-editor .desc-content-box *,
-				.entity-detail-editor .prompt-tokenized-display,
-				.entity-detail-editor .prompt-tokenized-display *,
-				.entity-detail-editor .prompt-output-display,
-				.entity-detail-editor .prompt-output-display *,
-				.entity-detail-editor .browser-content-display,
-				.entity-detail-editor .browser-content-display *,
-				.entity-detail-editor .python-output-display,
-				.entity-detail-editor .python-output-display *,
-				.entity-detail-editor .python-result-display,
-				.entity-detail-editor .python-result-display *,
-				.entity-detail-editor .sql-output-box,
-				.entity-detail-editor .sql-output-box *,
-				.entity-detail-editor .output-item-display,
-				.entity-detail-editor .output-item-display *,
-				.entity-detail-editor .result-display-box,
-				.entity-detail-editor .result-display-box *,
-				.entity-detail-editor .instruction-item,
-				.entity-detail-editor .instruction-item *,
-				.entity-detail-editor #work-logs-container,
-				.entity-detail-editor #work-logs-container *,
-				.entity-detail-editor .ticket-title,
-				.entity-detail-editor .sidebar-value,
-				.entity-detail-editor pre,
-				.entity-detail-editor pre *,
-				.entity-detail-editor code,
-				.entity-detail-editor code * {
-					user-select: text !important;
-					-webkit-user-select: text !important;
-				}
-				.entity-detail-editor .desc-content-box,
-				.entity-detail-editor .prompt-tokenized-display,
-				.entity-detail-editor .prompt-output-display,
-				.entity-detail-editor .browser-content-display,
-				.entity-detail-editor .python-output-display,
-				.entity-detail-editor .python-result-display,
-				.entity-detail-editor .sql-output-box,
-				.entity-detail-editor pre {
-					cursor: text;
-				}
-				.entity-detail-editor .layout-container {
-					display: grid;
-					grid-template-columns: minmax(0, 1fr) 320px;
-					gap: 28px;
-					width: 100%;
-					margin: 0;
-					position: relative;
-				}
-				.entity-detail-editor .layout-container.attributes-collapsed {
-					grid-template-columns: minmax(0, 1fr);
-					gap: 0;
-				}
-				.entity-detail-editor .layout-container.attributes-collapsed .sidebar {
-					display: none;
-				}
-				.entity-detail-editor .attributes-collapsed-drawer-btn {
-					display: none;
-				}
-				.entity-detail-editor .layout-container.attributes-collapsed .attributes-collapsed-drawer-btn {
-					display: inline-flex;
-					align-items: center;
-					justify-content: center;
-					gap: 5px;
-					position: sticky;
-					top: 6px;
-					justify-self: end;
-					margin-bottom: -26px;
-					z-index: 20;
-					padding: 4px 8px;
-					border-radius: 6px;
-					background: rgba(30, 41, 59, 0.85);
-					border: 1px solid rgba(56, 189, 248, 0.35);
-					color: #38bdf8;
-					font-size: 11px;
-					font-weight: 600;
-					cursor: pointer;
-					backdrop-filter: blur(6px);
-					box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-					transition: all 0.15s ease;
-				}
-				.entity-detail-editor .layout-container.attributes-collapsed .attributes-collapsed-drawer-btn:hover {
-					background: rgba(56, 189, 248, 0.22);
-					border-color: rgba(56, 189, 248, 0.6);
-				}
-				.entity-detail-editor .sidebar-collapse-icon-btn {
-					display: inline-flex;
-					align-items: center;
-					justify-content: center;
-					width: 22px;
-					height: 22px;
-					padding: 0;
-					border-radius: 5px;
-					background: rgba(255, 255, 255, 0.04);
-					border: 1px solid rgba(255, 255, 255, 0.1);
-					color: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.65));
-					cursor: pointer;
-					transition: all 0.15s ease;
-				}
-				.entity-detail-editor .sidebar-collapse-icon-btn:hover {
-					background: rgba(56, 189, 248, 0.15);
-					border-color: rgba(56, 189, 248, 0.45);
-					color: #38bdf8;
-				}
-				.entity-detail-editor .main-content {
-					display: flex;
-					flex-direction: column;
-					gap: 20px;
-					min-width: 0;
-				}
-				.entity-detail-editor .sidebar {
-					background: rgba(255,255,255,0.02);
-					border: 1px solid rgba(255,255,255,0.06);
-					border-radius: 10px;
-					padding: 20px;
-					height: fit-content;
-					position: sticky;
-					top: 0px;
-					backdrop-filter: blur(8px);
-					box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-				}
-				.entity-detail-editor .header-breadcrumb {
-					display: flex;
-					align-items: center;
-					justify-content: flex-start;
-					gap: 6px;
-					font-size: 0.85em;
-					opacity: 0.75;
-					margin-bottom: 6px;
-					font-weight: 500;
-					text-align: left;
-					flex-wrap: wrap;
-				}
-				.entity-detail-editor .header-breadcrumb .breadcrumb-item[data-uri]:hover {
-					opacity: 1;
-					color: #38bdf8;
-					text-decoration: underline;
-				}
-				.entity-detail-editor .header-title-row {
-					display: flex;
-					align-items: center;
-					justify-content: flex-start;
-					gap: 12px;
-					margin-bottom: 8px;
-					text-align: left;
-				}
-				.entity-detail-editor .ticket-title {
-					margin: 0;
-					font-size: 1.65em;
-					font-weight: 700;
-					color: var(--vscode-editor-foreground, #fff);
-					line-height: 1.25;
-					text-align: left;
-				}
-				.entity-detail-editor .badge {
-					display: inline-block;
-					padding: 2px 8px;
-					border-radius: 4px;
-					font-size: 0.72em;
-					font-weight: 700;
-					letter-spacing: 0.05em;
-					text-transform: uppercase;
-				}
-				.entity-detail-editor .btn-primary {
-					background: var(--vscode-button-background);
-					color: var(--vscode-button-foreground);
-					border: none;
-					padding: 6px 14px;
-					border-radius: 5px;
-					cursor: pointer;
-					font-weight: 600;
-					font-size: 0.85em;
-					transition: background 0.2s;
-				}
-				.entity-detail-editor .btn-primary:hover {
-					background: var(--vscode-button-hoverBackground);
-				}
-				.entity-detail-editor .btn-secondary {
-					background: rgba(255,255,255,0.06);
-					color: var(--vscode-foreground);
-					border: 1px solid rgba(255,255,255,0.1);
-					padding: 5px 12px;
-					border-radius: 5px;
-					cursor: pointer;
-					font-weight: 500;
-					font-size: 0.82em;
-					transition: background 0.2s;
-				}
-				.entity-detail-editor .btn-secondary:hover {
-					background: rgba(255,255,255,0.12);
-				}
-				.entity-detail-editor .input-field {
-					background: var(--vscode-input-background, #1e1e1e);
-					color: var(--vscode-input-foreground, #eee);
-					border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
-					padding: 10px 14px;
-					border-radius: 6px;
-					width: 100%;
-					font-family: inherit;
-					font-size: 0.95em;
-					line-height: 1.6;
-					resize: vertical;
-				}
-				.entity-detail-editor .input-field:focus {
-					outline: 1px solid var(--vscode-focusBorder, #007acc);
-					border-color: var(--vscode-focusBorder, #007acc);
-				}
-				.entity-detail-editor .python-code-textarea::selection {
-					background: rgba(56, 189, 248, 0.28) !important;
-					color: transparent !important;
-					-webkit-text-fill-color: transparent !important;
-				}
-				.entity-detail-editor .section-card {
-					background: rgba(255,255,255,0.015);
-					border: 1px solid rgba(255,255,255,0.05);
-					border-radius: 8px;
-					padding: 18px 22px;
-					transition: border-color 0.25s ease, box-shadow 0.25s ease;
-				}
-				.entity-detail-editor .section-card.ticket-step-running {
-					border-color: #38bdf8 !important;
-					box-shadow: 0 0 0 2px #38bdf8, 0 0 24px rgba(56, 189, 248, 0.45) !important;
-					animation: ticket-card-pulse 1.4s infinite ease-in-out;
-					position: relative;
-					z-index: 5;
-				}
-				.entity-detail-editor .section-card.ticket-step-success {
-					border-color: rgba(34, 197, 94, 0.65) !important;
-					box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.4), 0 0 14px rgba(34, 197, 94, 0.2) !important;
-					position: relative;
-				}
-				.entity-detail-editor .section-card.ticket-step-failed {
-					border-color: #ef4444 !important;
-					box-shadow: 0 0 0 2px #ef4444, 0 0 18px rgba(239, 68, 68, 0.5) !important;
-					animation: ticket-card-shake 0.4s ease-in-out;
-					position: relative;
-				}
-				@keyframes ticket-card-pulse {
-					0% { transform: scale(1); }
-					50% { transform: scale(1.006); }
-					100% { transform: scale(1); }
-				}
-				@keyframes ticket-card-shake {
-					0%, 100% { transform: translateX(0); }
-					20%, 60% { transform: translateX(-4px); }
-					40%, 80% { transform: translateX(4px); }
-				}
-				.entity-detail-editor .ticket-step-badge {
-					display: inline-flex;
-					align-items: center;
-					gap: 5px;
-					font-size: 11px;
-					font-weight: 600;
-					padding: 2.5px 9px;
-					border-radius: 12px;
-					letter-spacing: 0.02em;
-					user-select: none;
-					transition: all 0.2s ease;
-				}
-				.entity-detail-editor .ticket-step-badge.running {
-					background: rgba(56, 189, 248, 0.18);
-					color: #38bdf8;
-					border: 1px solid rgba(56, 189, 248, 0.45);
-				}
-				.entity-detail-editor .ticket-step-badge.success {
-					background: rgba(34, 197, 94, 0.16);
-					color: #4ade80;
-					border: 1px solid rgba(34, 197, 94, 0.35);
-				}
-				.entity-detail-editor .ticket-step-badge.failed {
-					background: rgba(239, 68, 68, 0.18);
-					color: #f87171;
-					border: 1px solid rgba(239, 68, 68, 0.4);
-				}
-				.entity-detail-editor .section-title {
-					font-size: 1.05em;
-					font-weight: 600;
-					margin: 0 0 14px 0;
-					color: var(--vscode-editor-foreground, #eee);
-					display: flex;
-					justify-content: space-between;
-					align-items: center;
-				}
-				.entity-detail-editor .desc-content-box {
-					padding: 14px 16px;
-					background: rgba(0,0,0,0.18);
-					border-radius: 6px;
-					border: 1px solid rgba(255,255,255,0.04);
-					font-size: 0.93em;
-					line-height: 1.65;
-					text-align: left;
-					max-height: 240px;
-					overflow-y: auto;
-					overflow-x: hidden;
-					word-break: break-word;
-				}
-				.ticket-type-badge-trigger:hover {
-					opacity: 0.85;
-					filter: brightness(1.2);
-					transform: scale(1.02);
-				}
-				.entity-detail-editor .dropzone {
-					border: 2px dashed rgba(255,255,255,0.12);
-					border-radius: 6px;
-					padding: 20px;
-					text-align: center;
-					cursor: pointer;
-					transition: border 0.2s, background 0.2s;
-					background: rgba(255,255,255,0.005);
-				}
-				.entity-detail-editor .dropzone:hover, .entity-detail-editor .dropzone.dragover {
-					border-color: var(--vscode-focusBorder, #38bdf8);
-					background: rgba(56,189,248,0.04);
-				}
-				.entity-detail-editor .sidebar-row {
-					display: flex;
-					flex-direction: column;
-					gap: 4px;
-					margin-bottom: 14px;
-					border-bottom: 1px solid rgba(255,255,255,0.04);
-					padding-bottom: 8px;
-				}
-				.entity-detail-editor .sidebar-label {
-					font-size: 0.75em;
-					opacity: 0.55;
-					font-weight: 600;
-					letter-spacing: 0.05em;
-					text-transform: uppercase;
-				}
-				.entity-detail-editor .sidebar-value {
-					font-size: 0.9em;
-					font-weight: 500;
-					color: var(--vscode-editor-foreground);
-					word-break: break-word;
-				}
-				.entity-detail-editor .ai-edit-btn {
-					display: inline-flex;
-					align-items: center;
-					justify-content: center;
-					background: transparent;
-					color: var(--vscode-icon-foreground, rgba(255, 255, 255, 0.45));
-					border: 1px solid transparent;
-					border-radius: 4px;
-					padding: 3px 5px;
-					cursor: pointer;
-					transition: opacity 0.3s ease 0.35s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-					user-select: none;
-					line-height: 1;
-					opacity: 0;
-					pointer-events: none;
-				}
-				/* Container-level hover reveals all editable sparkle buttons within */
-				.entity-detail-editor .header-title-row:hover .ai-edit-btn,
-				.entity-detail-editor .section-card:hover .ai-edit-btn,
-				.entity-detail-editor .sidebar:hover .ai-edit-btn,
-				.entity-detail-editor .dynamic-sub-card:hover .ai-edit-btn,
-				.entity-detail-editor .custom-property-card:hover .ai-edit-btn {
-					opacity: 0.55;
-					pointer-events: auto;
-					transition: opacity 0.15s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-				}
-				.entity-detail-editor .ai-edit-btn:hover {
-					opacity: 1 !important;
-					color: var(--vscode-editor-foreground, #ffffff) !important;
-					background: rgba(255, 255, 255, 0.08) !important;
-					border-color: rgba(255, 255, 255, 0.18) !important;
-					box-shadow: none !important;
-					transform: none !important;
-					transition: opacity 0.1s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
-				}
-				.entity-detail-editor #title-heading {
-					cursor: pointer;
-					transition: color 0.15s ease;
-				}
-				.entity-detail-editor #title-heading:hover {
-					color: #38bdf8;
-					text-decoration: underline dotted rgba(56, 189, 248, 0.5);
-				}
-				.entity-detail-editor #desc-view-mode,
-				.entity-detail-editor .custom-field-view:not(.custom-switch-view),
-				.entity-detail-editor .instruction-prompt-content,
-				.entity-detail-editor .dynamic-subfield-val {
-					transition: border-color 0.15s ease, background 0.15s ease;
-				}
-				.entity-detail-editor #desc-view-mode:hover,
-				.entity-detail-editor .custom-field-view:not(.custom-switch-view):hover,
-				.entity-detail-editor .instruction-prompt-content:hover,
-				.entity-detail-editor .dynamic-subfield-val:hover {
-					border-color: rgba(56, 189, 248, 0.4) !important;
-				}
-				.entity-detail-editor .custom-switch-view:hover {
-					opacity: 0.85;
-				}
-				.entity-detail-editor .custom-select-view:hover {
-					background: rgba(59, 130, 246, 0.08);
-				}
-				/* Keep button labels on one line; rows wrap instead when the editor is narrow (e.g. a side split) */
-				.entity-detail-editor button.btn-primary,
-				.entity-detail-editor button.btn-secondary {
-					white-space: nowrap;
-				}
-				.entity-detail-editor .wf-node-view .attributes-collapsed-drawer-btn {
-					display: none !important;
-				}
-				.entity-detail-editor .wf-step-code {
-					margin: 0;
-					padding: 10px 12px;
-					max-height: 320px;
-					overflow: auto;
-					border-radius: 6px;
-					background: rgba(0, 0, 0, 0.25);
-					border: 1px solid rgba(255, 255, 255, 0.08);
-					font-family: var(--vscode-editor-font-family, monospace);
-					font-size: 11.5px;
-					line-height: 1.5;
-					white-space: pre;
-					color: #e2e8f0;
-				}
-				.entity-detail-editor .wf-step-io-table {
-					width: 100%;
-					border-collapse: collapse;
-					font-size: 12px;
-				}
-				.entity-detail-editor .wf-step-io-table td {
-					padding: 5px 8px;
-					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-					vertical-align: top;
-				}
-				.entity-detail-editor .wf-step-io-table td:first-child {
-					white-space: nowrap;
-					font-weight: 600;
-					color: #cbd5e1;
-					width: 1%;
-				}
-				.entity-detail-editor .wf-step-io-table code {
-					font-family: var(--vscode-editor-font-family, monospace);
-					font-size: 11px;
-					color: #a5f3fc;
-					word-break: break-all;
-				}
-				.entity-detail-editor .wf-io-item {
-					padding: 10px 0;
-					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-				}
-				.entity-detail-editor .wf-io-item:last-child {
-					border-bottom: none;
-				}
-				.entity-detail-editor .wf-io-title {
-					font-size: 12.5px;
-					font-weight: 600;
-					color: #e2e8f0;
-				}
-				.entity-detail-editor .wf-io-sub {
-					margin-top: 2px;
-					font-size: 11.5px;
-					opacity: 0.75;
-				}
-				.entity-detail-editor .wf-io-sub code {
-					font-family: var(--vscode-editor-font-family, monospace);
-					font-size: 11px;
-					color: #a5f3fc;
-					word-break: break-all;
-				}
-				.entity-detail-editor .wf-value-box {
-					margin-top: 6px;
-				}
-				.entity-detail-editor .wf-value-head {
-					display: flex;
-					align-items: center;
-					justify-content: space-between;
-					margin-bottom: 4px;
-					font-size: 10.5px;
-					font-weight: 700;
-					text-transform: uppercase;
-					color: #a78bfa;
-				}
-				.entity-detail-editor .wf-value-copy-btn {
-					display: inline-flex;
-					align-items: center;
-					gap: 4px;
-					padding: 1px 8px;
-					font-size: 10.5px;
-					font-weight: 500;
-					text-transform: none;
-					border-radius: 4px;
-					cursor: pointer;
-					color: #e2e8f0;
-					background: rgba(255, 255, 255, 0.06);
-					border: 1px solid rgba(255, 255, 255, 0.16);
-				}
-				.entity-detail-editor .wf-value-copy-btn:hover {
-					background: rgba(255, 255, 255, 0.12);
-				}
-				.entity-detail-editor .wf-value-copy-btn .codicon {
-					font-size: 11px;
-				}
-				.entity-detail-editor pre.wf-value-pre {
-					white-space: pre-wrap;
-					word-break: break-word;
-					max-height: 280px;
-				}
-				.entity-detail-editor .wf-value-empty {
-					font-size: 11.5px;
-					opacity: 0.45;
-					font-style: italic;
-				}
-				/* Briefly highlights the component revealed from the Workflow Outline */
-				.entity-detail-editor .wf-outline-reveal-flash {
-					outline: 2px solid #38bdf8 !important;
-					outline-offset: 2px;
-					transition: outline-color 0.6s ease;
-				}
-			</style>
+		return [
+			$('style', undefined,
+				`\n\t\t\t\t.entity-detail-editor,\n\t\t\t\t.entity-detail-editor * {\n\t\t\t\t\tuser-select: text !important;\n\t\t\t\t\t-webkit-user-select: text !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor * {\n\t\t\t\t\tbox-sizing: border-box;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .codicon,\n\t\t\t\t.entity-detail-editor .python-code-display,\n\t\t\t\t.entity-detail-editor .python-code-display *,\n\t\t\t\t.entity-detail-editor .python-line-numbers-gutter {\n\t\t\t\t\tuser-select: none !important;\n\t\t\t\t\t-webkit-user-select: none !important;\n\t\t\t\t\tpointer-events: none !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor input,\n\t\t\t\t.entity-detail-editor textarea,\n\t\t\t\t.entity-detail-editor .python-code-textarea,\n\t\t\t\t.entity-detail-editor .desc-content-box,\n\t\t\t\t.entity-detail-editor .desc-content-box *,\n\t\t\t\t.entity-detail-editor .prompt-tokenized-display,\n\t\t\t\t.entity-detail-editor .prompt-tokenized-display *,\n\t\t\t\t.entity-detail-editor .prompt-output-display,\n\t\t\t\t.entity-detail-editor .prompt-output-display *,\n\t\t\t\t.entity-detail-editor .browser-content-display,\n\t\t\t\t.entity-detail-editor .browser-content-display *,\n\t\t\t\t.entity-detail-editor .python-output-display,\n\t\t\t\t.entity-detail-editor .python-output-display *,\n\t\t\t\t.entity-detail-editor .python-result-display,\n\t\t\t\t.entity-detail-editor .python-result-display *,\n\t\t\t\t.entity-detail-editor .sql-output-box,\n\t\t\t\t.entity-detail-editor .sql-output-box *,\n\t\t\t\t.entity-detail-editor .output-item-display,\n\t\t\t\t.entity-detail-editor .output-item-display *,\n\t\t\t\t.entity-detail-editor .result-display-box,\n\t\t\t\t.entity-detail-editor .result-display-box *,\n\t\t\t\t.entity-detail-editor .instruction-item,\n\t\t\t\t.entity-detail-editor .instruction-item *,\n\t\t\t\t.entity-detail-editor #work-logs-container,\n\t\t\t\t.entity-detail-editor #work-logs-container *,\n\t\t\t\t.entity-detail-editor .ticket-title,\n\t\t\t\t.entity-detail-editor .sidebar-value,\n\t\t\t\t.entity-detail-editor pre,\n\t\t\t\t.entity-detail-editor pre *,\n\t\t\t\t.entity-detail-editor code,\n\t\t\t\t.entity-detail-editor code * {\n\t\t\t\t\tuser-select: text !important;\n\t\t\t\t\t-webkit-user-select: text !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .desc-content-box,\n\t\t\t\t.entity-detail-editor .prompt-tokenized-display,\n\t\t\t\t.entity-detail-editor .prompt-output-display,\n\t\t\t\t.entity-detail-editor .browser-content-display,\n\t\t\t\t.entity-detail-editor .python-output-display,\n\t\t\t\t.entity-detail-editor .python-result-display,\n\t\t\t\t.entity-detail-editor .sql-output-box,\n\t\t\t\t.entity-detail-editor pre {\n\t\t\t\t\tcursor: text;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .layout-container {\n\t\t\t\t\tdisplay: grid;\n\t\t\t\t\tgrid-template-columns: minmax(0, 1fr) 320px;\n\t\t\t\t\tgap: 28px;\n\t\t\t\t\twidth: 100%;\n\t\t\t\t\tmargin: 0;\n\t\t\t\t\tposition: relative;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .layout-container.attributes-collapsed {\n\t\t\t\t\tgrid-template-columns: minmax(0, 1fr);\n\t\t\t\t\tgap: 0;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .layout-container.attributes-collapsed .sidebar {\n\t\t\t\t\tdisplay: none;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .attributes-collapsed-drawer-btn {\n\t\t\t\t\tdisplay: none;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .layout-container.attributes-collapsed .attributes-collapsed-drawer-btn {\n\t\t\t\t\tdisplay: inline-flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tjustify-content: center;\n\t\t\t\t\tgap: 5px;\n\t\t\t\t\tposition: sticky;\n\t\t\t\t\ttop: 6px;\n\t\t\t\t\tjustify-self: end;\n\t\t\t\t\tmargin-bottom: -26px;\n\t\t\t\t\tz-index: 20;\n\t\t\t\t\tpadding: 4px 8px;\n\t\t\t\t\tborder-radius: 6px;\n\t\t\t\t\tbackground: rgba(30, 41, 59, 0.85);\n\t\t\t\t\tborder: 1px solid rgba(56, 189, 248, 0.35);\n\t\t\t\t\tcolor: #38bdf8;\n\t\t\t\t\tfont-size: 11px;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\tbackdrop-filter: blur(6px);\n\t\t\t\t\tbox-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);\n\t\t\t\t\ttransition: all 0.15s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .layout-container.attributes-collapsed .attributes-collapsed-drawer-btn:hover {\n\t\t\t\t\tbackground: rgba(56, 189, 248, 0.22);\n\t\t\t\t\tborder-color: rgba(56, 189, 248, 0.6);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .sidebar-collapse-icon-btn {\n\t\t\t\t\tdisplay: inline-flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tjustify-content: center;\n\t\t\t\t\twidth: 22px;\n\t\t\t\t\theight: 22px;\n\t\t\t\t\tpadding: 0;\n\t\t\t\t\tborder-radius: 5px;\n\t\t\t\t\tbackground: rgba(255, 255, 255, 0.04);\n\t\t\t\t\tborder: 1px solid rgba(255, 255, 255, 0.1);\n\t\t\t\t\tcolor: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.65));\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\ttransition: all 0.15s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .sidebar-collapse-icon-btn:hover {\n\t\t\t\t\tbackground: rgba(56, 189, 248, 0.15);\n\t\t\t\t\tborder-color: rgba(56, 189, 248, 0.45);\n\t\t\t\t\tcolor: #38bdf8;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .main-content {\n\t\t\t\t\tdisplay: flex;\n\t\t\t\t\tflex-direction: column;\n\t\t\t\t\tgap: 20px;\n\t\t\t\t\tmin-width: 0;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .sidebar {\n\t\t\t\t\tbackground: rgba(255,255,255,0.02);\n\t\t\t\t\tborder: 1px solid rgba(255,255,255,0.06);\n\t\t\t\t\tborder-radius: 10px;\n\t\t\t\t\tpadding: 20px;\n\t\t\t\t\theight: fit-content;\n\t\t\t\t\tposition: sticky;\n\t\t\t\t\ttop: 0px;\n\t\t\t\t\tbackdrop-filter: blur(8px);\n\t\t\t\t\tbox-shadow: 0 4px 16px rgba(0,0,0,0.15);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .header-breadcrumb {\n\t\t\t\t\tdisplay: flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tjustify-content: flex-start;\n\t\t\t\t\tgap: 6px;\n\t\t\t\t\tfont-size: 0.85em;\n\t\t\t\t\topacity: 0.75;\n\t\t\t\t\tmargin-bottom: 6px;\n\t\t\t\t\tfont-weight: 500;\n\t\t\t\t\ttext-align: left;\n\t\t\t\t\tflex-wrap: wrap;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .header-breadcrumb .breadcrumb-item[data-uri]:hover {\n\t\t\t\t\topacity: 1;\n\t\t\t\t\tcolor: #38bdf8;\n\t\t\t\t\ttext-decoration: underline;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .header-title-row {\n\t\t\t\t\tdisplay: flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tjustify-content: flex-start;\n\t\t\t\t\tgap: 12px;\n\t\t\t\t\tmargin-bottom: 8px;\n\t\t\t\t\ttext-align: left;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ticket-title {\n\t\t\t\t\tmargin: 0;\n\t\t\t\t\tfont-size: 1.65em;\n\t\t\t\t\tfont-weight: 700;\n\t\t\t\t\tcolor: var(--vscode-editor-foreground, #fff);\n\t\t\t\t\tline-height: 1.25;\n\t\t\t\t\ttext-align: left;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .badge {\n\t\t\t\t\tdisplay: inline-block;\n\t\t\t\t\tpadding: 2px 8px;\n\t\t\t\t\tborder-radius: 4px;\n\t\t\t\t\tfont-size: 0.72em;\n\t\t\t\t\tfont-weight: 700;\n\t\t\t\t\tletter-spacing: 0.05em;\n\t\t\t\t\ttext-transform: uppercase;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .btn-primary {\n\t\t\t\t\tbackground: var(--vscode-button-background);\n\t\t\t\t\tcolor: var(--vscode-button-foreground);\n\t\t\t\t\tborder: none;\n\t\t\t\t\tpadding: 6px 14px;\n\t\t\t\t\tborder-radius: 5px;\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tfont-size: 0.85em;\n\t\t\t\t\ttransition: background 0.2s;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .btn-primary:hover {\n\t\t\t\t\tbackground: var(--vscode-button-hoverBackground);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .btn-secondary {\n\t\t\t\t\tbackground: rgba(255,255,255,0.06);\n\t\t\t\t\tcolor: var(--vscode-foreground);\n\t\t\t\t\tborder: 1px solid rgba(255,255,255,0.1);\n\t\t\t\t\tpadding: 5px 12px;\n\t\t\t\t\tborder-radius: 5px;\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\tfont-weight: 500;\n\t\t\t\t\tfont-size: 0.82em;\n\t\t\t\t\ttransition: background 0.2s;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .btn-secondary:hover {\n\t\t\t\t\tbackground: rgba(255,255,255,0.12);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .input-field {\n\t\t\t\t\tbackground: var(--vscode-input-background, #1e1e1e);\n\t\t\t\t\tcolor: var(--vscode-input-foreground, #eee);\n\t\t\t\t\tborder: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));\n\t\t\t\t\tpadding: 10px 14px;\n\t\t\t\t\tborder-radius: 6px;\n\t\t\t\t\twidth: 100%;\n\t\t\t\t\tfont-family: inherit;\n\t\t\t\t\tfont-size: 0.95em;\n\t\t\t\t\tline-height: 1.6;\n\t\t\t\t\tresize: vertical;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .input-field:focus {\n\t\t\t\t\toutline: 1px solid var(--vscode-focusBorder, #007acc);\n\t\t\t\t\tborder-color: var(--vscode-focusBorder, #007acc);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .python-code-textarea::selection {\n\t\t\t\t\tbackground: rgba(56, 189, 248, 0.28) !important;\n\t\t\t\t\tcolor: transparent !important;\n\t\t\t\t\t-webkit-text-fill-color: transparent !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .section-card {\n\t\t\t\t\tbackground: rgba(255,255,255,0.015);\n\t\t\t\t\tborder: 1px solid rgba(255,255,255,0.05);\n\t\t\t\t\tborder-radius: 8px;\n\t\t\t\t\tpadding: 18px 22px;\n\t\t\t\t\ttransition: border-color 0.25s ease, box-shadow 0.25s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .section-card.ticket-step-running {\n\t\t\t\t\tborder-color: #38bdf8 !important;\n\t\t\t\t\tbox-shadow: 0 0 0 2px #38bdf8, 0 0 24px rgba(56, 189, 248, 0.45) !important;\n\t\t\t\t\tanimation: ticket-card-pulse 1.4s infinite ease-in-out;\n\t\t\t\t\tposition: relative;\n\t\t\t\t\tz-index: 5;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .section-card.ticket-step-success {\n\t\t\t\t\tborder-color: rgba(34, 197, 94, 0.65) !important;\n\t\t\t\t\tbox-shadow: 0 0 0 1px rgba(34, 197, 94, 0.4), 0 0 14px rgba(34, 197, 94, 0.2) !important;\n\t\t\t\t\tposition: relative;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .section-card.ticket-step-failed {\n\t\t\t\t\tborder-color: #ef4444 !important;\n\t\t\t\t\tbox-shadow: 0 0 0 2px #ef4444, 0 0 18px rgba(239, 68, 68, 0.5) !important;\n\t\t\t\t\tanimation: ticket-card-shake 0.4s ease-in-out;\n\t\t\t\t\tposition: relative;\n\t\t\t\t}\n\t\t\t\t@keyframes ticket-card-pulse {\n\t\t\t\t\t0% { transform: scale(1); }\n\t\t\t\t\t50% { transform: scale(1.006); }\n\t\t\t\t\t100% { transform: scale(1); }\n\t\t\t\t}\n\t\t\t\t@keyframes ticket-card-shake {\n\t\t\t\t\t0%, 100% { transform: translateX(0); }\n\t\t\t\t\t20%, 60% { transform: translateX(-4px); }\n\t\t\t\t\t40%, 80% { transform: translateX(4px); }\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ticket-step-badge {\n\t\t\t\t\tdisplay: inline-flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tgap: 5px;\n\t\t\t\t\tfont-size: 11px;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tpadding: 2.5px 9px;\n\t\t\t\t\tborder-radius: 12px;\n\t\t\t\t\tletter-spacing: 0.02em;\n\t\t\t\t\tuser-select: none;\n\t\t\t\t\ttransition: all 0.2s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ticket-step-badge.running {\n\t\t\t\t\tbackground: rgba(56, 189, 248, 0.18);\n\t\t\t\t\tcolor: #38bdf8;\n\t\t\t\t\tborder: 1px solid rgba(56, 189, 248, 0.45);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ticket-step-badge.success {\n\t\t\t\t\tbackground: rgba(34, 197, 94, 0.16);\n\t\t\t\t\tcolor: #4ade80;\n\t\t\t\t\tborder: 1px solid rgba(34, 197, 94, 0.35);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ticket-step-badge.failed {\n\t\t\t\t\tbackground: rgba(239, 68, 68, 0.18);\n\t\t\t\t\tcolor: #f87171;\n\t\t\t\t\tborder: 1px solid rgba(239, 68, 68, 0.4);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .section-title {\n\t\t\t\t\tfont-size: 1.05em;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tmargin: 0 0 14px 0;\n\t\t\t\t\tcolor: var(--vscode-editor-foreground, #eee);\n\t\t\t\t\tdisplay: flex;\n\t\t\t\t\tjustify-content: space-between;\n\t\t\t\t\talign-items: center;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .desc-content-box {\n\t\t\t\t\tpadding: 14px 16px;\n\t\t\t\t\tbackground: rgba(0,0,0,0.18);\n\t\t\t\t\tborder-radius: 6px;\n\t\t\t\t\tborder: 1px solid rgba(255,255,255,0.04);\n\t\t\t\t\tfont-size: 0.93em;\n\t\t\t\t\tline-height: 1.65;\n\t\t\t\t\ttext-align: left;\n\t\t\t\t\tmax-height: 240px;\n\t\t\t\t\toverflow-y: auto;\n\t\t\t\t\toverflow-x: hidden;\n\t\t\t\t\tword-break: break-word;\n\t\t\t\t}\n\t\t\t\t.ticket-type-badge-trigger:hover {\n\t\t\t\t\topacity: 0.85;\n\t\t\t\t\tfilter: brightness(1.2);\n\t\t\t\t\ttransform: scale(1.02);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .dropzone {\n\t\t\t\t\tborder: 2px dashed rgba(255,255,255,0.12);\n\t\t\t\t\tborder-radius: 6px;\n\t\t\t\t\tpadding: 20px;\n\t\t\t\t\ttext-align: center;\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\ttransition: border 0.2s, background 0.2s;\n\t\t\t\t\tbackground: rgba(255,255,255,0.005);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .dropzone:hover, .entity-detail-editor .dropzone.dragover {\n\t\t\t\t\tborder-color: var(--vscode-focusBorder, #38bdf8);\n\t\t\t\t\tbackground: rgba(56,189,248,0.04);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .sidebar-row {\n\t\t\t\t\tdisplay: flex;\n\t\t\t\t\tflex-direction: column;\n\t\t\t\t\tgap: 4px;\n\t\t\t\t\tmargin-bottom: 14px;\n\t\t\t\t\tborder-bottom: 1px solid rgba(255,255,255,0.04);\n\t\t\t\t\tpadding-bottom: 8px;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .sidebar-label {\n\t\t\t\t\tfont-size: 0.75em;\n\t\t\t\t\topacity: 0.55;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tletter-spacing: 0.05em;\n\t\t\t\t\ttext-transform: uppercase;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .sidebar-value {\n\t\t\t\t\tfont-size: 0.9em;\n\t\t\t\t\tfont-weight: 500;\n\t\t\t\t\tcolor: var(--vscode-editor-foreground);\n\t\t\t\t\tword-break: break-word;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ai-edit-btn {\n\t\t\t\t\tdisplay: inline-flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tjustify-content: center;\n\t\t\t\t\tbackground: transparent;\n\t\t\t\t\tcolor: var(--vscode-icon-foreground, rgba(255, 255, 255, 0.45));\n\t\t\t\t\tborder: 1px solid transparent;\n\t\t\t\t\tborder-radius: 4px;\n\t\t\t\t\tpadding: 3px 5px;\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\ttransition: opacity 0.3s ease 0.35s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n\t\t\t\t\tuser-select: none;\n\t\t\t\t\tline-height: 1;\n\t\t\t\t\topacity: 0;\n\t\t\t\t\tpointer-events: none;\n\t\t\t\t}\n\t\t\t\t/* Container-level hover reveals all editable sparkle buttons within */\n\t\t\t\t.entity-detail-editor .header-title-row:hover .ai-edit-btn,\n\t\t\t\t.entity-detail-editor .section-card:hover .ai-edit-btn,\n\t\t\t\t.entity-detail-editor .sidebar:hover .ai-edit-btn,\n\t\t\t\t.entity-detail-editor .dynamic-sub-card:hover .ai-edit-btn,\n\t\t\t\t.entity-detail-editor .custom-property-card:hover .ai-edit-btn {\n\t\t\t\t\topacity: 0.55;\n\t\t\t\t\tpointer-events: auto;\n\t\t\t\t\ttransition: opacity 0.15s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .ai-edit-btn:hover {\n\t\t\t\t\topacity: 1 !important;\n\t\t\t\t\tcolor: var(--vscode-editor-foreground, #ffffff) !important;\n\t\t\t\t\tbackground: rgba(255, 255, 255, 0.08) !important;\n\t\t\t\t\tborder-color: rgba(255, 255, 255, 0.18) !important;\n\t\t\t\t\tbox-shadow: none !important;\n\t\t\t\t\ttransform: none !important;\n\t\t\t\t\ttransition: opacity 0.1s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor #title-heading {\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\ttransition: color 0.15s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor #title-heading:hover {\n\t\t\t\t\tcolor: #38bdf8;\n\t\t\t\t\ttext-decoration: underline dotted rgba(56, 189, 248, 0.5);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor #desc-view-mode,\n\t\t\t\t.entity-detail-editor .custom-field-view:not(.custom-switch-view),\n\t\t\t\t.entity-detail-editor .instruction-prompt-content,\n\t\t\t\t.entity-detail-editor .dynamic-subfield-val {\n\t\t\t\t\ttransition: border-color 0.15s ease, background 0.15s ease;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor #desc-view-mode:hover,\n\t\t\t\t.entity-detail-editor .custom-field-view:not(.custom-switch-view):hover,\n\t\t\t\t.entity-detail-editor .instruction-prompt-content:hover,\n\t\t\t\t.entity-detail-editor .dynamic-subfield-val:hover {\n\t\t\t\t\tborder-color: rgba(56, 189, 248, 0.4) !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .custom-switch-view:hover {\n\t\t\t\t\topacity: 0.85;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .custom-select-view:hover {\n\t\t\t\t\tbackground: rgba(59, 130, 246, 0.08);\n\t\t\t\t}\n\t\t\t\t/* Keep button labels on one line; rows wrap instead when the editor is narrow (e.g. a side split) */\n\t\t\t\t.entity-detail-editor button.btn-primary,\n\t\t\t\t.entity-detail-editor button.btn-secondary {\n\t\t\t\t\twhite-space: nowrap;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-node-view .attributes-collapsed-drawer-btn {\n\t\t\t\t\tdisplay: none !important;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-step-code {\n\t\t\t\t\tmargin: 0;\n\t\t\t\t\tpadding: 10px 12px;\n\t\t\t\t\tmax-height: 320px;\n\t\t\t\t\toverflow: auto;\n\t\t\t\t\tborder-radius: 6px;\n\t\t\t\t\tbackground: rgba(0, 0, 0, 0.25);\n\t\t\t\t\tborder: 1px solid rgba(255, 255, 255, 0.08);\n\t\t\t\t\tfont-family: var(--vscode-editor-font-family, monospace);\n\t\t\t\t\tfont-size: 11.5px;\n\t\t\t\t\tline-height: 1.5;\n\t\t\t\t\twhite-space: pre;\n\t\t\t\t\tcolor: #e2e8f0;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-step-io-table {\n\t\t\t\t\twidth: 100%;\n\t\t\t\t\tborder-collapse: collapse;\n\t\t\t\t\tfont-size: 12px;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-step-io-table td {\n\t\t\t\t\tpadding: 5px 8px;\n\t\t\t\t\tborder-bottom: 1px solid rgba(255, 255, 255, 0.06);\n\t\t\t\t\tvertical-align: top;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-step-io-table td:first-child {\n\t\t\t\t\twhite-space: nowrap;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tcolor: #cbd5e1;\n\t\t\t\t\twidth: 1%;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-step-io-table code {\n\t\t\t\t\tfont-family: var(--vscode-editor-font-family, monospace);\n\t\t\t\t\tfont-size: 11px;\n\t\t\t\t\tcolor: #a5f3fc;\n\t\t\t\t\tword-break: break-all;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-io-item {\n\t\t\t\t\tpadding: 10px 0;\n\t\t\t\t\tborder-bottom: 1px solid rgba(255, 255, 255, 0.06);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-io-item:last-child {\n\t\t\t\t\tborder-bottom: none;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-io-title {\n\t\t\t\t\tfont-size: 12.5px;\n\t\t\t\t\tfont-weight: 600;\n\t\t\t\t\tcolor: #e2e8f0;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-io-sub {\n\t\t\t\t\tmargin-top: 2px;\n\t\t\t\t\tfont-size: 11.5px;\n\t\t\t\t\topacity: 0.75;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-io-sub code {\n\t\t\t\t\tfont-family: var(--vscode-editor-font-family, monospace);\n\t\t\t\t\tfont-size: 11px;\n\t\t\t\t\tcolor: #a5f3fc;\n\t\t\t\t\tword-break: break-all;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-value-box {\n\t\t\t\t\tmargin-top: 6px;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-value-head {\n\t\t\t\t\tdisplay: flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tjustify-content: space-between;\n\t\t\t\t\tmargin-bottom: 4px;\n\t\t\t\t\tfont-size: 10.5px;\n\t\t\t\t\tfont-weight: 700;\n\t\t\t\t\ttext-transform: uppercase;\n\t\t\t\t\tcolor: #a78bfa;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-value-copy-btn {\n\t\t\t\t\tdisplay: inline-flex;\n\t\t\t\t\talign-items: center;\n\t\t\t\t\tgap: 4px;\n\t\t\t\t\tpadding: 1px 8px;\n\t\t\t\t\tfont-size: 10.5px;\n\t\t\t\t\tfont-weight: 500;\n\t\t\t\t\ttext-transform: none;\n\t\t\t\t\tborder-radius: 4px;\n\t\t\t\t\tcursor: pointer;\n\t\t\t\t\tcolor: #e2e8f0;\n\t\t\t\t\tbackground: rgba(255, 255, 255, 0.06);\n\t\t\t\t\tborder: 1px solid rgba(255, 255, 255, 0.16);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-value-copy-btn:hover {\n\t\t\t\t\tbackground: rgba(255, 255, 255, 0.12);\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-value-copy-btn .codicon {\n\t\t\t\t\tfont-size: 11px;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor pre.wf-value-pre {\n\t\t\t\t\twhite-space: pre-wrap;\n\t\t\t\t\tword-break: break-word;\n\t\t\t\t\tmax-height: 280px;\n\t\t\t\t}\n\t\t\t\t.entity-detail-editor .wf-value-empty {\n\t\t\t\t\tfont-size: 11.5px;\n\t\t\t\t\topacity: 0.45;\n\t\t\t\t\tfont-style: italic;\n\t\t\t\t}\n\t\t\t\t/* Briefly highlights the component revealed from the Workflow Outline */\n\t\t\t\t.entity-detail-editor .wf-outline-reveal-flash {\n\t\t\t\t\toutline: 2px solid #38bdf8 !important;\n\t\t\t\t\toutline-offset: 2px;\n\t\t\t\t\ttransition: outline-color 0.6s ease;\n\t\t\t\t}\n\t\t\t`
+			),
+			...(wfNode ? [
+				$('div', { style: 'display: flex; align-items: center; gap: 10px; padding: 10px 16px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(45, 212, 191, 0.14) 0%, rgba(56, 189, 248, 0.08) 100%); border: 1px solid rgba(45, 212, 191, 0.35);' },
+					$('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 16px; color: #2dd4bf;' }),
+					$('div', { style: 'display: flex; flex-direction: column; gap: 2px; min-width: 0;' },
+						$('span', { style: 'font-size: 11.5px; font-weight: 700; color: #2dd4bf; letter-spacing: 0.04em; text-transform: uppercase;' },
+							'Workflow Node'
+						),
+						$('span', { style: 'font-size: 11px; opacity: 0.78;' },
+							'Capsules of this node, shown as cards in pipeline order. Read-only view \u2014 edit the node on the canvas.'
+						)
+					)
+				)
+			] : [
+				...(this._isPreviewMode ? [
+					$('div', { style: 'display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 14px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(56, 189, 248, 0.14) 0%, rgba(129, 140, 248, 0.10) 100%); border: 1px solid rgba(56, 189, 248, 0.35);' },
+						$('div', { style: 'display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0;' },
+							$('span.codicon.codicon-symbol-class', { style: 'font-size: 14px; color: #38bdf8;' }),
+							$('span', { style: 'font-size: 11.5px; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;' },
+								'Ticket Template'
+							),
+							$('span', { style: 'font-size: 11px; padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.2); color: #bae6fd; font-weight: 600;' },
+								textOf(customModule?.name || data.ticketType)
+							)
+						),
+						$<HTMLButtonElement>('button#preview-edit-schema-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45);', title: 'Open the template\'s schema designer to change its fields and layout (existing tickets keep their values)' },
+							$('span.codicon.codicon-tools', { style: 'font-size: 12px;' }),
+							$('span', undefined, 'Edit Template Schema')
+						)
+					)
+				] : [])
+			]),
+			' ',
+			$('div', { style: 'width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 10px 16px;' },
+				$('div', { style: 'flex: 1 1 260px; min-width: 0;' },
+					$('div.header-breadcrumb', undefined,
+						...((data.breadcrumbSegments && data.breadcrumbSegments.length > 0) ? [
+							...data.breadcrumbSegments.flatMap((s, idx) => [
+								$('span.breadcrumb-item', { 'data-uri': textOf(s.uri || ''), style: (s.uri ? 'cursor: pointer;' : ''), title: `${s.uri ? 'Click to navigate to ' + textOf(s.label) : ''}` },
+									textOf(s.label)
+								),
+								' ',
+								...(idx < data.breadcrumbSegments!.length - 1 ? [$('span.breadcrumb-sep', { style: 'opacity: 0.35; margin: 0 4px;' }, '/')] : [])
+							])
+						] : [
+							$('span', undefined, textOf(data.workspaceId || 'Workspace')),
+							$('span.breadcrumb-sep', { style: 'opacity: 0.35; margin: 0 4px;' }, '/'),
+							$('span', undefined, textOf(data.ticketId))
+						]),
+						' ',
+						...(wfNode ? [] : [
+							$('span.ticket-type-badge-trigger', { 'data-ticket-type': textOf(data.ticketType || ''), style: `font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;`, title: `Click to view '${typeUpper}' template preview and edit schema` },
+								$('span', { class: ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType)), style: `font-size: 9.5px; color: ${colorSetting.text};` }),
+								$('span', undefined, typeUpper)
+							)
+						])
+					),
+					$('div.header-title-row', undefined,
+						$('h1#title-heading.ticket-title', { style: 'cursor: pointer;', title: 'Click to edit Title manually' }, data.title),
+						$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Title', 'data-ai-field-type': 'text', 'data-ai-field-label': 'Title', 'data-ai-current-value': textOf(data.title), title: 'Edit Title with AI' },
+							$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+								$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+							)
+						)
+					)
+				),
+				$('div', { style: `display: ${wfNode ? 'none' : 'flex'}; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px;` },
+					...(this._isPreviewMode ? [
+						$<HTMLButtonElement>('button.btn-primary.preview-edit-schema-trigger', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.45); color: #e9d5ff;', title: 'Switch to Edit Template Schema Mode' },
+							$('span.codicon.codicon-edit', { style: 'font-size: 12px;' }),
+							$('span', undefined, 'Edit Template')
+						)
+					] : []),
+					' ',
+					...((this._isEmbeddedInWorkflow || (data.ticketType && data.ticketType.toLowerCase() === 'workflow')) ? [
+						$<HTMLButtonElement>('button#entity-detail-switch-flowchart-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(13, 148, 136, 0.16); border: 1px solid rgba(45, 212, 191, 0.35); color: #2dd4bf;', title: 'Switch back to Workflow Flowchart View' },
+							$('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 12px;' }),
+							$('span', undefined, 'Flowchart')
+						)
+					] : []),
+					' ',
+					$<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;', title: 'Run Ticket (Execute current ticket with default parameters)' },
+						$('span.codicon.codicon-play', { style: 'font-size: 12px;' }),
+						$('span.run-ticket-btn-label', undefined, 'Run')
+					),
+					' ',
+					$<HTMLButtonElement>('button#entity-detail-copy-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;', title: 'Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)' },
+						$('span.codicon.codicon-copy', { style: 'font-size: 12px;' }),
+						$('span.copy-json-btn-label', undefined, 'Copy JSON')
+					),
+					' ',
+					$<HTMLButtonElement>('button#entity-detail-paste-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: #c084fc;', title: 'Paste Ticket JSON (Paste and overwrite fields from a copied ticket of the same type)' },
+						$('span.codicon.codicon-clippy', { style: 'font-size: 12px;' }),
+						$('span.paste-json-btn-label', undefined, 'Paste JSON')
+					),
+					' ',
+					$<HTMLButtonElement>('button#entity-detail-refresh-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;', title: 'Refresh Ticket (Reload latest data from disk)' },
+						$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor', style: 'display:inline-block;' },
+							$.SVG('path', { d: 'M13.65 2.35A7.958 7.958 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24l-2.24 2.24H16V0l-2.35 2.35z' })
+						),
+						$('span', undefined, 'Refresh')
+					),
+					' ',
+					$<HTMLButtonElement>('button#entity-detail-toggle-attributes-btn.btn-secondary.toggle-attributes-panel-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};`, title: (this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel') },
+						$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'display:inline-block;' },
+							$.SVG('rect', { x: '1.5', y: '2.5', width: '13', height: '11', rx: '1.5' }),
+							' ',
+							$.SVG('line', { x1: '10', y1: '2.5', x2: '10', y2: '13.5' })
+						)
+					)
+				)
+			),
+			$('div', { class: `layout-container ${this._isAttributesCollapsed || wfNode ? 'attributes-collapsed' : ''}${wfNode ? ' wf-node-view' : ''}` },
+				$<HTMLButtonElement>('button.attributes-collapsed-drawer-btn.toggle-attributes-panel-btn', { type: 'button', title: 'Expand Attributes Panel' },
+					$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+						$.SVG('polyline', { points: '10 4 6 8 10 12' }),
+						' ',
+						$.SVG('line', { x1: '13', y1: '3', x2: '13', y2: '13' })
+					),
+					' ',
+					$('span', undefined, 'Attributes')
+				),
+				$('div.main-content', undefined,
+					...((isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? [
+						$('div.section-card', undefined,
+							$('div.section-title', undefined,
+								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+									$('span', undefined, isAgent ? 'Role & Purpose' : 'Description')
+								),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Description', 'data-ai-field-type': 'textarea', 'data-ai-field-label': (isAgent ? 'Role & Purpose' : 'Description'), 'data-ai-current-value': textOf(data.description), title: 'Edit Description with AI' },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							),
+							$('div#desc-view-mode.desc-content-box', { style: 'cursor: text;', title: 'Click to edit Description manually' },
+								...(data.description ? [...this._renderMarkdown(data.description)] : [
+									$('span', { style: 'opacity: 0.45; font-style: italic;' },
+										'No ',
+										isAgent ? 'role description' : 'description',
+										' provided. Click to edit manually.'
+									)
+								])
+							)
+						)
+					] : []),
+					' ',
+					...(isAgent ? [
+						$('div.section-card', undefined,
+							$('div.section-title', undefined,
+								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+									$('span', undefined, 'AI Model & Execution Engine')
+								),
+								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+									...(matchingAgent ? [
+										$<HTMLButtonElement>('button#agent-assign-task-btn.btn-primary', { type: 'button', 'data-agent-id': textOf(matchingAgent.id), 'data-agent-name': textOf(matchingAgent.name), style: 'font-size: 0.8em; padding: 3px 10px;' },
+											'+ Assign Task'
+										)
+									] : []),
+									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/AI Model', 'data-ai-field-type': 'text', 'data-ai-field-label': 'AI Model', 'data-ai-current-value': textOf(agentModel), title: 'Edit AI Model with AI' },
+										$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+										)
+									)
+								)
+							),
+							$('div', { style: 'display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;' },
+								$('div', { style: 'background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;' },
+									$('div', { style: 'font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;' }, 'Active Model'),
+									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+										$('span', { style: 'display: inline-block; padding: 3px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; font-weight: 700; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(56, 189, 248, 0.3);' },
+											agentModel
+										)
+									)
+								),
+								$('div', { style: 'background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;' },
+									$('div', { style: 'font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;' }, 'AI Provider'),
+									$('div', { style: 'font-size: 0.9em; font-weight: 600; text-transform: uppercase; color: #a78bfa;' }, agentProvider)
+								),
+								$('div', { style: 'background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;' },
+									$('div', { style: 'font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;' }, 'API Connection'),
+									$('div', { style: 'font-size: 0.88em; opacity: 0.85; word-break: break-word;' }, agentCredentialId)
+								),
+								$('div', { style: 'background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;' },
+									$('div', { style: 'font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;' }, 'Bound Scope'),
+									$('div', { style: 'font-size: 0.88em; font-weight: 600; color: #34d399;' }, agentScopeName)
+								)
+							)
+						)
+					] : []),
+					$('div.section-card', { style: wfNode ? 'display: none;' : undefined },
+						$('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								$('span', undefined, isAgent ? 'System Prompt & Persona Instructions' : 'Instructions')
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+								...(isAgent && agentSystemPrompt ? [
+									$<HTMLButtonElement>('button#copy-system-prompt-btn.btn-secondary', { type: 'button', 'data-prompt': textOf(agentSystemPrompt), style: 'font-size: 0.78em; padding: 3px 8px; display: inline-flex; align-items: center; gap: 4px;', title: 'Copy System Prompt' },
+										$('span', undefined, 'Copy Prompt')
+									)
+								] : []),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': (isAgent ? '/Instructions/System Prompt' : '/Instructions'), 'data-ai-field-type': (isAgent ? 'textarea' : 'container'), 'data-ai-field-label': (isAgent ? 'System Prompt' : 'Instructions'), 'data-ai-current-value': textOf(agentSystemPrompt || data.ticketPrompt || ''), title: 'Edit with AI' },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							)
+						),
+						$('div', { style: 'display: flex; flex-direction: column; gap: 12px;' },
+							...(isAgent && agentSystemPrompt ? [
+								$('div.instruction-item', { style: 'border-left: 3px solid #f472b6; background: rgba(244, 114, 182, 0.04); padding: 14px 18px; border-radius: 0 6px 6px 0; border: 1px solid rgba(244, 114, 182, 0.18); border-left-width: 3px;' },
+									$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;' },
+										$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #f472b6; letter-spacing: 0.04em; text-transform: uppercase;' },
+											'Core System Prompt / Persona'
+										),
+										$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/System Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'System Prompt', 'data-ai-current-value': textOf(agentSystemPrompt), title: 'Edit System Prompt with AI' },
+											$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+												$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+											)
+										)
+									),
+									$('div', { style: 'font-size: 0.9em; opacity: 0.95; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-word;' },
+										...this._renderMarkdown(agentSystemPrompt)
+									)
+								)
+							] : []),
+							$('div.instruction-item', { style: 'border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
+									$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;' },
+										isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt'
+									),
+									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Prompt', 'data-ai-current-value': textOf(data.ticketPrompt || ''), title: 'Edit Ticket Prompt with AI' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+										)
+									)
+								),
+								$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Prompt manually' },
+									...(ticketPromptDisplay ? [...this._renderMarkdown(ticketPromptDisplay)] : [
+										$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No Ticket Prompt configured. Click to edit manually.')
+									])
+								)
+							),
+							$('div.instruction-item', { style: 'border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;' },
+								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
+									$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;' },
+										isAgent ? 'System Type Prompt' : 'Ticket Type Prompt'
+									),
+									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Type Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Type Prompt', 'data-ai-current-value': textOf(typePromptDisplay || ''), title: 'Edit Ticket Type Prompt with AI' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+										)
+									)
+								),
+								$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Type Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Type Prompt manually' },
+									...(typePromptDisplay ? [...this._renderMarkdown(typePromptDisplay)] : [
+										$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No Ticket Type Prompt configured. Click to edit manually.')
+									])
+								)
+							)
+						)
+					),
+					...customFieldsContent,
+					$('div.section-card', { style: `max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}` },
+						$('div.section-title', undefined,
+							$('span', undefined, isAgent ? 'Task History & Work Logs' : 'Work Logs'),
+							$<HTMLButtonElement>('button#add-log-btn.btn-primary', { style: 'font-size: 0.8em; padding: 4px 10px;' }, '+ Add Log')
+						),
+						$('div#add-log-box', { style: 'display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;' },
+							$<HTMLTextAreaElement>('textarea#log-textarea.input-field', { rows: '3', placeholder: 'Enter work log description...' }),
+							$('div', { style: 'display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;' },
+								$<HTMLButtonElement>('button#cancel-log-btn.btn-secondary', undefined, 'Cancel'),
+								$<HTMLButtonElement>('button#submit-log-btn.btn-primary', undefined, 'Record Log')
+							)
+						),
+						$('div#work-logs-container', { style: 'max-width: 100%; min-width: 0; width: 100%; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
+							workLogContent
+						)
+					)
+				),
+				$('div.sidebar', undefined,
+					$('div.sidebar-header', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;' },
+						$('h3', { style: 'margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);' },
+							isAgent ? 'Agent Attributes' : 'Attributes'
+						),
+						$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes', 'data-ai-field-type': 'attributes', 'data-ai-field-label': 'Attributes', title: 'Edit Attributes with AI' },
+								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							),
+							$<HTMLButtonElement>('button.sidebar-collapse-icon-btn.toggle-attributes-panel-btn', { type: 'button', title: 'Collapse / Hide Attributes Panel' },
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+									$.SVG('polyline', { points: '6 4 10 8 6 12' }),
+									' ',
+									$.SVG('line', { x1: '13', y1: '3', x2: '13', y2: '13' })
+								)
+							)
+						)
+					),
+					$('div.sidebar-row', { style: 'position: relative;' },
+						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								$('span.sidebar-label', undefined, 'STATUS'),
+								$<HTMLButtonElement>('button#status-lifecycle-info-btn.status-lifecycle-info-btn', { type: 'button', title: 'View Workspace Status Lifecycle & Mapping', style: 'background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; padding: 0; transition: all 0.15s ease;' },
+									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'pointer-events: none; display: block;' },
+										$.SVG('circle', { cx: '8', cy: '8', r: '6.75' }),
+										' ',
+										$.SVG('line', { x1: '8', y1: '7.2', x2: '8', y2: '11.5' }),
+										' ',
+										$.SVG('circle', { cx: '8', cy: '4.75', r: '0.75', fill: 'currentColor', stroke: 'none' })
+									)
+								)
+							),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Status', 'data-ai-field-type': 'status', 'data-ai-field-label': 'Status', 'data-ai-current-value': textOf(status), 'data-ai-options': textOf(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses))), title: 'Edit Status with AI' },
+								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div', { style: 'padding: 2px 0;' },
+							$('span#status-view-val', { style: `display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;` },
+								status
+							)
+						),
+						$('div#status-lifecycle-popover.status-lifecycle-popover', { style: 'display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;' },
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px;' },
+								$('div', { style: 'display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--vscode-editor-foreground);' },
+									$('span', { style: 'color: #38bdf8; display: inline-flex; align-items: center;' },
+										$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
+											$.SVG('circle', { cx: '8', cy: '8', r: '6.75' }),
+											' ',
+											$.SVG('line', { x1: '8', y1: '7.2', x2: '8', y2: '11.5' }),
+											' ',
+											$.SVG('circle', { cx: '8', cy: '4.75', r: '0.75', fill: 'currentColor', stroke: 'none' })
+										)
+									),
+									$('span', undefined, 'Status Lifecycle & Mapping')
+								),
+								$<HTMLButtonElement>('button#close-status-lifecycle-popover-btn', { type: 'button', style: 'background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;', title: 'Close' },
+									'\u2715'
+								)
+							),
+							$('div', { style: 'font-size: 11px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 5px 8px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06);' },
+								$('span', { style: 'opacity: 0.7;' }, 'Current Status:'),
+								$('span', { style: `font-weight: 700; color: ${statusColor}; text-transform: uppercase;` }, status)
+							),
+							$('div', { style: 'display: flex; flex-direction: column; gap: 6px;' },
+								...((): HTMLElement[] => {
+									let mappingObj: { [key: string]: string } = {};
+									let hasCustomMapping = false;
+									if (customModule?.statuses && Array.isArray(customModule.statuses) && customModule.statuses.length > 0) {
+										for (const stDef of customModule.statuses) {
+											const stName = stDef.label || stDef.id;
+											mappingObj[stName] = stDef.category || 'Todo';
+										}
+										hasCustomMapping = true;
+									} else if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
+										mappingObj = { ...this._workspaceStatuses.mapping };
+										hasCustomMapping = true;
+									} else if (data.customMetadata?.['Status Mapping']) {
+										try {
+											mappingObj = JSON.parse(data.customMetadata['Status Mapping']);
+											hasCustomMapping = true;
+										} catch { }
+									}
+									if (Object.keys(mappingObj).length === 0) {
+										mappingObj = {
+											'Todo': 'Todo',
+											'In Progress': 'In Progress',
+											'Done': 'Done',
+											'Blocked': 'Blocked',
+											'Removed': 'Removed'
+										};
+										hasCustomMapping = false;
+									}
 
-			${wfNode ? `
-				<div style="display: flex; align-items: center; gap: 10px; padding: 10px 16px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(45, 212, 191, 0.14) 0%, rgba(56, 189, 248, 0.08) 100%); border: 1px solid rgba(45, 212, 191, 0.35);">
-					<span class="codicon codicon-type-hierarchy-sub" style="font-size: 16px; color: #2dd4bf;"></span>
-					<div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
-						<span style="font-size: 11.5px; font-weight: 700; color: #2dd4bf; letter-spacing: 0.04em; text-transform: uppercase;">Workflow Node</span>
-						<span style="font-size: 11px; opacity: 0.78;">Capsules of this node, shown as cards in pipeline order. Read-only view — edit the node on the canvas.</span>
-					</div>
-				</div>
-			` : this._isPreviewMode ? `
-				<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 14px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(56, 189, 248, 0.14) 0%, rgba(129, 140, 248, 0.10) 100%); border: 1px solid rgba(56, 189, 248, 0.35);">
-					<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0;">
-						<span class="codicon codicon-symbol-class" style="font-size: 14px; color: #38bdf8;"></span>
-						<span style="font-size: 11.5px; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;">Ticket Template</span>
-						<span style="font-size: 11px; padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.2); color: #bae6fd; font-weight: 600;">${this._escapeHtml(customModule?.name || data.ticketType)}</span>
-					</div>
-					<button type="button" id="preview-edit-schema-btn" class="btn-primary" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45);" title="Open the template's schema designer to change its fields and layout (existing tickets keep their values)">
-						<span class="codicon codicon-tools" style="font-size: 12px;"></span>
-						<span>Edit Template Schema</span>
-					</button>
-				</div>
-			` : ''}
+									const categoriesDef = [
+										{ id: 'Todo', label: 'Todo', color: '#818cf8', bg: 'rgba(129, 140, 248, 0.15)', desc: 'Initial backlog / pending' },
+										{ id: 'In Progress', label: 'In Progress', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)', desc: 'Active development' },
+										{ id: 'Done', label: 'Done', color: '#34d399', bg: 'rgba(52, 211, 153, 0.15)', desc: 'Completed & delivered' },
+										{ id: 'Blocked', label: 'Blocked', color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.15)', desc: 'Waiting / on hold' },
+										{ id: 'Removed', label: 'Removed', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)', desc: 'Archived / purged' }
+									];
 
-			<!-- Top Header Area -->
-			<div style="width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 10px 16px;">
-				<div style="flex: 1 1 260px; min-width: 0;">
-					<div class="header-breadcrumb">
-						${(data.breadcrumbSegments && data.breadcrumbSegments.length > 0)
-				? data.breadcrumbSegments.map((s, idx) => `
-								<span class="breadcrumb-item" data-uri="${this._escapeHtmlAttr(s.uri || '')}" style="${s.uri ? 'cursor: pointer;' : ''}" title="${s.uri ? 'Click to navigate to ' + this._escapeHtmlAttr(s.label) : ''}">${this._escapeHtml(s.label)}</span>
-								${idx < data.breadcrumbSegments!.length - 1 ? '<span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span>' : ''}
-							`).join('')
-				: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
-			}
-						${wfNode ? '' : `<span class="ticket-type-badge-trigger" data-ticket-type="${this._escapeHtmlAttr(data.ticketType || '')}" style="font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;" title="Click to view '${typeUpper}' template preview and edit schema"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>`}
-					</div>
-					<div class="header-title-row">
-						<h1 class="ticket-title" id="title-heading" style="cursor: pointer;" title="Click to edit Title manually">${data.title}</h1>
-						<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
-							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-						</button>
-					</div>
-				</div>
-				<div style="display: ${wfNode ? 'none' : 'flex'}; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px;">
-					${this._isPreviewMode ? `
-						<button type="button" class="btn-primary preview-edit-schema-trigger" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.45); color: #e9d5ff;" title="Switch to Edit Template Schema Mode">
-							<span class="codicon codicon-edit" style="font-size: 12px;"></span>
-							<span>Edit Template</span>
-						</button>
-					` : ''}
-					${(this._isEmbeddedInWorkflow || (data.ticketType && data.ticketType.toLowerCase() === 'workflow')) ? `
-						<button type="button" id="entity-detail-switch-flowchart-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(13, 148, 136, 0.16); border: 1px solid rgba(45, 212, 191, 0.35); color: #2dd4bf;" title="Switch back to Workflow Flowchart View">
-							<span class="codicon codicon-type-hierarchy-sub" style="font-size: 12px;"></span>
-							<span>Flowchart</span>
-						</button>
-					` : ''}
-					<button type="button" id="entity-detail-run-ticket-btn" class="btn-primary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;" title="Run Ticket (Execute current ticket with default parameters)">
-						<span class="codicon codicon-play" style="font-size: 12px;"></span>
-						<span class="run-ticket-btn-label">Run</span>
-					</button>
-					<button type="button" id="entity-detail-copy-json-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;" title="Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)">
-						<span class="codicon codicon-copy" style="font-size: 12px;"></span>
-						<span class="copy-json-btn-label">Copy JSON</span>
-					</button>
-					<button type="button" id="entity-detail-paste-json-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: #c084fc;" title="Paste Ticket JSON (Paste and overwrite fields from a copied ticket of the same type)">
-						<span class="codicon codicon-clippy" style="font-size: 12px;"></span>
-						<span class="paste-json-btn-label">Paste JSON</span>
-					</button>
-					<button type="button" id="entity-detail-refresh-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;" title="Refresh Ticket (Reload latest data from disk)">
-						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;"><path d="M13.65 2.35A7.958 7.958 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24l-2.24 2.24H16V0l-2.35 2.35z"/></svg>
-						<span>Refresh</span>
-					</button>
-					<button type="button" id="entity-detail-toggle-attributes-btn" class="btn-secondary toggle-attributes-panel-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};" title="${this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel'}">
-						<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;">
-							<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"></rect>
-							<line x1="10" y1="2.5" x2="10" y2="13.5"></line>
-						</svg>
-					</button>
-				</div>
-			</div>
+									const categoryGroupMap: { [cat: string]: string[] } = {
+										'Todo': [],
+										'In Progress': [],
+										'Done': [],
+										'Blocked': [],
+										'Removed': []
+									};
+									for (const [st, cat] of Object.entries(mappingObj)) {
+										if (categoryGroupMap[cat]) {
+											if (!categoryGroupMap[cat].includes(st)) {
+												categoryGroupMap[cat].push(st);
+											}
+										} else {
+											categoryGroupMap['Todo'].push(st);
+										}
+									}
 
-			<!-- Main Layout Container -->
-			<div class="layout-container ${this._isAttributesCollapsed || wfNode ? 'attributes-collapsed' : ''}${wfNode ? ' wf-node-view' : ''}">
-				<button type="button" class="attributes-collapsed-drawer-btn toggle-attributes-panel-btn" title="Expand Attributes Panel">
-					<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-						<polyline points="10 4 6 8 10 12"></polyline>
-						<line x1="13" y1="3" x2="13" y2="13"></line>
-					</svg>
-					<span>Attributes</span>
-				</button>
-				<!-- Left Column: Main Stream -->
-				<div class="main-content">
-					<!-- 1. Description / Role Card -->
-					${(isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? `
-					<div class="section-card">
-						<div class="section-title">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span>${isAgent ? 'Role & Purpose' : 'Description'}</span>
-							</div>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Description" data-ai-field-type="textarea" data-ai-field-label="${isAgent ? 'Role & Purpose' : 'Description'}" data-ai-current-value="${this._escapeHtmlAttr(data.description)}" title="Edit Description with AI">
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
-						</div>
-						
-						<div id="desc-view-mode" class="desc-content-box" style="cursor: text;" title="Click to edit Description manually">
-							${data.description ? this._markdownToHtml(data.description) : `<span style="opacity: 0.45; font-style: italic;">No ${isAgent ? 'role description' : 'description'} provided. Click to edit manually.</span>`}
-						</div>
-					</div>
-					` : ''}
+									const rows = categoriesDef.map(cat => {
+										const mappedList = categoryGroupMap[cat.id] || [];
+										const chips = mappedList.length === 0
+											? [$('span', { style: 'font-size: 10.5px; opacity: 0.45; font-style: italic;' }, 'None mapped')]
+											: mappedList.map(st => {
+												const isCur = st.toLowerCase() === (status || '').toLowerCase();
+												return $('span', { style: `display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: ${isCur ? '700' : '500'}; background: ${isCur ? `${cat.color}25` : 'rgba(255,255,255,0.04)'}; color: ${isCur ? cat.color : 'inherit'}; border: ${isCur ? `1px solid ${cat.color}80` : '1px solid rgba(255,255,255,0.1)'};` },
+													st,
+													...(isCur ? [$('span', { style: `font-size: 8.5px; background: ${cat.color}; color: #000; padding: 0 3px; border-radius: 2px; font-weight: 800;` }, 'CURRENT')] : [])
+												);
+											});
+										return $('div', { style: 'display: flex; gap: 8px; align-items: flex-start; padding: 5px 8px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px;' },
+											$('div', { style: 'width: 80px; flex-shrink: 0;' },
+												$('span', { style: `display: inline-block; font-size: 10.5px; font-weight: 700; color: ${cat.color}; background: ${cat.bg}; border: 1px solid ${cat.color}40; padding: 1px 6px; border-radius: 3px;` }, cat.label)
+											),
+											$('div', { style: 'flex: 1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;' }, ...chips)
+										);
+									});
 
-					${isAgent ? `
-						<!-- AI Model & Execution Engine Card -->
-						<div class="section-card">
-							<div class="section-title">
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<span>AI Model & Execution Engine</span>
-								</div>
-								<div style="display: flex; align-items: center; gap: 8px;">
-									${matchingAgent ? `
-										<button type="button" id="agent-assign-task-btn" data-agent-id="${this._escapeHtmlAttr(matchingAgent.id)}" data-agent-name="${this._escapeHtmlAttr(matchingAgent.name)}" class="btn-primary" style="font-size: 0.8em; padding: 3px 10px;">+ Assign Task</button>
-									` : ''}
-									<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/AI Model" data-ai-field-type="text" data-ai-field-label="AI Model" data-ai-current-value="${this._escapeHtmlAttr(agentModel)}" title="Edit AI Model with AI">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-							</div>
-							<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
-								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
-									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Active Model</div>
-									<div style="display: flex; align-items: center; gap: 6px;">
-										<span style="display: inline-block; padding: 3px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; font-weight: 700; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(56, 189, 248, 0.3);">${agentModel}</span>
-									</div>
-								</div>
-								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
-									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">AI Provider</div>
-									<div style="font-size: 0.9em; font-weight: 600; text-transform: uppercase; color: #a78bfa;">${agentProvider}</div>
-								</div>
-								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
-									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">API Connection</div>
-									<div style="font-size: 0.88em; opacity: 0.85; word-break: break-word;">${agentCredentialId}</div>
-								</div>
-								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
-									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Bound Scope</div>
-									<div style="font-size: 0.88em; font-weight: 600; color: #34d399;">${agentScopeName}</div>
-								</div>
-							</div>
-						</div>
-					` : ''}
+									const notice = hasCustomMapping
+										? $('div', { style: 'font-size: 10.5px; color: #34d399; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.2); padding: 5px 8px; border-radius: 5px; line-height: 1.3;' },
+											`\u2713 Configured with workspace custom status mapping (${Object.keys(mappingObj).length} entries).`
+										)
+										: $('div', { style: 'font-size: 10.5px; color: var(--vscode-descriptionForeground); background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); padding: 5px 8px; border-radius: 5px; line-height: 1.3;' },
+											'\u2139\uFE0F No custom mapping configured (using default 1:1 lifecycle mapping for standard stages).'
+										);
 
-					<!-- Instructions / System Prompt Card -->
-					<div class="section-card"${wfNode ? ' style="display: none;"' : ''}>
-						<div class="section-title">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span>${isAgent ? 'System Prompt & Persona Instructions' : 'Instructions'}</span>
-							</div>
-							<div style="display: flex; align-items: center; gap: 8px;">
-								${isAgent && agentSystemPrompt ? `
-									<button type="button" id="copy-system-prompt-btn" class="btn-secondary" data-prompt="${this._escapeHtmlAttr(agentSystemPrompt)}" style="font-size: 0.78em; padding: 3px 8px; display: inline-flex; align-items: center; gap: 4px;" title="Copy System Prompt">
-										<span>Copy Prompt</span>
-									</button>
-								` : ''}
-								<button type="button" class="ai-edit-btn" data-ai-field="${isAgent ? '/Instructions/System Prompt' : '/Instructions'}" data-ai-field-type="${isAgent ? 'textarea' : 'container'}" data-ai-field-label="${isAgent ? 'System Prompt' : 'Instructions'}" data-ai-current-value="${this._escapeHtmlAttr(agentSystemPrompt || data.ticketPrompt || '')}" title="Edit with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-						</div>
+									return [...rows, notice];
+								})()
+							)
+						)
+					),
+					$('div.sidebar-row', undefined,
+						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+							$('span.sidebar-label', undefined, 'PRIORITY'),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Priority', 'data-ai-field-type': 'priority', 'data-ai-field-label': 'Priority', 'data-ai-current-value': textOf(data.priority), title: 'Edit Priority with AI' },
+								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 0;' },
+							$('span', { style: `display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;` }),
+							$('span.meta-view-val', { style: `font-size: 0.9em; font-weight: 700; color: ${pColor};` }, data.priority)
+						)
+					),
+					...(isAgent ? [
+						$('div.sidebar-row', undefined,
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+								$('span.sidebar-label', undefined, 'AI MODEL'),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/AI Model', 'data-ai-field-type': 'text', 'data-ai-field-label': 'AI Model', 'data-ai-current-value': textOf(agentModel), title: 'Edit AI Model with AI' },
+									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							),
+							$('span.sidebar-value', { style: 'color: #38bdf8; font-weight: 700; font-family: monospace;' }, agentModel)
+						),
+						$('div.sidebar-row', undefined,
+							$('span.sidebar-label', undefined, 'PROVIDER'),
+							$('span.sidebar-value', { style: 'text-transform: uppercase; font-size: 0.88em; color: #a78bfa; font-weight: 600;' }, agentProvider)
+						),
+						$('div.sidebar-row', undefined,
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+								$('span.sidebar-label', undefined, 'AGENT ROLE'),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Agent Role', 'data-ai-field-type': 'text', 'data-ai-field-label': 'Agent Role', 'data-ai-current-value': textOf(agentRole), title: 'Edit Agent Role with AI' },
+									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							),
+							$('span.sidebar-value', { style: 'font-size: 0.88em;' }, agentRole)
+						),
+						$('div.sidebar-row', undefined,
+							$('span.sidebar-label', undefined, 'BOUND SCOPE'),
+							$('span.sidebar-value', { style: 'font-size: 0.88em; color: #34d399; font-weight: 600;' }, agentScopeName)
+						)
+					] : [
+						$('div.sidebar-row', undefined,
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+								$('span.sidebar-label', undefined, 'CURRENT AI AGENT'),
+								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Current AI Agent', 'data-ai-field-type': 'agent', 'data-ai-field-label': 'Current AI Agent', 'data-ai-current-value': textOf(data.assignedAgentName || ''), 'data-ai-options': textOf(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name })))), title: 'Edit Current AI Agent with AI' },
+									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								)
+							),
+							$('span.meta-view-val.sidebar-value', undefined,
+								data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : $('span', { style: 'opacity:0.4;' }, 'Unassigned')
+							)
+						)
+					]),
+					' ',
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'TYPE DEFINITION'),
+						$('span.sidebar-value', { style: 'font-family: monospace; font-size: 0.85em; opacity: 0.9;' }, data.typeDefinition)
+					),
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'WORKSPACE ID'),
+						$('span.sidebar-value', { style: 'font-family: monospace; font-size: 0.88em;' }, data.workspaceId || 'None')
+					),
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'TICKET ID'),
+						$('span.sidebar-value', { style: 'font-family: monospace; font-size: 0.88em; color: #38bdf8;' }, data.ticketId)
+					),
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'TICKET CODE'),
+						$('span.sidebar-value', { style: 'font-family: monospace; font-size: 0.88em;' }, data.ticketCode || 'None')
+					),
+					$('div.sidebar-row', undefined,
+						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+							$('span.sidebar-label', undefined, 'LINK TO'),
+							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Link To', 'data-ai-field-type': 'link_to', 'data-ai-field-label': 'Link To', 'data-ai-current-value': `${data.linkTo !== 'None' ? textOf(data.linkTo) : ''}`, 'data-ai-options': textOf(JSON.stringify(allTickets)), title: 'Edit Link To with AI' },
+								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+								)
+							)
+						),
+						$('div.sidebar-value', { style: 'display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;' },
+							...this._renderTicketChips(data.linkTo, allTickets)
+						)
+					),
+					$('div.sidebar-row', undefined,
+						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+							$('span.sidebar-label', undefined, 'LINKED BY')
+						),
+						$('div.sidebar-value', { style: 'display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;' },
+							...this._renderTicketChips(data.linkedBy, allTickets)
 
-						<div style="display: flex; flex-direction: column; gap: 12px;">
-							${isAgent && agentSystemPrompt ? `
-								<!-- Core Persona / System Prompt Box -->
-								<div class="instruction-item" style="border-left: 3px solid #f472b6; background: rgba(244, 114, 182, 0.04); padding: 14px 18px; border-radius: 0 6px 6px 0; border: 1px solid rgba(244, 114, 182, 0.18); border-left-width: 3px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-										<div style="font-size: 0.78em; font-weight: 700; color: #f472b6; letter-spacing: 0.04em; text-transform: uppercase;">Core System Prompt / Persona</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/System Prompt" data-ai-field-type="textarea" data-ai-field-label="System Prompt" data-ai-current-value="${this._escapeHtmlAttr(agentSystemPrompt)}" title="Edit System Prompt with AI">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										</button>
-									</div>
-									<div style="font-size: 0.9em; opacity: 0.95; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-word;">${this._markdownToHtml(agentSystemPrompt)}</div>
-								</div>
-							` : ''}
+						)
+					),
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'CREATED BY'),
+						$('span.sidebar-value', undefined, data.createdBy)
+					),
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'OWNER ACCOUNT'),
+						$('span.sidebar-value', { style: 'font-size: 0.85em; opacity: 0.85;' }, data.ownerAccount || 'unauthenticated')
+					),
+					$('div.sidebar-row', undefined,
+						$('span.sidebar-label', undefined, 'CREATED AT'),
+						$('span.sidebar-value', { style: 'font-size: 0.85em; opacity: 0.85;' }, data.createdAt)
+					),
+					$('div.sidebar-row', { style: ((data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;') },
+						$('span.sidebar-label', undefined, 'LAST UPDATED AT'),
+						$('span.sidebar-value', { style: 'font-size: 0.85em; opacity: 0.85;' }, data.lastUpdatedAt)
+					),
+					' ',
+					...((data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? [
+						$('div.sidebar-row', { style: 'margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);' },
+							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
+								$('span.sidebar-label', { style: 'display: flex; align-items: center; gap: 5px;' },
+									$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor', style: 'color: #38bdf8;' },
+										$.SVG('path', { 'fill-rule': 'evenodd', 'clip-rule': 'evenodd', d: 'M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25zm6.56 0a.75.75 0 0 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06l-4.25-4.25z' })
+									),
+									'GIT REPOSITORY'
+								),
+								...(data.gitRemoteUrl ? [
+									$<HTMLButtonElement>('button.copy-git-url-btn', { type: 'button', 'data-git-url': textOf(data.gitRemoteUrl), title: 'Copy Git URL to clipboard', style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; transition: all 0.15s ease;' },
+										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { 'fill-rule': 'evenodd', 'clip-rule': 'evenodd', d: 'M4 4h5v2H4V4zm0 3h5v1H4V7zm0 2h3v1H4V9zm7.5-6H11V2H4v1H2.5A1.5 1.5 0 0 0 1 4.5v9A1.5 1.5 0 0 0 2.5 15h9a1.5 1.5 0 0 0 1.5-1.5V11h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-2.5zM12 4.5V10h-1V4.5a.5.5 0 0 1 .5-.5h.5zm-9.5 0a.5.5 0 0 1 .5-.5H10a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H2.5a.5.5 0 0 1-.5-.5v-9zm12-.5h-.5v6h.5V4z' })
+										),
+										$('span', undefined, 'Copy')
+									)
+								] : [])
+							),
+							$('div.git-url-box', { title: textOf(data.gitRemoteUrl || 'Inherited'), style: 'background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 5px; padding: 5px 8px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-editor-foreground); display: flex; align-items: center; overflow: hidden;' },
+								$('span', { style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;' },
+									data.gitRemoteUrl || $('span', { style: 'opacity:0.4; font-style:italic;' }, 'None')
 
-							<!-- Ticket Prompt -->
-							<div class="instruction-item" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
-								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">${isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt'}</div>
-									<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Prompt" data-ai-current-value="${this._escapeHtmlAttr(data.ticketPrompt || '')}" title="Edit Ticket Prompt with AI">
-										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-								<div class="instruction-prompt-content" data-prompt-key="Ticket Prompt" style="font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;" title="Click to edit Ticket Prompt manually">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured. Click to edit manually.</span>'}</div>
-							</div>
-
-							<!-- Ticket Type Prompt -->
-							<div class="instruction-item" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
-								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">${isAgent ? 'System Type Prompt' : 'Ticket Type Prompt'}</div>
-									<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Type Prompt" data-ai-current-value="${this._escapeHtmlAttr(typePromptDisplay || '')}" title="Edit Ticket Type Prompt with AI">
-										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									</button>
-								</div>
-								<div class="instruction-prompt-content" data-prompt-key="Ticket Type Prompt" style="font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;" title="Click to edit Ticket Type Prompt manually">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured. Click to edit manually.</span>'}</div>
-							</div>
-						</div>
-					</div>
-
-					<!-- Custom Properties -->
-					${customFieldsHtml}
-
-					<!-- Work Logs Card (not for previews: a template preview or a workflow node has no work log) -->
-					<div class="section-card" style="max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}">
-						<div class="section-title">
-							<span>${isAgent ? 'Task History & Work Logs' : 'Work Logs'}</span>
-							<button id="add-log-btn" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
-						</div>
-						
-						<!-- Add Log Form -->
-						<div id="add-log-box" style="display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;">
-							<textarea id="log-textarea" class="input-field" rows="3" placeholder="Enter work log description..."></textarea>
-							<div style="display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;">
-								<button id="cancel-log-btn" class="btn-secondary">Cancel</button>
-								<button id="submit-log-btn" class="btn-primary">Record Log</button>
-							</div>
-						</div>
-
-						<div id="work-logs-container" style="max-width: 100%; min-width: 0; width: 100%; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">
-							${workLogHtml}
-						</div>
-					</div>
-				</div>
-
-				<!-- Right Column: Sidebar (Attributes / Information) -->
-				<div class="sidebar">
-					<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-						<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">${isAgent ? 'Agent Attributes' : 'Attributes'}</h3>
-						<div style="display: flex; align-items: center; gap: 6px;">
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
-							<button type="button" class="sidebar-collapse-icon-btn toggle-attributes-panel-btn" title="Collapse / Hide Attributes Panel">
-								<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-									<polyline points="6 4 10 8 6 12"></polyline>
-									<line x1="13" y1="3" x2="13" y2="13"></line>
-								</svg>
-							</button>
-						</div>
-					</div>
-					
-					<!-- Status -->
-					<div class="sidebar-row" style="position: relative;">
-						<div style="display: flex; justify-content: space-between; align-items: center;">
-							<div style="display: flex; align-items: center; gap: 6px;">
-								<span class="sidebar-label">STATUS</span>
-								<button type="button" id="status-lifecycle-info-btn" class="status-lifecycle-info-btn" title="View Workspace Status Lifecycle & Mapping" style="background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; padding: 0; transition: all 0.15s ease;" onmouseenter="this.style.color='var(--vscode-foreground)'; this.style.borderColor='rgba(56, 189, 248, 0.6)'; this.style.background='rgba(56, 189, 248, 0.1)';" onmouseleave="this.style.color='var(--vscode-descriptionForeground)'; this.style.borderColor='rgba(255, 255, 255, 0.15)'; this.style.background='rgba(255, 255, 255, 0.06)';">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="pointer-events: none; display: block;">
-										<circle cx="8" cy="8" r="6.75"></circle>
-										<line x1="8" y1="7.2" x2="8" y2="11.5"></line>
-										<circle cx="8" cy="4.75" r="0.75" fill="currentColor" stroke="none"></circle>
-									</svg>
-								</button>
-							</div>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
-								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
-						</div>
-						<div style="padding: 2px 0;">
-							<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;">${status}</span>
-						</div>
-
-						<!-- Status Lifecycle & Mapping Popover -->
-						<div id="status-lifecycle-popover" class="status-lifecycle-popover" style="display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;">
-							<!-- Header -->
-							<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px;">
-								<div style="display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--vscode-editor-foreground);">
-									<span style="color: #38bdf8; display: inline-flex; align-items: center;">
-										<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-											<circle cx="8" cy="8" r="6.75"></circle>
-											<line x1="8" y1="7.2" x2="8" y2="11.5"></line>
-											<circle cx="8" cy="4.75" r="0.75" fill="currentColor" stroke="none"></circle>
-										</svg>
-									</span>
-									<span>Status Lifecycle & Mapping</span>
-								</div>
-								<button type="button" id="close-status-lifecycle-popover-btn" style="background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;" title="Close">\u2715</button>
-							</div>
-
-							<!-- Current Status Indicator -->
-							<div style="font-size: 11px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 5px 8px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06);">
-								<span style="opacity: 0.7;">Current Status:</span>
-								<span style="font-weight: 700; color: ${statusColor}; text-transform: uppercase;">${status}</span>
-							</div>
-
-							<!-- 5 Categories -->
-							<div style="display: flex; flex-direction: column; gap: 6px;">
-								${(() => {
-				let mappingObj: { [key: string]: string } = {};
-				let hasCustomMapping = false;
-				if (customModule?.statuses && Array.isArray(customModule.statuses) && customModule.statuses.length > 0) {
-					for (const stDef of customModule.statuses) {
-						const stName = stDef.label || stDef.id;
-						mappingObj[stName] = stDef.category || 'Todo';
-					}
-					hasCustomMapping = true;
-				} else if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
-					mappingObj = { ...this._workspaceStatuses.mapping };
-					hasCustomMapping = true;
-				} else if (data.customMetadata?.['Status Mapping']) {
-					try {
-						mappingObj = JSON.parse(data.customMetadata['Status Mapping']);
-						hasCustomMapping = true;
-					} catch { }
-				}
-				if (Object.keys(mappingObj).length === 0) {
-					mappingObj = {
-						'Todo': 'Todo',
-						'In Progress': 'In Progress',
-						'Done': 'Done',
-						'Blocked': 'Blocked',
-						'Removed': 'Removed'
-					};
-					hasCustomMapping = false;
-				}
-
-				const categoriesDef = [
-					{ id: 'Todo', label: 'Todo', color: '#818cf8', bg: 'rgba(129, 140, 248, 0.15)', desc: 'Initial backlog / pending' },
-					{ id: 'In Progress', label: 'In Progress', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)', desc: 'Active development' },
-					{ id: 'Done', label: 'Done', color: '#34d399', bg: 'rgba(52, 211, 153, 0.15)', desc: 'Completed & delivered' },
-					{ id: 'Blocked', label: 'Blocked', color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.15)', desc: 'Waiting / on hold' },
-					{ id: 'Removed', label: 'Removed', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)', desc: 'Archived / purged' }
-				];
-
-				const categoryGroupMap: { [cat: string]: string[] } = {
-					'Todo': [],
-					'In Progress': [],
-					'Done': [],
-					'Blocked': [],
-					'Removed': []
-				};
-				for (const [st, cat] of Object.entries(mappingObj)) {
-					if (categoryGroupMap[cat]) {
-						if (!categoryGroupMap[cat].includes(st)) {
-							categoryGroupMap[cat].push(st);
-						}
-					} else {
-						categoryGroupMap['Todo'].push(st);
-					}
-				}
-
-				let htmlRows = '';
-				for (const cat of categoriesDef) {
-					const mappedList = categoryGroupMap[cat.id] || [];
-					let chipsHtml = '';
-					if (mappedList.length === 0) {
-						chipsHtml = `<span style="font-size: 10.5px; opacity: 0.45; font-style: italic;">None mapped</span>`;
-					} else {
-						for (const st of mappedList) {
-							const isCur = st.toLowerCase() === (status || '').toLowerCase();
-							chipsHtml += `
-													<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: ${isCur ? '700' : '500'}; background: ${isCur ? `${cat.color}25` : 'rgba(255,255,255,0.04)'}; color: ${isCur ? cat.color : 'inherit'}; border: ${isCur ? `1px solid ${cat.color}80` : '1px solid rgba(255,255,255,0.1)'};">
-														${this._escapeHtmlAttr(st)}
-														${isCur ? `<span style="font-size: 8.5px; background: ${cat.color}; color: #000; padding: 0 3px; border-radius: 2px; font-weight: 800;">CURRENT</span>` : ''}
-													</span>
-												`;
-						}
-					}
-
-					htmlRows += `
-											<div style="display: flex; gap: 8px; align-items: flex-start; padding: 5px 8px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px;">
-												<div style="width: 80px; flex-shrink: 0;">
-													<span style="display: inline-block; font-size: 10.5px; font-weight: 700; color: ${cat.color}; background: ${cat.bg}; border: 1px solid ${cat.color}40; padding: 1px 6px; border-radius: 3px;">${cat.label}</span>
-												</div>
-												<div style="flex: 1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">
-													${chipsHtml}
-												</div>
-											</div>
-										`;
-				}
-
-				const noticeHtml = hasCustomMapping ? `
-										<div style="font-size: 10.5px; color: #34d399; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.2); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
-											✓ Configured with workspace custom status mapping (${Object.keys(mappingObj).length} entries).
-										</div>
-									` : `
-										<div style="font-size: 10.5px; color: var(--vscode-descriptionForeground); background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
-											\u2139️ No custom mapping configured (using default 1:1 lifecycle mapping for standard stages).
-										</div>
-									`;
-
-				return htmlRows + noticeHtml;
-			})()}
-							</div>
-						</div>
-					</div>
-
-					<!-- Priority -->
-					<div class="sidebar-row">
-						<div style="display: flex; justify-content: space-between; align-items: center;">
-							<span class="sidebar-label">PRIORITY</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Priority" data-ai-field-type="priority" data-ai-field-label="Priority" data-ai-current-value="${this._escapeHtmlAttr(data.priority)}" title="Edit Priority with AI">
-								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
-						</div>
-						<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
-							<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
-							<span class="meta-view-val" style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${data.priority}</span>
-						</div>
-					</div>
-
-					${isAgent ? `
-						<!-- AI Model -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">AI MODEL</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/AI Model" data-ai-field-type="text" data-ai-field-label="AI Model" data-ai-current-value="${this._escapeHtmlAttr(agentModel)}" title="Edit AI Model with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<span class="sidebar-value" style="color: #38bdf8; font-weight: 700; font-family: monospace;">${agentModel}</span>
-						</div>
-
-						<!-- Provider -->
-						<div class="sidebar-row">
-							<span class="sidebar-label">PROVIDER</span>
-							<span class="sidebar-value" style="text-transform: uppercase; font-size: 0.88em; color: #a78bfa; font-weight: 600;">${agentProvider}</span>
-						</div>
-
-						<!-- Agent Role -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">AGENT ROLE</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Agent Role" data-ai-field-type="text" data-ai-field-label="Agent Role" data-ai-current-value="${this._escapeHtmlAttr(agentRole)}" title="Edit Agent Role with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<span class="sidebar-value" style="font-size: 0.88em;">${agentRole}</span>
-						</div>
-
-						<!-- Scope -->
-						<div class="sidebar-row">
-							<span class="sidebar-label">BOUND SCOPE</span>
-							<span class="sidebar-value" style="font-size: 0.88em; color: #34d399; font-weight: 600;">${agentScopeName}</span>
-						</div>
-					` : `
-						<!-- Current AI Agent -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">CURRENT AI AGENT</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" data-ai-field-type="agent" data-ai-field-label="Current AI Agent" data-ai-current-value="${this._escapeHtmlAttr(data.assignedAgentName || '')}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name }))))}" title="Edit Current AI Agent with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
-						</div>
-					`}
-
-					<!-- Type Definition -->
-					<div class="sidebar-row">
-						<span class="sidebar-label">TYPE DEFINITION</span>
-						<span class="sidebar-value" style="font-family: monospace; font-size: 0.85em; opacity: 0.9;">${data.typeDefinition}</span>
-					</div>
-
-					<!-- Workspace ID & Ticket ID -->
-					<div class="sidebar-row">
-						<span class="sidebar-label">WORKSPACE ID</span>
-						<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.workspaceId || 'None'}</span>
-					</div>
-
-					<div class="sidebar-row">
-						<span class="sidebar-label">TICKET ID</span>
-						<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em; color: #38bdf8;">${data.ticketId}</span>
-					</div>
-
-					<div class="sidebar-row">
-						<span class="sidebar-label">TICKET CODE</span>
-						<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.ticketCode || 'None'}</span>
-					</div>
-
-					<!-- Link To & Linked By -->
-					<div class="sidebar-row">
-						<div style="display: flex; justify-content: space-between; align-items: center;">
-							<span class="sidebar-label">LINK TO</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" data-ai-field-type="link_to" data-ai-field-label="Link To" data-ai-current-value="${data.linkTo !== 'None' ? this._escapeHtmlAttr(data.linkTo) : ''}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(allTickets))}" title="Edit Link To with AI">
-								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
-						</div>
-						<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-							${this._renderTicketChipsHtml(data.linkTo, allTickets)}
-						</div>
-					</div>
-
-					<div class="sidebar-row">
-						<div style="display: flex; justify-content: space-between; align-items: center;">
-							<span class="sidebar-label">LINKED BY</span>
-						</div>
-						<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-							${this._renderTicketChipsHtml(data.linkedBy, allTickets)}
-						</div>
-					</div>
-
-					<!-- Ownership & Dates -->
-					<div class="sidebar-row">
-						<span class="sidebar-label">CREATED BY</span>
-						<span class="sidebar-value">${data.createdBy}</span>
-					</div>
-
-					<div class="sidebar-row">
-						<span class="sidebar-label">OWNER ACCOUNT</span>
-						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.ownerAccount || 'unauthenticated'}</span>
-					</div>
-
-					<div class="sidebar-row">
-						<span class="sidebar-label">CREATED AT</span>
-						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
-					</div>
-
-					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
-						<span class="sidebar-label">LAST UPDATED AT</span>
-						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
-					</div>
-
-					<!-- Git Configuration (Repository & Branch) -->
-					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? `
-						<div class="sidebar-row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
-							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-								<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color: #38bdf8;"><path fill-rule="evenodd" clip-rule="evenodd" d="M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25zm6.56 0a.75.75 0 0 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06l-4.25-4.25z"/></svg>
-									GIT REPOSITORY
-								</span>
-								${data.gitRemoteUrl ? `
-									<button type="button" class="copy-git-url-btn" data-git-url="${this._escapeHtmlAttr(data.gitRemoteUrl)}" title="Copy Git URL to clipboard" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; transition: all 0.15s ease;" onmouseenter="this.style.color='var(--vscode-foreground)'" onmouseleave="this.style.color='var(--vscode-descriptionForeground)'">
-										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M4 4h5v2H4V4zm0 3h5v1H4V7zm0 2h3v1H4V9zm7.5-6H11V2H4v1H2.5A1.5 1.5 0 0 0 1 4.5v9A1.5 1.5 0 0 0 2.5 15h9a1.5 1.5 0 0 0 1.5-1.5V11h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-2.5zM12 4.5V10h-1V4.5a.5.5 0 0 1 .5-.5h.5zm-9.5 0a.5.5 0 0 1 .5-.5H10a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H2.5a.5.5 0 0 1-.5-.5v-9zm12-.5h-.5v6h.5V4z"/></svg>
-										<span>Copy</span>
-									</button>
-								` : ''}
-							</div>
-							<div class="git-url-box" title="${this._escapeHtmlAttr(data.gitRemoteUrl || 'Inherited')}" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 5px; padding: 5px 8px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-editor-foreground); display: flex; align-items: center; overflow: hidden;">
-								<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">${data.gitRemoteUrl || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
-							</div>
-						</div>
-
-						<div class="sidebar-row" style="border-bottom: none; margin-bottom: 0;">
-							<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">
-								<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color: #a78bfa;"><path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 2a2.25 2.25 0 1 0-1.77 3.635A4.75 4.75 0 0 0 5.5 10.158V6.635a2.25 2.25 0 1 0-1.5 0v5.73a2.25 2.25 0 1 0 1.5 0V11.5a3.25 3.25 0 0 1 3.25-3.25h1.23a2.25 2.25 0 1 0 1.77-6.25zM4.75 3.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zm0 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm7-10a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zm0 6a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5z"/></svg>
-								GIT BRANCH
-							</span>
-							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
-								<span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; font-family: monospace; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); padding: 2px 8px; border-radius: 4px;">
-									${data.gitBranch || 'main'}
-								</span>
-							</div>
-						</div>
-					` : ''}
-				</div>
-			</div>
-		`;
+								)
+							)
+						),
+						$('div.sidebar-row', { style: 'border-bottom: none; margin-bottom: 0;' },
+							$('span.sidebar-label', { style: 'display: flex; align-items: center; gap: 5px;' },
+								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor', style: 'color: #a78bfa;' },
+									$.SVG('path', { 'fill-rule': 'evenodd', 'clip-rule': 'evenodd', d: 'M11.75 2a2.25 2.25 0 1 0-1.77 3.635A4.75 4.75 0 0 0 5.5 10.158V6.635a2.25 2.25 0 1 0-1.5 0v5.73a2.25 2.25 0 1 0 1.5 0V11.5a3.25 3.25 0 0 1 3.25-3.25h1.23a2.25 2.25 0 1 0 1.77-6.25zM4.75 3.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zm0 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm7-10a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zm0 6a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5z' })
+								),
+								'GIT BRANCH'
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 0;' },
+								$('span', { style: 'display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; font-family: monospace; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); padding: 2px 8px; border-radius: 4px;' },
+									data.gitBranch || 'main'
+								)
+							)
+						)
+					] : [])
+				)
+			)
+		];
 	}
 }
