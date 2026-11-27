@@ -22,6 +22,7 @@ import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWor
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { hasWorkflowProperty, isWorkflowRecord } from '../common/workflowExecutionModel.js';
+import { buildDynamicListContextValue } from '../common/dynamicListValue.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -3050,6 +3051,18 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'dynamic_list': {
+							// Dynamic List / Reusable Class: publishes its items as a JSON array (CI-44)
+							const rawList = inputOverrides[fieldLabel] !== undefined
+								? inputOverrides[fieldLabel]
+								: (customMetadata[fieldLabel] ?? customMetadata[field.id] ?? field.defaultContent ?? field.defaultValue);
+							const items = this._resolveDynamicListItems(field, fieldLabel, rawList);
+							stepOutput = items;
+							this._publishDynamicListContext(contextVariables, field, fieldLabel, items);
+							stepDetails = { fieldLabel, type: fieldType, itemCount: items.length, value: items };
+							break;
+						}
+
 						default: {
 							// 5. Standard field (text, textarea, number, select, multiselect, date, switch, classes, etc.)
 							const rawVal = inputOverrides[fieldLabel] !== undefined
@@ -4027,6 +4040,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					field.lastExecutionOutput = outMap;
 					break;
 				}
+				case 'dynamic_list': {
+					// A node has no stored ticket value: the list items come from the component's default content (CI-44)
+					const items = this._resolveDynamicListItems(field, fieldLabel, field.defaultContent ?? field.defaultValue);
+					stepOutput = items;
+					this._publishDynamicListContext(contextVariables, field, fieldLabel, items);
+					stepDetails = { itemCount: items.length, value: items };
+					const desc = describeRuntimeValue(items);
+					field.lastExecutionLog = `>>> Component [${fieldType}] "${fieldLabel}" [Type: ${desc.typeTag}]\n${desc.preview}`;
+					field.lastExecutionOutput = items;
+					break;
+				}
 				default: {
 					const rawVal = field.defaultContent || '';
 					stepOutput = this._interpolateVariables(rawVal, contextVariables);
@@ -4766,6 +4790,32 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 	private _cleanKey(k: string): string {
 		return k.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+	}
+
+	/** The items a Dynamic List publishes; a stored value that is not a JSON array of items fails the step. */
+	private _resolveDynamicListItems(field: ICustomField, fieldLabel: string, rawValue: unknown): unknown[] {
+		const res = buildDynamicListContextValue(rawValue, field.itemFields);
+		if (!res.ok) {
+			throw new Error(`Dynamic List '${fieldLabel}': ${res.error}.`);
+		}
+		return res.items;
+	}
+
+	/**
+	 * Publishes a Dynamic List's items like a Data Table publishes its rows: the array under the label (and its
+	 * clean key) plus `<name>.json` with the JSON text. The caller's common output step adds the array under the
+	 * variable name and the field id.
+	 */
+	private _publishDynamicListContext(contextVariables: Record<string, unknown>, field: ICustomField, fieldLabel: string, items: unknown[]): void {
+		const json = JSON.stringify(items);
+		const outVarName = (field.outputVariableName || '').trim() || generateSmartPythonVarName(fieldLabel, field.type);
+		contextVariables[fieldLabel] = items;
+		contextVariables[this._cleanKey(fieldLabel)] = items;
+		for (const name of new Set([fieldLabel, this._cleanKey(fieldLabel), outVarName])) {
+			if (name) {
+				contextVariables[`${name}.json`] = json;
+			}
+		}
 	}
 
 	private _findMatchingCustomModule(modules: ICustomModule[], typeStr: string): ICustomModule | undefined {
