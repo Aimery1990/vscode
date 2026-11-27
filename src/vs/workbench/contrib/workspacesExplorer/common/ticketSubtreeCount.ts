@@ -22,6 +22,10 @@ export interface ITicketSubtreeNode {
 	/** Hidden unless "show removed items" is on (same rule as the tree's scan). */
 	readonly removed: boolean;
 	readonly children: readonly ITicketSubtreeNode[];
+	/** "ANYAG-0123 Title" (UI-20: names the ticket in its ancestors' failure tooltips). */
+	readonly label?: string;
+	/** Set when the ticket itself is failing (UI-20, see `ticketFailure.ts`). */
+	readonly failure?: { readonly reasons: readonly string[] };
 }
 
 export interface ITicketSubtreeSummary {

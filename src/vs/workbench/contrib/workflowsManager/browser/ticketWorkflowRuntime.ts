@@ -26,8 +26,9 @@ import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/work
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
 import { checkTicketAttachments, withTicketAttachmentChange } from '../../workspacesExplorer/browser/ticketAttachmentIntegrity.js';
-import { readTicketFileResolved } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
+import { readTicketFileResolved, ticketFolderOfFile } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
 import { ITicketChangeActor } from '../../workspacesExplorer/common/ticketChangeLog.js';
+import { ticketLastRunRecordFromSteps, writeTicketLastRunRecord } from '../../workspacesExplorer/common/ticketFailure.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
@@ -3250,6 +3251,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// Field changes of this run are recorded in the ticket's work log as the Workflow (CI-50)
 			const callerWorkflow = options.callChain?.frames.find(f => f.kind === 'workflow' || f.kind === 'sub_workflow');
 			const runActor: ITicketChangeActor = { kind: 'Workflow', name: callerWorkflow?.label || 'Ticket Run' };
+			// UI-20: run outcome for the Workspaces tree's failure markers (before ticket.md, whose change triggers the rescan)
+			await writeTicketLastRunRecord(this.fileService, ticketUri.path.endsWith('.md') ? ticketFolderOfFile(ticketUri) : ticketUri, ticketLastRunRecordFromSteps(stepResults, new Date()));
 			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor);
 
 			const totalDuration = Date.now() - startTime;

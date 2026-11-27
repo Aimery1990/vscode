@@ -60,6 +60,7 @@ import { describeRestoreDecision } from '../common/ticketRestore.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
+import { collectFailingDescendants, describeFailingBelow, describeTicketFailure, IFailingSummary } from '../common/ticketFailure.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
@@ -251,7 +252,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	/** Child-count pill mode, one global choice for the tree (UI-17). */
 	private _childCountMode: ChildCountMode;
 	/** Counts per sub-tree summary for the current filter, so re-renders do not walk unchanged sub-trees again. */
-	private readonly _childCountMemo = new WeakMap<ITicketSubtreeSummary, { key: string; counts: ITicketSubtreeCounts }>();
+	private readonly _childCountMemo = new WeakMap<ITicketSubtreeSummary, { key: string; counts: ITicketSubtreeCounts; failing: IFailingSummary }>();
 	private _childCountRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
@@ -814,9 +815,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	 * and the tree re-renders once a newer summary is ready.
 	 */
 	private _appendChildCountPill(container: HTMLElement, folderUri: URI): string {
-		if (this._childCountMode === 'off') {
-			return 'off';
-		}
+		// the summary is loaded even when the count is off: failing descendants (UI-20) still show as a red dot
 		const summary = this.workspacesExplorerService.peekTicketSubtreeSummary(folderUri);
 		this.workspacesExplorerService.getTicketSubtreeSummary(folderUri).then(fresh => {
 			if (fresh !== summary) {
@@ -829,18 +828,50 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const filterKey = `${Array.from(this._hiddenStatusCategories).sort().join(',')}|${this._showRemovedItems ? '1' : '0'}`;
 		let memo = this._childCountMemo.get(summary);
 		if (!memo || memo.key !== filterKey) {
-			memo = { key: filterKey, counts: countSubtree(summary, this._hiddenStatusCategories, this._showRemovedItems) };
+			memo = {
+				key: filterKey,
+				counts: countSubtree(summary, this._hiddenStatusCategories, this._showRemovedItems),
+				failing: collectFailingDescendants(summary, this._hiddenStatusCategories, this._showRemovedItems)
+			};
 			this._childCountMemo.set(summary, memo);
 		}
+		// UI-20: a red pill (or a red dot when the count is off) on every ancestor of a failing ticket
+		const failingText = describeFailingBelow(memo.failing);
 		const pill = describeChildCountPill(memo.counts, this._childCountMode);
 		if (!pill) {
-			return 'none';
+			if (!failingText) {
+				return 'none';
+			}
+			const dot = append(container, $('span.ticket-failing-dot', {
+				style: 'flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--vscode-errorForeground); border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));'
+			}));
+			dot.title = failingText;
+			dot.setAttribute('role', 'img');
+			dot.setAttribute('aria-label', failingText);
+			return `dot:${failingText}`;
 		}
-		const pillEl = append(container, $('span.ticket-child-count', {
-			style: 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); background: rgba(128, 128, 128, 0.14); border: 1px solid rgba(128, 128, 128, 0.28);'
-		}, pill.text));
-		pillEl.title = pill.tooltip;
-		return `${this._childCountMode}:${pill.text}:${pill.tooltip}`;
+		const style = failingText
+			? 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--vscode-errorForeground); background: var(--vscode-inputValidation-errorBackground, rgba(229, 20, 0, 0.16)); border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));'
+			: 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); background: rgba(128, 128, 128, 0.14); border: 1px solid rgba(128, 128, 128, 0.28);';
+		const pillEl = append(container, $(failingText ? 'span.ticket-child-count.ticket-child-count-failing' : 'span.ticket-child-count', { style }, pill.text));
+		pillEl.title = failingText ? `${failingText}\n\n${pill.tooltip}` : pill.tooltip;
+		return `${this._childCountMode}:${pill.text}:${pillEl.title}`;
+	}
+
+	/** UI-20: a red error icon after the title of a failing ticket, explaining why on hover. */
+	private _appendTicketFailureMarker(container: HTMLElement, ticketUri: URI): string {
+		const failure = this.workspacesExplorerService.peekTicketFailure(ticketUri);
+		if (!failure) {
+			return '';
+		}
+		const text = describeTicketFailure(failure);
+		const marker = append(container, $('span.ticket-failing-marker' + ThemeIcon.asCSSSelector(Codicon.error), {
+			style: 'flex-shrink: 0; font-size: 11px; color: var(--vscode-errorForeground);'
+		}));
+		marker.title = text;
+		marker.setAttribute('role', 'img');
+		marker.setAttribute('aria-label', text);
+		return `fail:${text}`;
 	}
 
 	private _scheduleChildCountRender(): void {
@@ -2035,7 +2066,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			// UI-17: visible descendant tickets of this ticket, as a muted pill right after the title
 			let childCountSig = '';
 			if (isTicketEntity && isDirectory) {
-				childCountSig = this._appendChildCountPill(childLeft, child.uri);
+				childCountSig = `${this._appendTicketFailureMarker(childLeft, child.uri)}|${this._appendChildCountPill(childLeft, child.uri)}`;
 				if (childLeft.lastElementChild !== childTitleSpan) {
 					childTitleSpan.style.flex = '0 1 auto';
 				}

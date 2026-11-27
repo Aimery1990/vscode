@@ -6,6 +6,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../common/ticketSubtreeCount.js';
+import { detectTicketFailure, isFailedRunStatus, ITicketFailure, ITicketLastRunRecord, IWorkflowRunHead, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
 import { ITicketLabelDefinition, parseLabelDefinitions, renameTicketLabels, serializeLabelDefinitions, TICKET_LABELS_METADATA_KEY } from '../common/ticketLabels.js';
 import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, setTicketLabelsLine, setTicketStatusLine, STATUS_MAPPING_KEY, TICKET_STATUSES_KEY, upsertWorkspaceMetadata } from '../common/workspaceLifecycle.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -37,6 +38,16 @@ import { toFolderAccessError } from '../../customModules/common/anyagentGlobalPa
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
 const REMOVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.removedWorkspaces';
 
+/** One child ticket folder of a cached sub-tree level (UI-17), with its failure signals (UI-20). */
+interface ISubtreeLevelEntry {
+	readonly uri: URI;
+	readonly status?: string;
+	readonly label: string;
+	readonly resultField?: { readonly label: string; readonly value: string };
+	readonly lastRun?: ITicketLastRunRecord;
+	readonly workflowRun?: IWorkflowRunHead;
+}
+
 export class WorkspacesExplorerService extends Disposable implements IWorkspacesExplorerService {
 	declare readonly _serviceBrand: undefined;
 
@@ -55,6 +66,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		labels?: string[];
 		ticketId?: string;
 		title?: string;
+		/** UI-20: the test result field found in the 8KB head of ticket.md. */
+		resultField?: { label: string; value: string };
+		/** UI-20: ticket.md is longer than the head read (a result field may follow). */
+		headTruncated?: boolean;
 		timestamp: number;
 	}>();
 	private readonly _workspaceStatusesCache = new Map<string, {
@@ -63,8 +78,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}>();
 
 	/** UI-17: per folder, its direct child ticket folders with their raw status (ticket folders only). */
-	private readonly _subtreeLevelCache = new Map<string, { entries: readonly { uri: URI; status?: string }[]; timestamp: number }>();
-	private readonly _subtreeLevelInFlight = new Map<string, Promise<readonly { uri: URI; status?: string }[]>>();
+	private readonly _subtreeLevelCache = new Map<string, { entries: readonly ISubtreeLevelEntry[]; timestamp: number }>();
+	private readonly _subtreeLevelInFlight = new Map<string, Promise<readonly ISubtreeLevelEntry[]>>();
+	/** UI-20: failing tickets (normalized folder URI), refreshed whenever a sub-tree summary containing them is built. */
+	private readonly _ticketFailures = new Map<string, ITicketFailure>();
 	/** UI-17: assembled sub-tree summaries; a stale entry is still served by peek (no flicker) until recomputed. */
 	private readonly _subtreeSummaryCache = new Map<string, { summary: ITicketSubtreeSummary; timestamp: number; stale: boolean }>();
 	private readonly _subtreeSummaryInFlight = new Map<string, Promise<ITicketSubtreeSummary>>();
@@ -168,8 +185,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		});
 		this._register(this.fileService.onDidFilesChange(e => {
 			const isRelevantMetaFile = (u: URI) => u.path.endsWith('/ticket.md') || u.path.endsWith('/README.md') || u.path.endsWith('/workspace.md');
+			// UI-20: run outcomes read by the sub-tree scan (failing tickets)
+			const isFailureSignalFile = (u: URI) => u.path.endsWith(`/.agents/${TICKET_LAST_RUN_FILE_NAME}`) || u.path.endsWith('/.agents/workflow_runs.json');
+			let failureSignalChanged = false;
 			for (const u of [...e.rawAdded, ...e.rawUpdated, ...e.rawDeleted]) {
-				if (isRelevantMetaFile(u)) {
+				if (isFailureSignalFile(u)) {
+					this._invalidateSubtreeCaches(u);
+					failureSignalChanged = true;
+				} else if (isRelevantMetaFile(u)) {
 					this._invalidateCacheForUri(u);
 					if (u.path.endsWith('/ticket.md') || u.path.endsWith('/workspace.md')) {
 						this._workspaceStatusesCache.clear();
@@ -192,14 +215,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					fileChangeTimer = undefined;
 				}
 				this._onDidChangeWorkspaces.fire();
-			} else if (e.rawUpdated.some(isRelevantMetaFile)) {
+			} else if (e.rawUpdated.some(isRelevantMetaFile) || failureSignalChanged) {
 				if (fileChangeTimer) {
 					clearTimeout(fileChangeTimer);
 				}
 				fileChangeTimer = setTimeout(() => {
 					fileChangeTimer = undefined;
 					this._onDidChangeWorkspaces.fire();
-				}, 150);
+				}, failureSignalChanged ? 400 : 150);
 			}
 		}));
 
@@ -841,7 +864,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private async _readChildEntityMetadataFast(
 		childUri: URI,
 		fallbackName: string
-	): Promise<{ type: ResourceType; status?: string; labels?: string[]; ticketId?: string; title?: string }> {
+	): Promise<{ type: ResourceType; status?: string; labels?: string[]; ticketId?: string; title?: string; resultField?: { label: string; value: string }; headTruncated?: boolean }> {
 		const cacheKey = this.normalizeUriString(childUri);
 		const snap = this.getMetadataSnapshot(childUri);
 		const cached = this._childEntityMetaCache.get(cacheKey);
@@ -853,7 +876,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				status: cached.status,
 				labels: cached.labels,
 				ticketId: resolvedId,
-				title: resolvedTitle
+				title: resolvedTitle,
+				resultField: cached.resultField,
+				headTruncated: cached.headTruncated
 			};
 		}
 
@@ -866,12 +891,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		let ticketIdFromTicket = '';
 		let titleFromTicket = '';
 		let foundTicketFile = false;
+		let resultField: { label: string; value: string } | undefined;
+		let headTruncated = false;
 
 		for (const uri of ticketUris) {
 			try {
 				const content = await this.fileService.readFile(uri, { length: 8192 });
 				const text = content.value.toString();
 				foundTicketFile = true;
+				resultField = readTestResultField(text);
+				headTruncated = content.value.byteLength >= 8192;
 
 				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([^\r\n]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([^\r\n]+)/i);
 				if (typeMatch && typeMatch[1]) {
@@ -994,6 +1023,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			labels: detectedLabels,
 			ticketId: resolvedTicketId,
 			title: resolvedTitle || undefined,
+			resultField,
+			headTruncated,
 			timestamp: Date.now()
 		};
 		this._childEntityMetaCache.set(cacheKey, entry);
@@ -1121,8 +1152,51 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			lower === 'archived';
 	}
 
+	/**
+	 * UI-20: the failure signals of one ticket folder besides its status: the result field (from the cached 8KB head,
+	 * or the whole ticket.md when the head was cut before one was found), last_run.json (only when the status says the
+	 * last run failed) and the head of workflow_runs.json (workflow tickets only).
+	 */
+	private async _readTicketFailureSignals(ticketUri: URI, meta: { type: ResourceType; status?: string; resultField?: { label: string; value: string }; headTruncated?: boolean }): Promise<Pick<ISubtreeLevelEntry, 'resultField' | 'lastRun' | 'workflowRun'>> {
+		const configDir = URI.joinPath(ticketUri, '.agents');
+		let resultField = meta.resultField;
+		if (!resultField && meta.headTruncated) {
+			for (const uri of [URI.joinPath(configDir, 'ticket.md'), URI.joinPath(ticketUri, 'ticket.md')]) {
+				try {
+					resultField = readTestResultField((await this.fileService.readFile(uri, { length: 1024 * 1024 })).value.toString());
+					// remember the full read in the metadata cache (dropped with it when ticket.md changes)
+					const cachedMeta = this._childEntityMetaCache.get(this.normalizeUriString(ticketUri));
+					if (cachedMeta) {
+						cachedMeta.resultField = resultField;
+						cachedMeta.headTruncated = false;
+					}
+					break;
+				} catch {
+					// try the next location
+				}
+			}
+		}
+		let lastRun: ITicketLastRunRecord | undefined;
+		if (isFailedRunStatus(meta.status)) {
+			try {
+				lastRun = parseTicketLastRunRecord((await this.fileService.readFile(URI.joinPath(configDir, TICKET_LAST_RUN_FILE_NAME), { length: 16384 })).value.toString());
+			} catch {
+				// no record (run before UI-20): the status alone explains the failure
+			}
+		}
+		let workflowRun: IWorkflowRunHead | undefined;
+		if (String(meta.type).toLowerCase() === 'workflow') {
+			try {
+				workflowRun = parseWorkflowRunsHead((await this.fileService.readFile(URI.joinPath(configDir, 'workflow_runs.json'), { length: 4096 })).value.toString());
+			} catch {
+				// never ran
+			}
+		}
+		return { resultField, lastRun, workflowRun };
+	}
+
 	/** The direct child ticket folders of `folderUri` (cached; reuses the cached 8KB ticket.md metadata reads). */
-	private _loadSubtreeLevel(folderUri: URI): Promise<readonly { uri: URI; status?: string }[]> {
+	private _loadSubtreeLevel(folderUri: URI): Promise<readonly ISubtreeLevelEntry[]> {
 		const key = this.normalizeUriString(folderUri);
 		const inFlight = this._subtreeLevelInFlight.get(key);
 		if (inFlight) {
@@ -1138,16 +1212,24 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				return [];
 			}
 			const dirs = children.filter(c => c.isDirectory && !c.name.startsWith('.') && !c.name.startsWith('~') && c.name !== 'node_modules' && c.name !== 'attachments');
-			const entries: { uri: URI; status?: string }[] = [];
+			const entries: ISubtreeLevelEntry[] = [];
 			const BATCH_SIZE = 25;
 			for (let i = 0; i < dirs.length; i += BATCH_SIZE) {
 				const slice = dirs.slice(i, i + BATCH_SIZE);
-				const metas = await Promise.all(slice.map(d => this._readChildEntityMetadataFast(d.resource, d.name)));
-				metas.forEach((meta, idx) => {
-					if (meta.type !== 'folder' && meta.type !== 'file') {
-						entries.push({ uri: slice[idx].resource, status: meta.status });
+				const levelEntries = await Promise.all(slice.map(async (d): Promise<ISubtreeLevelEntry | undefined> => {
+					const meta = await this._readChildEntityMetadataFast(d.resource, d.name);
+					if (meta.type === 'folder' || meta.type === 'file') {
+						return undefined;
 					}
-				});
+					const ticketId = meta.ticketId || d.name;
+					const label = meta.title && meta.title !== ticketId ? `${ticketId} ${meta.title}` : ticketId;
+					return { uri: d.resource, status: meta.status, label, ...await this._readTicketFailureSignals(d.resource, meta) };
+				}));
+				for (const entry of levelEntries) {
+					if (entry) {
+						entries.push(entry);
+					}
+				}
 			}
 			if (!computation.dirty) {
 				this._subtreeLevelCache.set(key, { entries, timestamp: Date.now() });
@@ -1167,6 +1249,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	private _subtreeBaseUri(folderUri: URI): URI {
 		return folderUri.path.endsWith('.code-workspace') ? dirname(folderUri) : folderUri;
+	}
+
+	peekTicketFailure(ticketUri: URI): ITicketFailure | undefined {
+		return this._ticketFailures.get(this.normalizeUriString(ticketUri));
 	}
 
 	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined {
@@ -1226,11 +1312,23 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				}
 				nodeCount += entries.length;
 				const childLists = await Promise.all(entries.map(e => build(e.uri, depth + 1)));
-				return entries.map((e, i): ITicketSubtreeNode => ({
-					category: e.status ? wsStatuses.getCategory(e.status) : undefined,
-					removed: this._isRemovedStatus(e.status, wsStatuses),
-					children: childLists[i]
-				}));
+				return entries.map((e, i): ITicketSubtreeNode => {
+					const removed = this._isRemovedStatus(e.status, wsStatuses);
+					const failure = detectTicketFailure({ status: e.status, removed, resultField: e.resultField, lastRun: e.lastRun, workflowRun: e.workflowRun });
+					const failureKey = this.normalizeUriString(e.uri);
+					if (failure) {
+						this._ticketFailures.set(failureKey, failure);
+					} else {
+						this._ticketFailures.delete(failureKey);
+					}
+					return {
+						category: e.status ? wsStatuses.getCategory(e.status) : undefined,
+						removed,
+						children: childLists[i],
+						label: e.label,
+						failure
+					};
+				});
 			};
 			const summary: ITicketSubtreeSummary = { children: await build(base, 0), truncated };
 			if (!computation.dirty) {

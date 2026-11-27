@@ -228,6 +228,11 @@ export interface IWorkspacesExplorerService {
 	getTicketSubtreeSummary(folderUri: URI): Promise<ITicketSubtreeSummary>;
 	/** The cached summary of {@link getTicketSubtreeSummary}, or undefined when it is not (or no longer) cached. */
 	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined;
+	/**
+	 * UI-20: why the ticket folder `ticketUri` is failing, read from its parent's cached sub-tree level (filled by the
+	 * parent's {@link getTicketSubtreeSummary}); undefined when it is not failing or not scanned yet.
+	 */
+	peekTicketFailure(ticketUri: URI): { readonly reasons: readonly string[] } | undefined;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;
