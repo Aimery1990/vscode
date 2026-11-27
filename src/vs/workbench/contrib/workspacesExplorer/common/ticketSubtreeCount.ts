@@ -2,6 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+import { URI } from '../../../../base/common/uri.js';
 import { CanonicalStatusCategory } from './workspacesExplorer.js';
 
 /**
@@ -26,6 +27,12 @@ export interface ITicketSubtreeNode {
 	readonly label?: string;
 	/** Set when the ticket itself is failing (UI-20, see `ticketFailure.ts`). */
 	readonly failure?: { readonly reasons: readonly string[] };
+	/** UI-21 (ticket search index): the ticket folder and its ticket.md / README metadata. */
+	readonly resource?: URI;
+	readonly ticketId?: string;
+	readonly title?: string;
+	readonly type?: string;
+	readonly status?: string;
 }
 
 export interface ITicketSubtreeSummary {

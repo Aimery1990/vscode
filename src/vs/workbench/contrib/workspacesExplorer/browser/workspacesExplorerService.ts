@@ -6,6 +6,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../common/ticketSubtreeCount.js';
+import { canonicalTreeKey, flattenTicketSubtree, ITicketSearchEntry, ITicketSearchIndex } from '../common/ticketSearch.js';
 import { detectTicketFailure, isFailedRunStatus, ITicketFailure, ITicketLastRunRecord, IWorkflowRunHead, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
 import { ITicketLabelDefinition, parseLabelDefinitions, renameTicketLabels, serializeLabelDefinitions, TICKET_LABELS_METADATA_KEY } from '../common/ticketLabels.js';
 import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, setTicketLabelsLine, setTicketStatusLine, STATUS_MAPPING_KEY, TICKET_STATUSES_KEY, upsertWorkspaceMetadata } from '../common/workspaceLifecycle.js';
@@ -43,6 +44,10 @@ interface ISubtreeLevelEntry {
 	readonly uri: URI;
 	readonly status?: string;
 	readonly label: string;
+	/** UI-21: search index fields. */
+	readonly ticketId: string;
+	readonly title?: string;
+	readonly type: string;
 	readonly resultField?: { readonly label: string; readonly value: string };
 	readonly lastRun?: ITicketLastRunRecord;
 	readonly workflowRun?: IWorkflowRunHead;
@@ -1223,7 +1228,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					}
 					const ticketId = meta.ticketId || d.name;
 					const label = meta.title && meta.title !== ticketId ? `${ticketId} ${meta.title}` : ticketId;
-					return { uri: d.resource, status: meta.status, label, ...await this._readTicketFailureSignals(d.resource, meta) };
+					return { uri: d.resource, status: meta.status, label, ticketId, title: meta.title, type: String(meta.type), ...await this._readTicketFailureSignals(d.resource, meta) };
 				}));
 				for (const entry of levelEntries) {
 					if (entry) {
@@ -1257,6 +1262,33 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined {
 		return this._subtreeSummaryCache.get(this.normalizeUriString(this._subtreeBaseUri(folderUri)))?.summary;
+	}
+
+	/** UI-21: flattened rows per workspace sub-tree summary (a new summary object means its rows are rebuilt). */
+	private readonly _ticketSearchRows = new WeakMap<ITicketSubtreeSummary, { workspaceKey: string; workspaceName: string; entries: readonly ITicketSearchEntry[] }>();
+
+	async getTicketSearchIndex(): Promise<ITicketSearchIndex> {
+		const workspaces = (await this.getWorkspaces()).filter(w => !w.isMissing);
+		let truncated = false;
+		const lists = await Promise.all(workspaces.map(async (ws): Promise<readonly ITicketSearchEntry[]> => {
+			let summary: ITicketSubtreeSummary;
+			try {
+				summary = await this.getTicketSubtreeSummary(ws.uri);
+			} catch {
+				return [];
+			}
+			truncated ||= summary.truncated;
+			const workspaceKey = canonicalTreeKey(ws.id);
+			const workspaceName = this.getMetadataSnapshot(ws.uri)?.title || ws.name;
+			const memo = this._ticketSearchRows.get(summary);
+			if (memo && memo.workspaceKey === workspaceKey && memo.workspaceName === workspaceName) {
+				return memo.entries;
+			}
+			const entries = flattenTicketSubtree(summary, { key: workspaceKey, name: workspaceName, resource: ws.uri });
+			this._ticketSearchRows.set(summary, { workspaceKey, workspaceName, entries });
+			return entries;
+		}));
+		return { entries: lists.flat(), truncated };
 	}
 
 	getTicketSubtreeSummary(folderUri: URI): Promise<ITicketSubtreeSummary> {
@@ -1326,7 +1358,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						removed,
 						children: childLists[i],
 						label: e.label,
-						failure
+						failure,
+						resource: e.uri,
+						ticketId: e.ticketId,
+						title: e.title,
+						type: e.type,
+						status: e.status
 					};
 				});
 			};

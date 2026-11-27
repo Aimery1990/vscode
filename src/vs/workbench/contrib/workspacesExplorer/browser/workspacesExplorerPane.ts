@@ -25,7 +25,7 @@ import { INativeEnvironmentService } from '../../../../platform/environment/comm
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
-import { dirname } from '../../../../base/common/resources.js';
+import { basename, dirname } from '../../../../base/common/resources.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action, IAction, Separator, SubmenuAction, toAction } from '../../../../base/common/actions.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
@@ -64,6 +64,7 @@ import { collectFailingDescendants, describeFailingBelow, describeTicketFailure,
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
+import { buildPrunedTicketTree, describeSearchResult, findExactIdMatch, findMatchRange, GO_TO_TICKET_COMMAND_ID, IPrunedTicketTree, ITicketSearchEntry, ITicketSearchResult, normalizeTicketQuery, searchTickets, splitHighlight, TICKET_SEARCH_DEBOUNCE_MS, TICKET_SEARCH_MIN_QUERY_LENGTH } from '../common/ticketSearch.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
@@ -219,6 +220,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 	private nodeVisibleLimitMap = new Map<string, number>();
 	private hasInitializedExpansion = false;
 	private filterText = '';
+	/** UI-21: deep ticket search (filter text of 2+ characters); undefined in the normal tree. */
+	private _activeSearch?: { readonly result: ITicketSearchResult; readonly tree: IPrunedTicketTree; readonly note: string };
+	/** UI-21: rows the user collapsed while in search results (the normal expansion state is left untouched). */
+	private readonly _searchCollapsed = new Set<string>();
+	private _searchTimer: ReturnType<typeof setTimeout> | undefined;
+	private _filterInputEl?: HTMLInputElement;
+	/** Scroll the selected row into view after the next completed render (reveal / Go to Ticket). */
+	private _scrollToSelectionPending = false;
 	private selectedWorkspaceId?: string;
 	private selectedItemId?: string;
 	private selectedItemIds = new Set<string>();
@@ -291,6 +300,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 		this._hiddenStatusCategories = this._loadHiddenStatusCategories();
 		this._childCountMode = parseChildCountMode(this._storageService.get(CHILD_COUNT_MODE_STORAGE_KEY, StorageScope.PROFILE));
 		this._register(toDisposable(() => this._statusFilterMenu?.close()));
+		this._register(toDisposable(() => {
+			if (this._searchTimer) {
+				clearTimeout(this._searchTimer);
+				this._searchTimer = undefined;
+			}
+		}));
 		this._register(toDisposable(() => {
 			if (this._childCountRenderTimer) {
 				clearTimeout(this._childCountRenderTimer);
@@ -886,6 +901,133 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}, 100);
 	}
 
+	/** Whether a workspace / ticket row is expanded; in search results (UI-21) the path to every match is. */
+	private _isNodeExpanded(canonicalId: string): boolean {
+		if (this._activeSearch) {
+			return this._activeSearch.tree.expanded.has(canonicalId) && !this._searchCollapsed.has(canonicalId);
+		}
+		return this.expandedWorkspaces.has(canonicalId);
+	}
+
+	/** Toggles a row; in search results only the search view's own collapsed set changes. Returns the new state. */
+	private _toggleNodeExpanded(canonicalId: string): boolean {
+		if (this._activeSearch) {
+			if (this._searchCollapsed.has(canonicalId)) {
+				this._searchCollapsed.delete(canonicalId);
+			} else {
+				this._searchCollapsed.add(canonicalId);
+			}
+			return this._isNodeExpanded(canonicalId);
+		}
+		if (this.expandedWorkspaces.has(canonicalId)) {
+			this.expandedWorkspaces.delete(canonicalId);
+			this.nodeVisibleLimitMap.delete(canonicalId);
+			return false;
+		}
+		this.expandedWorkspaces.add(canonicalId);
+		return true;
+	}
+
+	/** Fills `container` with `text`, the `range` part highlighted in the list highlight color (UI-21). */
+	private _appendHighlightedText(container: HTMLElement, text: string, range: readonly [number, number] | undefined, underline: boolean): void {
+		if (!range) {
+			container.textContent = text;
+			return;
+		}
+		for (const segment of splitHighlight(text, range)) {
+			if (segment.highlight) {
+				append(container, $('span.ticket-search-highlight', {
+					style: `color: var(--vscode-list-highlightForeground); font-weight: 700;${underline ? ' text-decoration: underline;' : ''}`
+				}, segment.text));
+			} else {
+				append(container, $('span', undefined, segment.text));
+			}
+		}
+	}
+
+	private _clearFilter(): void {
+		if (this._searchTimer) {
+			clearTimeout(this._searchTimer);
+			this._searchTimer = undefined;
+		}
+		if (this._filterInputEl) {
+			this._filterInputEl.value = '';
+		}
+		this.filterText = '';
+		this._searchCollapsed.clear();
+	}
+
+	/** Enter in the filter box (UI-21): an exact ticket ID (or a single result) is opened and revealed in the tree. */
+	private async _openTicketFromFilter(): Promise<void> {
+		const raw = this._filterInputEl?.value ?? '';
+		const query = normalizeTicketQuery(raw);
+		if (!query) {
+			return;
+		}
+		const index = await this.workspacesExplorerService.getTicketSearchIndex();
+		if (normalizeTicketQuery(this._filterInputEl?.value ?? '') !== query) {
+			return; // typed on meanwhile
+		}
+		let target = findExactIdMatch(index.entries, query, this._showRemovedItems);
+		if (!target && query.length >= TICKET_SEARCH_MIN_QUERY_LENGTH) {
+			const result = searchTickets(index.entries, query, { includeRemoved: this._showRemovedItems, limit: 2 });
+			if (result.total === 1) {
+				target = result.matches[0].entry;
+			}
+		}
+		if (target) {
+			await this.revealTicket(target, true);
+		} else if (this._searchTimer) {
+			// no exact ID: show the results right away instead of waiting for the debounce
+			clearTimeout(this._searchTimer);
+			this._searchTimer = undefined;
+			this.renderContent();
+		}
+	}
+
+	/**
+	 * Shows `entry` in the normal tree (clears the search, expands the workspace and every ancestor, loads all
+	 * children along the path, selects and scrolls to the row) and optionally opens it like a click does (UI-21).
+	 */
+	async revealTicket(entry: ITicketSearchEntry, open: boolean): Promise<void> {
+		this._clearFilter();
+		const pathKeys = [entry.workspaceKey, ...entry.ancestors.map(a => a.key)];
+		const REVEAL_LIMIT = 100000;
+		for (const key of [...pathKeys, this.getCanonicalId(entry.workspaceResource)]) {
+			this.expandedWorkspaces.add(key);
+			if ((this.nodeVisibleLimitMap.get(key) ?? 0) < REVEAL_LIMIT) {
+				this.nodeVisibleLimitMap.set(key, REVEAL_LIMIT); // the ticket may be past the first page of its level
+			}
+		}
+		this.selectedWorkspaceId = entry.workspaceKey;
+		this.selectedItemId = entry.key;
+		this.lastSelectedAnchorId = entry.key;
+		this.selectedItemIds.clear();
+		this.selectedItemIds.add(entry.key);
+		this._scrollToSelectionPending = true;
+		const rendered = this.renderContent();
+		if (open) {
+			await this._openTicketEditor(entry.resource, entry.type);
+		}
+		await rendered;
+	}
+
+	/** Opens a ticket the way a click on its row does. */
+	private async _openTicketEditor(uri: URI, type: string | undefined): Promise<void> {
+		const name = basename(uri);
+		try {
+			if (type === 'workflow') {
+				await this.editorService.openEditor(new WorkflowEditorInput(uri, name), { pinned: true });
+			} else if (type && isSubWorkflowTicketType(type)) {
+				await openSubWorkflowTicketCanvas(this.editorService, uri, name);
+			} else {
+				await this.editorService.openEditor(new EntityDetailEditorInput(uri, name), { pinned: true });
+			}
+		} catch (err) {
+			this.notificationService.error(`Failed to open ticket '${name}': ${err}`);
+		}
+	}
+
 	/** Multi-select status-category filter dropdown (UI-16). Stays open while toggling; closes on outside click / Escape. */
 	private _showStatusFilterMenu(anchor: HTMLElement): void {
 		this._statusFilterMenu = this.contextViewService.showContextView({
@@ -1012,6 +1154,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 		append(titleLeft, $('span', {}, 'Managed Workspaces'));
 
 		const headerIcons = append(headerRow, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+		// UI-21: Go to Ticket (quick pick over every ticket of every workspace)
+		const goToTicketIcon = append(headerIcons, $('span' + ThemeIcon.asCSSSelector(Codicon.search)));
+		goToTicketIcon.style.cursor = 'pointer';
+		goToTicketIcon.style.opacity = '0.85';
+		const goToKeybinding = this.keybindingService.lookupKeybinding(GO_TO_TICKET_COMMAND_ID)?.getLabel();
+		goToTicketIcon.title = goToKeybinding ? `Go to Ticket... (${goToKeybinding})` : 'Go to Ticket...';
+		goToTicketIcon.setAttribute('role', 'button');
+		goToTicketIcon.setAttribute('aria-label', 'Go to Ticket');
+		goToTicketIcon.onclick = (e) => {
+			e.stopPropagation();
+			this.commandService.executeCommand(GO_TO_TICKET_COMMAND_ID);
+		};
 		const statusFilterIcon = append(headerIcons, $('span'));
 		statusFilterIcon.style.cursor = 'pointer';
 		this._updateStatusFilterIcon(statusFilterIcon);
@@ -1036,11 +1190,41 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const filterInput = append(this.containerEl, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; flex-shrink: 0;'
 		})) as HTMLInputElement;
-		filterInput.placeholder = 'Filter workspaces, jobs, projects, tasks & agents...';
+		filterInput.placeholder = 'Search tickets by ID or title, filter workspaces...';
+		filterInput.title = 'Type 2+ characters to search every ticket of every workspace by ID (e.g. 0111) or title. Enter opens an exact ticket ID.';
 		filterInput.value = this.filterText;
+		this._filterInputEl = filterInput;
 		filterInput.oninput = () => {
-			this.filterText = filterInput.value.toLowerCase().trim();
+			const next = normalizeTicketQuery(filterInput.value);
+			const wasSearching = this.filterText.length >= TICKET_SEARCH_MIN_QUERY_LENGTH;
+			this.filterText = next;
+			if (this._searchTimer) {
+				clearTimeout(this._searchTimer);
+				this._searchTimer = undefined;
+			}
+			if (next.length >= TICKET_SEARCH_MIN_QUERY_LENGTH) {
+				// UI-21: deep search, debounced (the index itself is cached by the service)
+				this._searchTimer = setTimeout(() => {
+					this._searchTimer = undefined;
+					this.renderContent();
+				}, TICKET_SEARCH_DEBOUNCE_MS);
+				return;
+			}
+			if (wasSearching) {
+				this._searchCollapsed.clear();
+			}
 			this.renderContent();
+		};
+		filterInput.onkeydown = (e: KeyboardEvent) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				void this._openTicketFromFilter();
+			} else if (e.key === 'Escape' && filterInput.value) {
+				e.preventDefault();
+				e.stopPropagation();
+				this._clearFilter();
+				this.renderContent();
+			}
 		};
 
 		// --- 2.5 Batch Selection Bar (visible when 2+ items are selected via Cmd/Ctrl+Click or Shift+Click) ---
@@ -1199,7 +1383,23 @@ export class MainWorkspaceViewPane extends ViewPane {
 		// Build desired DOM structure offscreen so live DOM stays 100% untouched during async disk scans
 		const treeBox = $('.tree-box-staging');
 
-		const filteredWorkspaces = workspaces.filter(w => !this.filterText || w.name.toLowerCase().includes(this.filterText) || w.uri.fsPath.toLowerCase().includes(this.filterText));
+		// UI-21: 2+ characters search every ticket of every workspace; the tree then shows only the paths to the matches
+		let search: typeof this._activeSearch;
+		if (this.filterText.length >= TICKET_SEARCH_MIN_QUERY_LENGTH) {
+			const query = this.filterText;
+			const index = await this.workspacesExplorerService.getTicketSearchIndex();
+			if (this.renderVersion !== currentVersion || !this.containerEl || !this.treeBoxEl) {
+				return;
+			}
+			const result = searchTickets(index.entries, query, { includeRemoved: this._showRemovedItems });
+			search = { result, tree: buildPrunedTicketTree(result.matches), note: describeSearchResult(result, this._filterInputEl?.value ?? query, index.truncated) };
+		}
+		this._activeSearch = search;
+
+		const workspaceNameMatches = (w: IWorkspaceItem) => !this.filterText || w.name.toLowerCase().includes(this.filterText) || w.uri.fsPath.toLowerCase().includes(this.filterText);
+		const filteredWorkspaces = search
+			? workspaces.filter(w => search.tree.workspaceKeys.has(this.getCanonicalId(w.id)) || workspaceNameMatches(w))
+			: workspaces.filter(workspaceNameMatches);
 
 		if (filteredWorkspaces.length > 0 && (!this.selectedWorkspaceId || (!this.filterText && !filteredWorkspaces.some(w => this.getCanonicalId(w.id) === this.selectedWorkspaceId)))) {
 			this.selectedWorkspaceId = this.getCanonicalId(filteredWorkspaces[0].id);
@@ -1209,10 +1409,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		this.targetSelectedElement = undefined;
 
+		if (search) {
+			const noteEl = append(treeBox, $('div.ticket-search-note', {
+				style: `font-size: 10.5px; padding: 0 2px; flex-shrink: 0; color: var(--vscode-descriptionForeground);${search.result.total === 0 ? ' text-align: center; padding: 10px 0;' : ''}`
+			}, search.note));
+			noteEl.setAttribute('data-sync-key', 'ticket-search-note');
+			noteEl.setAttribute('data-visual-sig', `note:${search.note}`);
+			noteEl.setAttribute('aria-live', 'polite');
+		}
+
 		if (filteredWorkspaces.length === 0) {
-			const emptyEl = append(treeBox, $('div', { style: 'font-size: 11px; opacity: 0.5; padding: 10px 0; text-align: center;' }, 'No workspaces added yet.'));
-			emptyEl.setAttribute('data-sync-key', 'empty-workspaces');
-			emptyEl.setAttribute('data-visual-sig', 'empty');
+			if (!search) {
+				const emptyEl = append(treeBox, $('div', { style: 'font-size: 11px; opacity: 0.5; padding: 10px 0; text-align: center;' }, 'No workspaces added yet.'));
+				emptyEl.setAttribute('data-sync-key', 'empty-workspaces');
+				emptyEl.setAttribute('data-visual-sig', 'empty');
+			}
 		} else {
 			for (const ws of filteredWorkspaces) {
 				const canonicalWsId = this.getCanonicalId(ws.id);
@@ -1287,7 +1498,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 				};
 
-				const isExpanded = this.expandedWorkspaces.has(canonicalWsId);
+				const isExpanded = this._isNodeExpanded(canonicalWsId);
 				const isPinned = isWorkspacePinned(workspacePins, canonicalWsId);
 
 				// Card Header
@@ -1375,16 +1586,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				chevronIcon.title = isExpanded ? 'Collapse' : 'Expand';
 				chevronIcon.onclick = (e) => {
 					e.stopPropagation();
-					if (this.expandedWorkspaces.has(canonicalWsId)) {
-						this.expandedWorkspaces.delete(canonicalWsId);
-						this.nodeVisibleLimitMap.delete(canonicalWsId);
-						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronRight);
-						chevronIcon.title = 'Expand';
-					} else {
-						this.expandedWorkspaces.add(canonicalWsId);
-						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronDown);
-						chevronIcon.title = 'Collapse';
-					}
+					const expandedNow = this._toggleNodeExpanded(canonicalWsId);
+					chevronIcon.className = ThemeIcon.asClassName(expandedNow ? Codicon.chevronDown : Codicon.chevronRight);
+					chevronIcon.title = expandedNow ? 'Collapse' : 'Expand';
 					this.renderContent();
 				};
 
@@ -1545,12 +1749,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					this.selectedItemIds.clear();
 					this.lastSelectedAnchorId = undefined;
 
-					if (this.expandedWorkspaces.has(canonicalWsId)) {
-						this.expandedWorkspaces.delete(canonicalWsId);
-						this.nodeVisibleLimitMap.delete(canonicalWsId);
-					} else {
-						this.expandedWorkspaces.add(canonicalWsId);
-					}
+					this._toggleNodeExpanded(canonicalWsId);
 
 					this.renderContent();
 
@@ -1588,6 +1787,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			this.renderedOrder = [];
 			this._collectRenderedRows(this.treeBoxEl);
 			this.updateSelectionVisuals();
+			if (this._scrollToSelectionPending) {
+				const selectedRow = this.renderedOrder.find(r => r.canonicalId === this.selectedItemId)?.rowEl;
+				if (selectedRow) {
+					this._scrollToSelectionPending = false;
+					selectedRow.scrollIntoView({ block: 'center' });
+				}
+			}
 		}
 	}
 
@@ -1628,7 +1834,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}
 		// UI-15 / UI-16: hide tickets whose status category is filtered out (with their sub-tree)
 		const isTicketItem = (c: IWorkspaceChildItem) => c.type !== 'folder' && c.type !== 'file';
-		const { visible: children, hiddenCount } = applyStatusFilter(page.items, this._hiddenStatusCategories, c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined);
+		// UI-21: in search results only the matches and their ancestors are shown, even when the status filter hides them
+		const search = this._activeSearch;
+		const { visible: children, hiddenCount } = search
+			? { visible: page.items.filter(c => search.tree.visible.has(this.getCanonicalId(c.id))), hiddenCount: 0 }
+			: applyStatusFilter(page.items, this._hiddenStatusCategories, c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined);
 		const hiddenText = describeHiddenTickets(hiddenCount);
 		const appendHiddenLine = () => {
 			if (hiddenText) {
@@ -1644,6 +1854,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}
 
 		if (children.length === 0) {
+			if (search) {
+				return;
+			}
 			const isPlainFolder = !await this.fileService.exists(URI.joinPath(folderUri, '.agents', 'ticket.md')) &&
 				!await this.fileService.exists(URI.joinPath(folderUri, 'ticket.md'));
 			if (isPlainFolder) {
@@ -1657,7 +1870,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		for (const child of children) {
 			const canonicalChildId = this.getCanonicalId(child.id);
 			const isDirectory = child.type !== 'file';
-			const isExpanded = isDirectory && this.expandedWorkspaces.has(canonicalChildId);
+			const isExpanded = isDirectory && this._isNodeExpanded(canonicalChildId);
+			const searchMatch = search?.tree.matchByKey.get(canonicalChildId);
 			const isChildSelected = this.selectedItemIds.has(canonicalChildId) || (this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId);
 			if (isChildSelected && this.selectedItemIds.size === 0) {
 				this.selectedItemIds.add(canonicalChildId);
@@ -1680,6 +1894,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childRow.style.userSelect = 'none';
 			if (isRemoved) {
 				childRow.style.opacity = '0.55';
+			} else if (search && !searchMatch) {
+				childRow.style.opacity = '0.8'; // UI-21: ancestor on the path to a match
+			}
+			if (searchMatch) {
+				// UI-21: subtle row highlight; background-image survives the selection / hover background-color changes
+				childRow.classList.add('ticket-search-match');
+				const tint = 'color-mix(in srgb, var(--vscode-list-highlightForeground) 12%, transparent)';
+				childRow.style.backgroundImage = `linear-gradient(${tint}, ${tint})`;
+				childRow.style.boxShadow = 'inset 2px 0 0 var(--vscode-list-highlightForeground)';
 			}
 
 			this.rowRenderEntries.set(childRow, {
@@ -1937,16 +2160,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				chevronIcon.title = isExpanded ? 'Collapse' : 'Expand';
 				chevronIcon.onclick = (e) => {
 					e.stopPropagation();
-					if (this.expandedWorkspaces.has(canonicalChildId)) {
-						this.expandedWorkspaces.delete(canonicalChildId);
-						this.nodeVisibleLimitMap.delete(canonicalChildId);
-						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronRight);
-						chevronIcon.title = 'Expand';
-					} else {
-						this.expandedWorkspaces.add(canonicalChildId);
-						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronDown);
-						chevronIcon.title = 'Collapse';
-					}
+					const expandedNow = this._toggleNodeExpanded(canonicalChildId);
+					chevronIcon.className = ThemeIcon.asClassName(expandedNow ? Codicon.chevronDown : Codicon.chevronRight);
+					chevronIcon.title = expandedNow ? 'Collapse' : 'Expand';
 					this.renderContent();
 				};
 			} else {
@@ -2058,7 +2274,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const childTitleSpan = append(childLeft, $('span', {
 				style: 'font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;'
 			}));
-			childTitleSpan.innerText = childDisplayText;
+			this._appendHighlightedText(childTitleSpan, childDisplayText, searchMatch ? findMatchRange(childDisplayText, search!.result.query) : undefined, false);
 			childTitleSpan.title = isTicketEntity
 				? `${childDisplayText} [${childTicketId} · ${badgeText}] (${child.uri.fsPath})`
 				: `${childDisplayText} (${child.uri.fsPath})`;
@@ -2067,6 +2283,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 			let childCountSig = '';
 			if (isTicketEntity && isDirectory) {
 				childCountSig = `${this._appendTicketFailureMarker(childLeft, child.uri)}|${this._appendChildCountPill(childLeft, child.uri)}`;
+				if (childLeft.lastElementChild !== childTitleSpan) {
+					childTitleSpan.style.flex = '0 1 auto';
+				}
+			}
+
+			// UI-21: a search result whose status category is hidden by the funnel is still shown, with a hint
+			let hiddenByFilterHint = false;
+			if (search && isTicketEntity && child.status && this._hiddenStatusCategories.has(wsLifecycle.getCategory(child.status))) {
+				hiddenByFilterHint = true;
+				const hint = append(childLeft, $('span.ticket-search-hidden-hint', { style: 'flex-shrink: 0; font-size: 9.5px; font-style: italic; color: var(--vscode-descriptionForeground);' }, '(hidden by filter)'));
+				hint.title = `${describeStatusFilter(this._hiddenStatusCategories)}. Shown because it is on the path to a search result`;
 				if (childLeft.lastElementChild !== childTitleSpan) {
 					childTitleSpan.style.flex = '0 1 auto';
 				}
@@ -2109,7 +2336,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			if (badgeText) {
 				const displayedBadgeText = isTicketEntity ? childTicketId : badgeText;
-				const badge = append(childRight, $('span', { style: `font-size: 8px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }, displayedBadgeText));
+				const badge = append(childRight, $('span', { style: `font-size: 8px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }));
+				this._appendHighlightedText(badge, displayedBadgeText, searchMatch && isTicketEntity ? findMatchRange(displayedBadgeText, search!.result.query) : undefined, true);
 				badge.title = isTicketEntity
 					? `Ticket ID: ${childTicketId} · Type: ${badgeText}`
 					: `Entity Type: ${badgeText}`;
@@ -2136,7 +2364,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			childRow.setAttribute(
 				'data-visual-sig',
-				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}|${childCountSig}`
+				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}|${childCountSig}|${searchMatch ? `m:${search!.result.query}` : search ? 'a' : ''}${hiddenByFilterHint ? ':h' : ''}`
 			);
 
 			// Single Click / Cmd+Click (multi-select) / Shift+Click (range-select)
@@ -2200,12 +2428,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					// A Sub-Workflow ticket is an independent workflow: open its own canvas
 					await openSubWorkflowTicketCanvas(this.editorService, child.uri, child.name);
 				} else if (child.type === 'folder' || child.type === 'workspace' || child.type === 'project' || child.type === 'job') {
-					if (!this.expandedWorkspaces.has(canonicalChildId)) {
-						this.expandedWorkspaces.add(canonicalChildId);
-					} else {
-						this.expandedWorkspaces.delete(canonicalChildId);
-						this.nodeVisibleLimitMap.delete(canonicalChildId);
-					}
+					this._toggleNodeExpanded(canonicalChildId);
 					this.renderContent();
 					// Also check if directory contains a primary md file like .agents folder or legacy files
 					const configDir = URI.joinPath(child.uri, '.agents');
@@ -2258,7 +2481,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		appendHiddenLine();
 
-		if (page.hasMore) {
+		if (page.hasMore && !search) {
 			const remainingCount = Math.max(1, page.totalCount - page.items.length);
 			const nextStep = Math.min(MainWorkspaceViewPane.LOAD_MORE_BATCH_SIZE, remainingCount);
 			const loadMoreRow = append(parentContainer, $('.load-more-children-row'));
@@ -3013,7 +3236,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					gitStatusBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
 					gitStatusBadge.style.color = 'var(--vscode-foreground)';
 					gitStatusBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-					gitStatusBadge.textContent = `\u2139️ No local .git repository found at target path. Workspace will be initialized as standard directory.`;
+					gitStatusBadge.textContent = `\u2139\ufe0f No local .git repository found at target path. Workspace will be initialized as standard directory.`;
 					lastGitDiagnosticText = `No Git Repository:\n- Path: ${curr?.fsPath || 'Not selected'}\n- Note: Leave blank if Git tracking is not required for this workspace.`;
 					copyDiagnosticBtn.style.display = 'inline-flex';
 				}
@@ -3776,7 +3999,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					gitStatusBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
 					gitStatusBadge.style.color = 'var(--vscode-foreground)';
 					gitStatusBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-					gitStatusBadge.textContent = `\u2139️ No local .git repository found at this path. Entity will be created as standard workspace ticket folder.`;
+					gitStatusBadge.textContent = `\u2139\ufe0f No local .git repository found at this path. Entity will be created as standard workspace ticket folder.`;
 					lastGitDiagnosticText = `No Git Repository:\n- Path: ${targetUri.fsPath}\n- Note: Leave blank if Git tracking is not required for this folder.`;
 					copyDiagnosticBtn.style.display = 'inline-flex';
 				}

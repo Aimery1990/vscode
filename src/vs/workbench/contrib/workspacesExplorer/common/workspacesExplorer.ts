@@ -10,6 +10,7 @@ import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ITicketLabelDefinition } from './ticketLabels.js';
 import { ITicketSubtreeSummary } from './ticketSubtreeCount.js';
+import { ITicketSearchIndex } from './ticketSearch.js';
 
 export const WORKSPACES_EXPLORER_VIEWLET_ID = 'workbench.view.workspacesExplorer';
 export const WORKSPACE_PANE_VIEW_ID = 'workbench.workspacesExplorer.mainPane';
@@ -233,6 +234,11 @@ export interface IWorkspacesExplorerService {
 	 * parent's {@link getTicketSubtreeSummary}); undefined when it is not failing or not scanned yet.
 	 */
 	peekTicketFailure(ticketUri: URI): { readonly reasons: readonly string[] } | undefined;
+	/**
+	 * UI-21: every ticket of every managed workspace (all levels) with ID, title, type, status and parent chain, built
+	 * from the cached sub-tree summaries of {@link getTicketSubtreeSummary} (no rescan unless the watcher invalidated them).
+	 */
+	getTicketSearchIndex(): Promise<ITicketSearchIndex>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;

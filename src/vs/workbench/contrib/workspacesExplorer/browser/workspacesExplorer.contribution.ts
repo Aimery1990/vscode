@@ -19,10 +19,19 @@ import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextke
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { dirname } from '../../../../base/common/resources.js';
+import { basename, dirname } from '../../../../base/common/resources.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { IProgressService, ProgressLocation } from '../../../../platform/progress/common/progress.js';
 import { externalizeLongTicketFields } from './ticketFieldMigration.js';
+import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { describeTicketLocation, GO_TO_TICKET_COMMAND_ID, ITicketSearchEntry, ITicketSearchIndex, searchTickets, TICKET_SEARCH_MAX_RESULTS } from '../common/ticketSearch.js';
+import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
+import { openSubWorkflowTicketCanvas } from '../../workflowsManager/browser/subWorkflowLiveView.js';
+import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 
 import {
 	WORKSPACES_EXPLORER_VIEWLET_ID,
@@ -219,6 +228,104 @@ registerAction2(class ExternalizeLongTicketFieldsAction extends Action2 {
 			notificationService.warn(localize('externalizePartial', "Externalized {0} field values; {1} files failed: {2}", result.fieldCount - result.failed.length, result.failed.length, result.failed.map(f => f.uri.fsPath).join(', ')));
 		} else {
 			notificationService.info(localize('externalizeDone', "Externalized {0} field values of {1} ticket files.", result.fieldCount, result.files.length));
+		}
+	}
+});
+
+// UI-21: Go to Ticket - a quick pick over every ticket of every managed workspace (ID or title); the pick is opened
+// and revealed in the Workspaces tree. Cmd+Alt+T is taken on macOS (Close Other Editors in Group), so Cmd/Ctrl+Alt+J.
+registerAction2(class GoToTicketAction extends Action2 {
+	constructor() {
+		super({
+			id: GO_TO_TICKET_COMMAND_ID,
+			title: localize2('goToTicket', "Go to Ticket..."),
+			category: localize2('anyAgentCategory', "AnyAgent"),
+			icon: Codicon.search,
+			f1: true,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyJ,
+				weight: KeybindingWeight.WorkbenchContrib
+			}
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const workspacesExplorerService = accessor.get(IWorkspacesExplorerService);
+		const quickInputService = accessor.get(IQuickInputService);
+		const viewsService = accessor.get(IViewsService);
+		const editorService = accessor.get(IEditorService);
+		const storageService = accessor.get(IStorageService);
+		const includeRemoved = storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
+
+		type TicketPickItem = IQuickPickItem & { entry: ITicketSearchEntry };
+		const store = new DisposableStore();
+		const picker = store.add(quickInputService.createQuickPick<TicketPickItem>());
+		picker.placeholder = localize('goToTicketPlaceholder', "Type a ticket ID (e.g. ANYAG-0111 or 0111) or part of a title");
+		picker.matchOnLabel = picker.matchOnDescription = picker.matchOnDetail = picker.sortByLabel = false;
+		picker.busy = true;
+		let index: ITicketSearchIndex | undefined;
+		const update = () => {
+			if (!index) {
+				return;
+			}
+			const result = searchTickets(index.entries, picker.value, { includeRemoved, minLength: 1 });
+			picker.items = result.matches.map((m): TicketPickItem => {
+				const sep = m.entry.title ? ' \u2014 ' : '';
+				const titleOffset = m.entry.ticketId.length + sep.length;
+				const highlights = [];
+				if (m.idRange) {
+					highlights.push({ start: m.idRange[0], end: m.idRange[1] });
+				}
+				if (m.titleRange) {
+					highlights.push({ start: titleOffset + m.titleRange[0], end: titleOffset + m.titleRange[1] });
+				}
+				return {
+					label: `${m.entry.ticketId}${sep}${m.entry.title}`,
+					description: describeTicketLocation(m.entry) + (m.entry.status ? ` \u00b7 ${m.entry.status}` : ''),
+					highlights: { label: highlights },
+					entry: m.entry
+				};
+			});
+			picker.title = !picker.value.trim()
+				? localize('goToTicketTitleAll', "Go to Ticket ({0} tickets)", index.entries.length)
+				: result.capped
+					? localize('goToTicketTitleCapped', "Go to Ticket (first {0} of {1} matches)", TICKET_SEARCH_MAX_RESULTS, result.total)
+					: localize('goToTicketTitle', "Go to Ticket ({0} matches)", result.total);
+		};
+		store.add(picker.onDidChangeValue(update));
+		const picked = new Promise<ITicketSearchEntry | undefined>(resolve => {
+			store.add(picker.onDidAccept(() => {
+				resolve(picker.selectedItems[0]?.entry ?? picker.activeItems[0]?.entry);
+				picker.hide();
+			}));
+			store.add(picker.onDidHide(() => resolve(undefined)));
+		});
+		picker.show();
+		workspacesExplorerService.getTicketSearchIndex().then(loaded => {
+			index = loaded;
+			picker.busy = false;
+			update();
+		}, () => {
+			picker.busy = false;
+		});
+		const entry = await picked;
+		store.dispose();
+		if (!entry) {
+			return;
+		}
+		const pane = await viewsService.openView(WORKSPACE_PANE_VIEW_ID, false);
+		if (pane instanceof MainWorkspaceViewPane) {
+			await pane.revealTicket(entry, true);
+			return;
+		}
+		// the Workspaces view is unavailable: still open the ticket
+		const name = basename(entry.resource);
+		if (entry.type === 'workflow') {
+			await editorService.openEditor(new WorkflowEditorInput(entry.resource, name), { pinned: true });
+		} else if (entry.type && isSubWorkflowTicketType(entry.type)) {
+			await openSubWorkflowTicketCanvas(editorService, entry.resource, name);
+		} else {
+			await editorService.openEditor(new EntityDetailEditorInput(entry.resource, name), { pinned: true });
 		}
 	}
 });
