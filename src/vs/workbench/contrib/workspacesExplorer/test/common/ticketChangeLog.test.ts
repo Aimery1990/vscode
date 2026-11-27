@@ -7,7 +7,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import {
 	computeTicketLineDiff, diffTicketFieldMaps, extractTicketFields, ITicketChangeRecord, normalizeTicketFieldValue, parseTicketChangeRecords,
-	planTicketFieldChange, renderTicketChangeEntry, replaceWorklogMdSummaryBlock, sanitizeTicketMedia, summarizeTicketListChange,
+	planTicketFieldChange, renderTicketChangeEntry, replaceWorklogMdSummaryBlock, sanitizeTicketMedia, stripTicketUiState, summarizeTicketListChange,
 	TICKET_CHANGE_DIFF_MAX_LINES, TicketChangeCoalescer, ticketChangeRecordMatchesField, ticketFieldSourceOf,
 	ticketFieldValuesEqual, ticketTextStats, toTicketChangeActor
 } from '../../common/ticketChangeLog.js';
@@ -102,6 +102,55 @@ suite('ticketChangeLog', () => {
 			['labels', 'bug, ui', 'bug'],
 			['status', 'Todo', 'Done'],
 		]);
+	});
+
+	test('pure UI state of media player / TTS / voice note values is not a change', () => {
+		const fields = (value: string) => new Map([['custom:Player', { id: 'custom:Player', value, label: 'Player', source: 'ticket.md' as const }]]);
+		const media = (extra: Record<string, unknown>) => JSON.stringify({
+			mediaFilePath: 'attachments/a.mp3', mediaFileName: 'a.mp3', mediaKind: 'audio', mediaMimeType: 'audio/mpeg', mediaPlaybackRate: 1, mediaAutoPlay: false,
+			subtitlesFile: 'attachments/subtitles_player.json', subtitleDisplayMode: 'single', dictationUnit: 'segment', dictationAutoPause: true,
+			dictation: { s1: { text: 'hello', correct: 1, total: 2, score: 0.5, at: 1000 } },
+			...extra
+		});
+
+		// Speed menu, display mode toggle and re-checking the same answer: no change at all.
+		const onlyUi = media({ mediaPlaybackRate: 1.5, subtitleDisplayMode: 'dictation', dictation: { s1: { text: 'hello', correct: 1, total: 2, score: 0.5, at: 2000 } } });
+		assert.deepStrictEqual(diffTicketFieldMaps(fields(media({})), fields(onlyUi)), []);
+		assert.ok(ticketFieldValuesEqual('custom:Player', media({}), onlyUi));
+
+		// A real change together with UI state: recorded, without the UI state keys.
+		const real = media({ mediaPlaybackRate: 2, dictation: { s1: { text: 'hello world', correct: 2, total: 2, score: 1, at: 3000 } } });
+		const changes = diffTicketFieldMaps(fields(media({})), fields(real));
+		assert.strictEqual(changes.length, 1);
+		for (const v of [changes[0].oldValue, changes[0].newValue]) {
+			const o = JSON.parse(v);
+			assert.strictEqual(o.mediaPlaybackRate, undefined);
+			assert.strictEqual(o.subtitleDisplayMode, undefined);
+			assert.strictEqual(o.dictation.s1.at, undefined);
+			assert.strictEqual(o.mediaFilePath, 'attachments/a.mp3');
+			assert.strictEqual(o.dictationAutoPause, true);
+		}
+		assert.strictEqual(JSON.parse(changes[0].newValue).dictation.s1.text, 'hello world');
+
+		// User settings of the player stay logged.
+		assert.strictEqual(diffTicketFieldMaps(fields(media({})), fields(media({ mediaAutoPlay: true }))).length, 1);
+		assert.strictEqual(diffTicketFieldMaps(fields(media({})), fields(media({ dictationAutoPause: false }))).length, 1);
+
+		// TTS: speed and the "Show AI Section" expand state are UI state; the voice is not.
+		const tts = (extra: Record<string, unknown>) => JSON.stringify({ text: 'Hi', ttsFormat: 'mp3', ttsVoice: 'Kore', ttsPlaybackRate: 1, ttsShowSpeechTextInTicket: false, ...extra });
+		assert.deepStrictEqual(diffTicketFieldMaps(fields(tts({})), fields(tts({ ttsPlaybackRate: 1.25, ttsShowSpeechTextInTicket: true }))), []);
+		assert.strictEqual(diffTicketFieldMaps(fields(tts({})), fields(tts({ ttsVoice: 'Puck' }))).length, 1);
+
+		// Voice note: playback speed only.
+		const voice = (extra: Record<string, unknown>) => JSON.stringify({ voiceClips: [], voiceTranscript: 't', voicePlaybackRate: 1, ...extra });
+		assert.deepStrictEqual(diffTicketFieldMaps(fields(voice({})), fields(voice({ voicePlaybackRate: 2 }))), []);
+		assert.strictEqual(diffTicketFieldMaps(fields(voice({})), fields(voice({ voiceTranscript: 'u' }))).length, 1);
+
+		// Other values (no component signature, plain text) are left alone.
+		const other = JSON.stringify({ mediaPlaybackRate: 1, note: 'x' });
+		assert.strictEqual(stripTicketUiState(other), other);
+		assert.strictEqual(stripTicketUiState('plain text'), 'plain text');
+		assert.ok(!ticketFieldValuesEqual('custom:X', other, JSON.stringify({ mediaPlaybackRate: 2, note: 'x' })));
 	});
 
 	test('small values are recorded inline', () => {

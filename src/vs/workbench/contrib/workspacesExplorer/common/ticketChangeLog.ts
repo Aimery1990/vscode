@@ -321,9 +321,99 @@ function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false 
 	}
 }
 
+/** Pure UI state that a component saves on its own inside its JSON field value. */
+export interface ITicketUiStateRule {
+	readonly component: string;
+	/** A JSON object value belongs to the component when it has all of these keys (its save always writes them). */
+	readonly signature: readonly string[];
+	/** Top level keys holding pure UI state. */
+	readonly keys: readonly string[];
+	/** `{ mapKey: keys }`: keys to drop from every entry of the object map stored under `mapKey`. */
+	readonly entryKeys?: Readonly<Record<string, readonly string[]>>;
+}
+
+/**
+ * UI state keys that a component saves quietly with its value but that are not a change of the ticket (CI-50
+ * follow-up): playback speed menus, the subtitle display mode toggle (single / scroll / dictation view), the TTS
+ * "Show AI Section" expand state and the time stamp of a dictation check. They are still saved; they are only left out
+ * of the field change log. Everything the user enters (media file, subtitles file, dictation settings and answers, TTS
+ * text / voice / model / format / audio, voice clips) stays logged.
+ */
+export const TICKET_UI_STATE_RULES: readonly ITicketUiStateRule[] = [
+	{ component: 'media_player', signature: ['mediaFilePath', 'mediaKind'], keys: ['mediaPlaybackRate', 'subtitleDisplayMode'], entryKeys: { dictation: ['at'] } },
+	{ component: 'tts', signature: ['ttsFormat', 'ttsVoice'], keys: ['ttsPlaybackRate', 'ttsShowSpeechTextInTicket'] },
+	{ component: 'voice_note', signature: ['voiceClips'], keys: ['voicePlaybackRate'] },
+];
+
+function hasOwn(obj: Record<string, unknown>, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** The value without the UI state keys of {@link TICKET_UI_STATE_RULES}; `undefined` when nothing was dropped. */
+function withoutUiState(value: unknown): Record<string, unknown> | undefined {
+	if (!isPlainObject(value)) {
+		return undefined;
+	}
+	let out: Record<string, unknown> | undefined;
+	for (const rule of TICKET_UI_STATE_RULES) {
+		if (!rule.signature.every(k => hasOwn(value, k))) {
+			continue;
+		}
+		for (const k of rule.keys) {
+			if (hasOwn(value, k)) {
+				out ??= { ...value };
+				delete out[k];
+			}
+		}
+		for (const [mapKey, drop] of Object.entries(rule.entryKeys ?? {})) {
+			const map = value[mapKey];
+			if (!isPlainObject(map)) {
+				continue;
+			}
+			let changed = false;
+			const entries: Record<string, unknown> = {};
+			for (const [key, entry] of Object.entries(map)) {
+				if (isPlainObject(entry) && drop.some(d => hasOwn(entry, d))) {
+					const copy = { ...entry };
+					for (const d of drop) {
+						delete copy[d];
+					}
+					entries[key] = copy;
+					changed = true;
+				} else {
+					entries[key] = entry;
+				}
+			}
+			if (changed) {
+				out ??= { ...value };
+				out[mapKey] = entries;
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * A field value as the change log sees it: a component JSON value without its pure UI state keys (see
+ * {@link TICKET_UI_STATE_RULES}). Any other value is returned unchanged.
+ */
+export function stripTicketUiState(value: string): string {
+	const json = tryParseJson(value);
+	if (!json.ok) {
+		return value;
+	}
+	const stripped = withoutUiState(json.value);
+	return stripped ? JSON.stringify(stripped) : value;
+}
+
 /**
  * The comparison form of a field value: re-serialization noise (line endings, whitespace runs, surrounding quotes,
- * `None` placeholders, JSON formatting, label / link list spacing) must not count as a change.
+ * `None` placeholders, JSON formatting, label / link list spacing) and pure UI state ({@link TICKET_UI_STATE_RULES})
+ * must not count as a change.
  */
 export function normalizeTicketFieldValue(fieldId: string, value: string | undefined): string {
 	let v = (value ?? '').replace(/\r\n?/g, '\n').trim().replace(/^[`'"]+|[`'"]+$/g, '').trim();
@@ -338,7 +428,7 @@ export function normalizeTicketFieldValue(fieldId: string, value: string | undef
 	}
 	const json = tryParseJson(v);
 	if (json.ok) {
-		return canonicalJson(json.value);
+		return canonicalJson(withoutUiState(json.value) ?? json.value);
 	}
 	return v.replace(/\s+/g, ' ');
 }
@@ -357,7 +447,9 @@ export interface ITicketFieldChange {
 }
 
 /**
- * The changed fields between two versions of one tracked file. A field missing on one side counts as empty.
+ * The changed fields between two versions of one tracked file. A field missing on one side counts as empty. Values are
+ * compared and recorded without their pure UI state ({@link stripTicketUiState}): a save that only moves such state
+ * yields no change, one that also changes real data records only the real data.
  */
 export function diffTicketFieldMaps(oldFields: ReadonlyMap<string, ITicketFieldValue>, newFields: ReadonlyMap<string, ITicketFieldValue>): ITicketFieldChange[] {
 	const changes: ITicketFieldChange[] = [];
@@ -370,8 +462,8 @@ export function diffTicketFieldMaps(oldFields: ReadonlyMap<string, ITicketFieldV
 	for (const id of ids) {
 		const o = oldFields.get(id);
 		const n = newFields.get(id);
-		const oldValue = o?.value ?? '';
-		const newValue = n?.value ?? '';
+		const oldValue = stripTicketUiState(o?.value ?? '');
+		const newValue = stripTicketUiState(n?.value ?? '');
 		if (ticketFieldValuesEqual(id, oldValue, newValue)) {
 			continue;
 		}
