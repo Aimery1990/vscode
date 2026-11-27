@@ -325,7 +325,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'dynamic_list',
 		label: 'Container (Nested Subfields / Repeating Items)',
-		description: 'Nested repeatable line items or sub-table. Supports itemFields (array of sub-fields) or componentRef (reusable class ID).',
+		description: 'Nested repeatable line items or sub-table. Supports itemFields (array of sub-fields) or componentRef (reusable class ID). Stored value: a JSON array of entries, one object per entry keyed by sub-field label, with optional "_index" and "_title". In a ticket run it publishes that array as structured JSON (without "_index"; every sub-field label present, "" when empty) under outputVariableName (or the name generated from the label, e.g. expense_items) and under its label, plus {name.json} with the JSON text; an empty list publishes []. Read it as {expense_items}, {expense_items.0.Date} or, in Python, as a list of dicts. Example: [{"_title": "Trip A", "Item Name": "Taxi", "Date": "2026-11-25", "Amount ($)": "12", "Notes": ""}].',
 		requiresOptions: false,
 		supportsItemFields: true,
 		example: {

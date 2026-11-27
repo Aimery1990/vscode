@@ -501,15 +501,15 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		runTicketsFlow: {
 			headline: 'How RUN_TICKETS Executes Dynamic List Container',
 			steps: [
-				{ step: '1. Row Iteration', detail: 'Iterates through each row in the dynamic table.' },
-				{ step: '2. Object Serialization', detail: 'Maps rows to an array of objects ({ col1: val1, col2: val2 }).' },
-				{ step: '3. JSON & Table Export', detail: 'Registers structured array into contextVariables.' }
+				{ step: '1. Item Records', detail: 'Reads the saved entries. Each entry becomes one object keyed by sub-field label, e.g. { "Item Name": "Taxi", "Amount": "12" }; an entry title is kept as "_title". Values stay as saved (text).' },
+				{ step: '2. Publish as JSON Array', detail: 'Publishes the array under the output variable name (outputVariableName, or the name generated from the label, e.g. expense_items) and under the label. {name.json} holds the same array as JSON text.' },
+				{ step: '3. Done Status', detail: 'The card is marked Done like any input. An empty list is Done too and publishes [].' }
 			],
-			variableResolution: '{Field Label}',
-			downstreamPassing: 'Prompts can parse this as a JSON list or render it directly into Markdown tables.'
+			variableResolution: '{expense_items} / {expense_items.0.Amount} / {Field Label.json}',
+			downstreamPassing: 'Python reads it as a list of dicts (TICKET_CONTEXT["expense_items"] or the expense_items global); {expense_items} in a prompt inserts the JSON text; GET_OUTPUTS returns the array when an Output component lists it.'
 		},
-		syntaxExamples: ['{Field Label}'],
-		tips: ['Ideal for order items, milestone matrices, test step checklists, or multi-item data grids.']
+		syntaxExamples: ['{expense_items}', '{expense_items.0.Amount}', '{expense_items.json}'],
+		tips: ['Ideal for order items, milestone matrices, test step checklists, or multi-item data grids.', 'Example value: [{"_title": "Trip A", "Item Name": "Taxi", "Amount": "12"}, {"Item Name": "Hotel", "Amount": "90"}]']
 	},
 
 	attachment: {
@@ -569,17 +569,17 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		runTicketsFlow: {
 			headline: 'How RUN_TICKETS Executes Reusable Classes',
 			steps: [
-				{ step: '1. Class Field Enumeration', detail: 'Recursively loads all subfields defined inside the reusable class.' },
-				{ step: '2. Dot-Notation Namespacing', detail: 'Registers each child field using dot notation: {InstanceName.child_field}.' },
-				{ step: '3. Full Object Delivery', detail: 'Also exports the entire bundle as a nested dictionary under {InstanceName}.' }
+				{ step: '1. Item Records', detail: 'A Reusable Class instance is a Dynamic List of the class sub-fields. Each entry becomes one object keyed by sub-field label (missing sub-fields are "").' },
+				{ step: '2. Publish as JSON Array', detail: 'Publishes the array of entries under the instance variable name (outputVariableName, or the name generated from the label) and under the label; {name.json} holds the JSON text.' },
+				{ step: '3. Done Status', detail: 'The card is marked Done like any input; an empty instance publishes [].' }
 			],
-			variableResolution: '{ClassName.subField}',
-			downstreamPassing: 'Allows modular, encapsulated data passing across ticket steps and workflows.'
+			variableResolution: '{seo_pack_1} / {seo_pack_1.0.meta_title}',
+			downstreamPassing: 'Python reads it as a list of dicts; {seo_pack_1} in a prompt inserts the JSON text; GET_OUTPUTS returns the array when an Output component lists it.'
 		},
 		syntaxExamples: [
-			'{SeoPack.meta_title}',
-			'{SeoPack.keywords}',
-			'{SeoPack}'
+			'{seo_pack_1}',
+			'{seo_pack_1.0.meta_title}',
+			'{seo_pack_1.json}'
 		],
 		tips: ['Build reusable classes for domain-specific groups like "SEO Metadata", "Approval Block", or "Deployment Specs".']
 	},
