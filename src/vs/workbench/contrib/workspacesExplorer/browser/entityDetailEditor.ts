@@ -20188,7 +20188,8 @@ ${interpolatedPrompt}`;
 						});
 					}
 
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					// Identified like the other component cards so a ticket run can mark it (running / Done / Failed, CI-44)
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'dynamic_list' },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20196,11 +20197,14 @@ ${interpolatedPrompt}`;
 									'Dynamic List'
 								)
 							),
-							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'dynamic_list', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(v)), title: `Edit ${k} with AI` },
-								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
-									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
-								)
-							))
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge(),
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'dynamic_list', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(v)), title: `Edit ${k} with AI` },
+									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+									)
+								))
+							)
 						))),
 						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', undefined, ...subCardsView))
 
