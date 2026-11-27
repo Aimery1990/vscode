@@ -186,6 +186,24 @@ export function hasBrowserCredentialHeaders(resolved: IBrowserCredentialUrl): bo
 	return Object.keys(resolved.headers).length > 0;
 }
 
+/**
+ * Request headers of a browser fetch: `base` (User-Agent, Accept ...) plus the credential headers. A credential header
+ * replaces a base header with the same name in any letter case, so a request never carries both.
+ */
+export function mergeBrowserRequestHeaders(base: Readonly<Record<string, string>>, credentialHeaders: Readonly<Record<string, string>> | undefined): Record<string, string> {
+	const result: Record<string, string> = Object.create(null);
+	const credNames = new Set(Object.keys(credentialHeaders ?? {}).map(n => n.toLowerCase()));
+	for (const name of Object.keys(base)) {
+		if (!credNames.has(name.toLowerCase())) {
+			result[name] = base[name];
+		}
+	}
+	for (const name of Object.keys(credentialHeaders ?? {})) {
+		result[name] = credentialHeaders![name];
+	}
+	return result;
+}
+
 /** Credential headers as they may be logged or shown: names kept, values replaced with `***`. */
 export function maskBrowserCredentialHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
 	const result: Record<string, string> = Object.create(null);

@@ -12,6 +12,7 @@ import {
 	maskBrowserCredentialHeaders,
 	maskBrowserCredentials,
 	maskSecrets,
+	mergeBrowserRequestHeaders,
 	normalizeBrowserCredentials,
 	pickBrowserCredentials,
 	resolveBrowserCredentialUrl
@@ -154,5 +155,15 @@ suite('browserCredentials', () => {
 		assert.deepStrictEqual({ ...maskBrowserCredentialHeaders(res.headers) }, { 'Authorization': MASKED_SECRET });
 		assert.strictEqual(maskSecrets('401 for Authorization: Bearer s3cret', res.secrets), `401 for Authorization: ${MASKED_SECRET}`);
 		assert.strictEqual(res.maskedUrl, 'https://site/');
+	});
+
+	test('mergeBrowserRequestHeaders: credential headers are added and replace a base header in any case', () => {
+		const base = { 'User-Agent': 'UA', 'Accept': 'text/html' };
+		assert.deepStrictEqual({ ...mergeBrowserRequestHeaders(base, undefined) }, base);
+		assert.deepStrictEqual({ ...mergeBrowserRequestHeaders(base, { 'Authorization': 'Bearer t', 'user-agent': 'mine' }) }, {
+			'Accept': 'text/html',
+			'Authorization': 'Bearer t',
+			'user-agent': 'mine'
+		});
 	});
 });

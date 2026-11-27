@@ -15,7 +15,7 @@ import { IInstantiationService, createDecorator } from '../../../../platform/ins
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { maskBrowserCredentialHeaders, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
+import { maskBrowserCredentialHeaders, maskBrowserCredentials, maskSecrets, mergeBrowserRequestHeaders, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { SUB_WORKFLOW_TICKET_TYPE, createDefaultFreestyleSchema, getProgrammaticTicketTypeError, getReservedTemplateCreateError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { ISubWorkflowContract, ISubWorkflowTicketSummary, buildSubWorkflowContract, buildSubWorkflowTicketMetadata, buildSubWorkflowTicketSummary, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition, subWorkflowSummaryFromMetadata } from '../common/subWorkflowTicket.js';
 import { buildPrimitivesCatalog } from '../../customModules/common/componentRegistry.js';
@@ -23,6 +23,9 @@ import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId }
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
+import { IRequestService, asText } from '../../../../platform/request/common/request.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { ISubWorkflowDefinition, hasWorkflowProperty, isWorkflowRecord } from '../common/workflowExecutionModel.js';
 import { buildDynamicListContextValue } from '../common/dynamicListValue.js';
@@ -5112,8 +5115,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 	/**
 	 * Extracts the readable text of `targetUrl`. `credentialHeaders` are sent with the request: the built-in extractor
-	 * (IWebContentExtractorService) cannot send request headers, so when there are any it is skipped and the plain HTTP
-	 * fetch is used directly.
+	 * (IWebContentExtractorService) cannot send request headers, so when there are any it is skipped and the request
+	 * goes through the main-process request service (no CORS preflight, unlike the renderer `fetch`).
 	 */
 	private async _extractWebContent(targetUrl: string, maskText: (text: string) => string = text => text, credentialHeaders?: Readonly<Record<string, string>>): Promise<{ title: string; content: string }> {
 		const startEpoch = this._cancelEpoch;
@@ -5161,16 +5164,24 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// 2. Fallback HTTP fetch
 			try {
 				// Credentials not referenced in the URL are sent as headers named after them (values are never logged)
-				const headers: Record<string, string> = {
-					'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-					...credentialHeaders
-				};
+				const headers = mergeBrowserRequestHeaders({
+					'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+				}, credentialHeaders);
 
-				const resp = await fetch(targetUrl, { headers, signal: controller.signal });
-				if (!resp.ok) {
-					return { title: targetUrl, content: `HTTP Error: ${resp.status} ${resp.statusText}` };
+				let html: string;
+				if (hasCredentialHeaders) {
+					const response = await this._requestWithHeaders(targetUrl, headers, controller);
+					if (response.statusCode < 200 || response.statusCode >= 300) {
+						return { title: targetUrl, content: `HTTP Error: ${response.statusCode}` };
+					}
+					html = response.body;
+				} else {
+					const resp = await fetch(targetUrl, { headers, signal: controller.signal });
+					if (!resp.ok) {
+						return { title: targetUrl, content: `HTTP Error: ${resp.status} ${resp.statusText}` };
+					}
+					html = await resp.text();
 				}
-				const html = await resp.text();
 				const cleanText = html
 					.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
 					.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
@@ -5193,6 +5204,32 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 		} finally {
 			this._activeAbortControllers.delete(controller);
+		}
+	}
+
+	/**
+	 * GET with request headers through the main-process request service (the same path as the ticket card fetch), so
+	 * custom headers such as Authorization do not trigger a CORS preflight. Falls back to the renderer request service
+	 * where there is no main process (web). Aborting `controller` cancels the request; it times out after 20 s.
+	 */
+	private async _requestWithHeaders(targetUrl: string, headers: Record<string, string>, controller: AbortController): Promise<{ statusCode: number; body: string }> {
+		const reqService = this.instantiationService.invokeFunction(accessor => {
+			try {
+				return new RequestChannelClient(accessor.get(IMainProcessService).getChannel('request'));
+			} catch {
+				return accessor.get(IRequestService);
+			}
+		});
+		const cts = new CancellationTokenSource();
+		const onAbort = () => cts.cancel();
+		controller.signal.addEventListener('abort', onAbort, { once: true });
+		try {
+			const context = await reqService.request({ type: 'GET', url: targetUrl, headers, timeout: 20000, callSite: 'ticketWorkflowRuntime.browser' }, cts.token);
+			const body = await asText(context);
+			return { statusCode: context.res.statusCode ?? 200, body: body || '' };
+		} finally {
+			controller.signal.removeEventListener('abort', onAbort);
+			cts.dispose();
 		}
 	}
 
