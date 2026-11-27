@@ -3,18 +3,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
-import { VSBuffer, encodeHex } from '../../../../base/common/buffer.js';
 import { basename, dirname } from '../../../../base/common/resources.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import {
 	diffTicketFieldMaps, extractTicketFields, ITicketChangeActor, ITicketChangeRecord, ITicketFieldChange, planTicketFieldChange,
 	renderTicketChangeEntry, TICKET_CHANGE_ENTRY_KIND, TicketChangeActorInput,
-	TicketChangeCoalescer, ticketChangeCoalescer, ticketFieldSourceOf, toTicketChangeActor
+	TicketChangeCoalescer, ticketChangeCoalescer, toTicketChangeActor
 } from '../common/ticketChangeLog.js';
-import {
-	findTicketFieldVersionByHash, isTicketFieldVersionRelativePath, sanitizeTicketFieldKey, TICKET_FIELD_VERSION_PLAIN_EXTENSION,
-	ticketFieldVersionFileName, ticketFieldVersionRelativePath, ticketFieldVersionsDir
-} from '../common/ticketFieldStore.js';
+import { isTicketFieldVersionRelativePath } from '../common/ticketFieldStore.js';
+import { ensureExternalizedVersions, executeTicketFileWritePlan, gunzip, planTicketFileWrites, storeTicketFieldVersion, ticketConfigDirOf } from './ticketFieldFiles.js';
 import { TicketWorklogStorage } from './ticketWorklogStorage.js';
 
 /*
@@ -25,6 +22,8 @@ import { TicketWorklogStorage } from './ticketWorklogStorage.js';
  * contents, diffs the tracked fields and records the changes into the ticket's work log (one `Worklogs/*.log` entry,
  * coalesced for consecutive saves of the same actor). Full versions of large values are stored per field in
  * `.agents/fields/<field_key>.versions/` (see `common/ticketFieldStore.ts`).
+ * CI-51: long values are written to `.agents/fields/<field_key>.txt` and referenced from the field (see
+ * `ticketFieldFiles.ts`); the change log compares the resolved values, never the reference lines.
  * Logging never fails a write: errors are only reported to the console.
  */
 
@@ -54,23 +53,6 @@ export async function flushTicketChangeRecorder(): Promise<void> {
 	await Promise.all([...ticketQueues.values()]);
 }
 
-/** The ticket's `.agents` folder for a file in it (legacy tickets keep ticket.md in the ticket folder itself). */
-function configDirOf(fileUri: URI): URI {
-	const dir = dirname(fileUri);
-	return basename(dir) === '.agents' ? dir : URI.joinPath(dir, '.agents');
-}
-
-async function readIfExists(fileService: IFileService, uri: URI): Promise<string | undefined> {
-	try {
-		if (!await fileService.exists(uri)) {
-			return undefined;
-		}
-		return (await fileService.readFile(uri)).value.toString();
-	} catch {
-		return undefined;
-	}
-}
-
 /** Writes one ticket file and records its field changes. See {@link writeTicketFiles}. */
 export function writeTicketFile(fileService: IFileService, uri: URI, content: string, actor?: TicketChangeActorInput): Promise<void> {
 	return writeTicketFiles(fileService, [{ uri, content }], actor);
@@ -85,7 +67,7 @@ export async function writeTicketFiles(fileService: IFileService, writes: readon
 	const actor = toTicketChangeActor(actorInput);
 	const groups = new Map<string, { configDir: URI; writes: ITicketFileWrite[] }>();
 	for (const w of writes) {
-		const configDir = configDirOf(w.uri);
+		const configDir = ticketConfigDirOf(w.uri);
 		const key = configDir.toString();
 		if (!groups.has(key)) {
 			groups.set(key, { configDir, writes: [] });
@@ -96,76 +78,32 @@ export async function writeTicketFiles(fileService: IFileService, writes: readon
 }
 
 async function writeGroup(fileService: IFileService, configDir: URI, writes: readonly ITicketFileWrite[], actor: ITicketChangeActor): Promise<void> {
-	const olds: (string | undefined)[] = [];
-	for (const w of writes) {
-		olds.push(ticketFieldSourceOf(basename(w.uri)) ? await readIfExists(fileService, w.uri) : undefined);
-	}
-	for (const w of writes) {
-		await fileService.writeFile(w.uri, VSBuffer.fromString(w.content));
-	}
+	const plan = await planTicketFileWrites(fileService, configDir, writes);
+	await executeTicketFileWritePlan(fileService, plan);
 	try {
 		const changes: ITicketFieldChange[] = [];
-		writes.forEach((w, i) => {
-			const source = ticketFieldSourceOf(basename(w.uri));
-			const old = olds[i];
-			if (!source || old === undefined || old === w.content) {
-				return;
+		for (const item of plan.items) {
+			if (!item.source || item.oldResolved === undefined || item.oldResolved === item.newResolved) {
+				continue;
 			}
-			changes.push(...diffTicketFieldMaps(extractTicketFields(source, old), extractTicketFields(source, w.content)));
-		});
+			changes.push(...diffTicketFieldMaps(extractTicketFields(item.source, item.oldResolved), extractTicketFields(item.source, item.newResolved)));
+		}
 		if (changes.length > 0) {
 			await recordTicketFieldChanges(fileService, configDir, changes, actor);
 		}
 	} catch (err) {
 		console.warn('[TicketChangeRecorder] Failed to record ticket field changes:', err);
 	}
+	try {
+		await ensureExternalizedVersions(fileService, plan, new Date());
+	} catch (err) {
+		console.warn('[TicketChangeRecorder] Failed to store versions of externalized field values:', err);
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
 // Logging
 // ------------------------------------------------------------------------------------------------
-
-async function sha256Hex(text: string): Promise<string> {
-	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-	return encodeHex(VSBuffer.wrap(new Uint8Array(digest)));
-}
-
-async function gzip(text: string): Promise<Uint8Array | undefined> {
-	if (typeof CompressionStream === 'undefined') {
-		return undefined;
-	}
-	const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
-	return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function gunzip(bytes: Uint8Array): Promise<string> {
-	const stream = new Blob([bytes as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream('gzip'));
-	return new Response(stream).text();
-}
-
-/**
- * Stores a full value as a version of its field (`.agents/fields/<key>.versions/<stamp>_<sha12>.txt.gz`), reusing an
- * existing version with the same hash. Returns the full SHA-256 and the path relative to the ticket folder.
- */
-async function storeFieldVersion(fileService: IFileService, configDir: URI, fieldId: string, label: string, text: string, at: Date): Promise<{ hash: string; path: string }> {
-	const hash = await sha256Hex(text);
-	const key = sanitizeTicketFieldKey(fieldId, label);
-	const dir = ticketFieldVersionsDir(configDir, key);
-	let existing: string[] = [];
-	try {
-		existing = ((await fileService.resolve(dir)).children || []).filter(c => !c.isDirectory).map(c => c.name);
-	} catch {
-		// folder does not exist yet
-	}
-	const reuse = findTicketFieldVersionByHash(existing, hash);
-	if (reuse) {
-		return { hash, path: ticketFieldVersionRelativePath(key, reuse) };
-	}
-	const compressed = await gzip(text);
-	const name = compressed ? ticketFieldVersionFileName(at, hash) : ticketFieldVersionFileName(at, hash, TICKET_FIELD_VERSION_PLAIN_EXTENSION);
-	await fileService.writeFile(URI.joinPath(dir, name), compressed ? VSBuffer.wrap(compressed) : VSBuffer.fromString(text));
-	return { hash, path: ticketFieldVersionRelativePath(key, name) };
-}
 
 /** Reads a stored field version by its path relative to the ticket folder (from a change record), or undefined. */
 export async function readTicketFieldVersion(fileService: IFileService, ticketFolderOrConfigDir: URI, relativePath: string): Promise<string | undefined> {
@@ -192,12 +130,12 @@ async function buildRecords(fileService: IFileService, configDir: URI, changes: 
 		const at = new Date(c.at);
 		const planned = planTicketFieldChange(c, actor, at);
 		if (planned.blobs.old !== undefined) {
-			const v = await storeFieldVersion(fileService, configDir, c.field, c.label, planned.blobs.old, at);
+			const v = await storeTicketFieldVersion(fileService, configDir, { id: c.field, label: c.label }, planned.blobs.old, at);
 			planned.record.oldHash = v.hash;
 			planned.record.oldPath = v.path;
 		}
 		if (planned.blobs.new !== undefined) {
-			const v = await storeFieldVersion(fileService, configDir, c.field, c.label, planned.blobs.new, at);
+			const v = await storeTicketFieldVersion(fileService, configDir, { id: c.field, label: c.label }, planned.blobs.new, at);
 			planned.record.newHash = v.hash;
 			planned.record.newPath = v.path;
 		}

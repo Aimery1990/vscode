@@ -5,6 +5,7 @@
 import { LcsDiff } from '../../../../base/common/diff/diff.js';
 import { StringSHA1 } from '../../../../base/common/hash.js';
 import { normalizeTicketLabels } from './ticketLabels.js';
+import { isLongTicketText } from './ticketFieldStore.js';
 
 /*
  * Ticket field change log (CI-50): pure logic.
@@ -20,8 +21,8 @@ import { normalizeTicketLabels } from './ticketLabels.js';
 // Policy constants
 // ------------------------------------------------------------------------------------------------
 
-/** Values up to this many characters (both sides) are recorded inline, old → new. */
-export const TICKET_CHANGE_INLINE_MAX_CHARS = 500;
+// Values up to LONG_TEXT_MIN_BYTES UTF-8 bytes on both sides (`ticketFieldStore.ts`, shared with the CI-51 field
+// externalization) are recorded inline, old → new; a longer side makes the change "long" (stats, diff, versions).
 /** A large value's line diff is cut after this many lines ... */
 export const TICKET_CHANGE_DIFF_MAX_LINES = 40;
 /** ... or this many bytes (UTF-16 chars, close enough), whichever comes first. */
@@ -122,10 +123,31 @@ function isSectionBreak(line: string): boolean {
 }
 
 /**
- * Reads the value of a top level `- **Key**: value` line plus its continuation lines (lines up to the next key line,
+ * Where a field value sits in its file: the key line `startLine` (its text up to the value is `prefix`) plus its
+ * continuation lines, up to `endLine` (exclusive; trailing blank lines are not part of the span). Replacing lines
+ * `[startLine, endLine)` by `prefix + value lines` rewrites exactly this value (see CI-51 field externalization).
+ */
+export interface ITicketFieldSpan extends ITicketFieldValue {
+	readonly startLine: number;
+	readonly endLine: number;
+	readonly prefix: string;
+}
+
+function lastContentLine(lines: readonly string[], start: number, end: number): number {
+	let last = start;
+	for (let k = start + 1; k < end; k++) {
+		if (lines[k].trim() !== '') {
+			last = k;
+		}
+	}
+	return last + 1;
+}
+
+/**
+ * The span of a top level `- **Key**: value` line plus its continuation lines (lines up to the next key line,
  * heading or `---`), as a multi-line description / prompt is stored.
  */
-function readBlockValue(lines: readonly string[], key: string): string | undefined {
+function readBlockSpan(lines: readonly string[], key: string): { value: string; startLine: number; endLine: number; prefix: string } | undefined {
 	const re = new RegExp(`^\\s*-\\s*\\*\\*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\*\\*:\\s?(.*)$`, 'i');
 	for (let i = 0; i < lines.length; i++) {
 		const m = lines[i].match(re);
@@ -133,95 +155,143 @@ function readBlockValue(lines: readonly string[], key: string): string | undefin
 			continue;
 		}
 		const parts = [m[1]];
-		for (let j = i + 1; j < lines.length; j++) {
+		let j = i + 1;
+		for (; j < lines.length; j++) {
 			const next = lines[j];
 			if (ANY_KEY_LINE_RE.test(next) || isSectionBreak(next)) {
 				break;
 			}
 			parts.push(next);
 		}
-		return parts.join('\n').trim();
+		return { value: parts.join('\n').trim(), startLine: i, endLine: lastContentLine(lines, i, j), prefix: lines[i].slice(0, lines[i].length - m[1].length) };
 	}
 	return undefined;
 }
 
-/** The tracked field values of one ticket file. */
-export function extractTicketFields(source: TicketFieldSource, content: string): Map<string, ITicketFieldValue> {
-	const result = new Map<string, ITicketFieldValue>();
+/** The tracked field values of one ticket file, with their location in the file (lines split by `\r?\n`). */
+export function locateTicketFieldSpans(source: TicketFieldSource, content: string): ITicketFieldSpan[] {
 	const lines = (content || '').split(/\r?\n/);
-	const put = (id: string, label: string, value: string) => result.set(id, { id, label, source, value });
+	const spans: ITicketFieldSpan[] = [];
+	const block = (id: string, label: string) => {
+		const b = readBlockSpan(lines, label);
+		if (b) {
+			spans.push({ id, label, source, ...b });
+		}
+	};
 
 	if (source === 'README.md') {
-		const title = readBlockValue(lines, 'Title');
-		if (title !== undefined) {
-			put('title', 'Title', title);
-		}
-		const description = readBlockValue(lines, 'Description');
-		if (description !== undefined) {
-			put('description', 'Description', description);
-		}
-		return result;
+		block('title', 'Title');
+		block('description', 'Description');
+		return spans;
 	}
 
 	if (source === 'instruction.md') {
-		const prompt = readBlockValue(lines, 'Ticket Prompt');
-		if (prompt !== undefined) {
-			put('ticket_prompt', 'Ticket Prompt', prompt);
-		}
-		return result;
+		block('ticket_prompt', 'Ticket Prompt');
+		return spans;
 	}
 
 	// ticket.md
+	const seen = new Set<string>();
 	let inSelfDefined = false;
-	let currentCustom: string | undefined;
-	const custom = new Map<string, string[]>();
-	for (const line of lines) {
+	let current: { key: string; startLine: number; prefix: string; parts: string[]; last: number } | undefined;
+	const custom = new Map<string, ITicketFieldSpan>();
+	const finish = () => {
+		if (current) {
+			const key = current.key;
+			custom.set(key, {
+				id: CUSTOM_FIELD_ID_PREFIX + key, label: key, source, value: current.parts.join('\n').trim(),
+				startLine: current.startLine, endLine: current.last + 1, prefix: current.prefix
+			});
+			current = undefined;
+		}
+	};
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
 		if (/^###\s+Self Defined Data/.test(line)) {
+			finish();
 			inSelfDefined = true;
-			currentCustom = undefined;
 			continue;
 		}
 		if (isSectionBreak(line)) {
+			finish();
 			inSelfDefined = false;
-			currentCustom = undefined;
 			continue;
 		}
 		if (inSelfDefined) {
 			const cm = line.match(CUSTOM_KEY_LINE_RE);
 			if (cm) {
-				currentCustom = cm[1].trim();
-				custom.set(currentCustom, [cm[2]]);
+				finish();
+				current = { key: cm[1].trim(), startLine: i, prefix: line.slice(0, line.length - cm[2].length), parts: [cm[2]], last: i };
 				continue;
 			}
 			const top = line.match(KEY_LINE_RE);
 			if (top) {
 				const key = top[1].trim();
+				finish();
 				if (key === 'Self Defined Data Structure' || key === 'Self Defined Data Value') {
-					currentCustom = undefined;
 					continue;
 				}
 				// A top level key ends the Self Defined Data section (e.g. `- **Current AI Agent**:`).
 				inSelfDefined = false;
-				currentCustom = undefined;
 			} else {
-				if (currentCustom !== undefined) {
-					custom.get(currentCustom)!.push(line);
+				if (current) {
+					current.parts.push(line);
+					if (line.trim() !== '') {
+						current.last = i;
+					}
 				}
 				continue;
 			}
 		}
 		const m = line.match(KEY_LINE_RE);
 		if (m) {
-			const id = TICKET_MD_STANDARD_FIELDS.get(m[1].trim());
-			if (id && !result.has(id)) {
-				put(id, m[1].trim(), m[2].trim());
+			const label = m[1].trim();
+			const id = TICKET_MD_STANDARD_FIELDS.get(label);
+			if (id && !seen.has(id)) {
+				seen.add(id);
+				spans.push({ id, label, source, value: m[2].trim(), startLine: i, endLine: i + 1, prefix: line.slice(0, line.length - m[2].length) });
 			}
 		}
 	}
-	for (const [key, parts] of custom) {
-		put(CUSTOM_FIELD_ID_PREFIX + key, key, parts.join('\n').trim());
+	finish();
+	spans.push(...custom.values());
+	return spans;
+}
+
+/** The tracked field values of one ticket file. */
+export function extractTicketFields(source: TicketFieldSource, content: string): Map<string, ITicketFieldValue> {
+	const result = new Map<string, ITicketFieldValue>();
+	for (const s of locateTicketFieldSpans(source, content)) {
+		result.set(s.id, { id: s.id, label: s.label, source: s.source, value: s.value });
 	}
 	return result;
+}
+
+/**
+ * Replaces field values in a ticket file: `replace(span)` returns the new value text (may be multi-line) or undefined
+ * to keep the span. Returns the content unchanged (same string) when nothing was replaced.
+ */
+export function replaceTicketFieldValues(source: TicketFieldSource, content: string, replace: (span: ITicketFieldSpan) => string | undefined): string {
+	const spans = locateTicketFieldSpans(source, content);
+	const edits: { span: ITicketFieldSpan; value: string }[] = [];
+	for (const span of spans) {
+		const value = replace(span);
+		if (value !== undefined) {
+			edits.push({ span, value });
+		}
+	}
+	if (edits.length === 0) {
+		return content;
+	}
+	const eol = content.includes('\r\n') ? '\r\n' : '\n';
+	const lines = content.split(/\r?\n/);
+	edits.sort((a, b) => b.span.startLine - a.span.startLine);
+	for (const { span, value } of edits) {
+		const valueLines = value.split(/\r?\n/);
+		valueLines[0] = span.prefix + valueLines[0];
+		lines.splice(span.startLine, span.endLine - span.startLine, ...valueLines);
+	}
+	return lines.join(eol);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -664,7 +734,7 @@ export function planTicketFieldChange(change: ITicketFieldChange, actor: ITicket
 		return { record, blobs: {} };
 	}
 
-	const isLarge = o.text.length > TICKET_CHANGE_INLINE_MAX_CHARS || n.text.length > TICKET_CHANGE_INLINE_MAX_CHARS;
+	const isLarge = isLongTicketText(o.text) || isLongTicketText(n.text);
 	const list = summarizeTicketListChange(o.text, n.text);
 	if (list) {
 		record.kind = 'list';

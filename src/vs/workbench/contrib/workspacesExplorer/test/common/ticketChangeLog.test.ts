@@ -8,7 +8,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import {
 	computeTicketLineDiff, diffTicketFieldMaps, extractTicketFields, ITicketChangeRecord, normalizeTicketFieldValue, parseTicketChangeRecords,
 	planTicketFieldChange, renderTicketChangeEntry, replaceWorklogMdSummaryBlock, sanitizeTicketMedia, summarizeTicketListChange,
-	TICKET_CHANGE_DIFF_MAX_LINES, TICKET_CHANGE_INLINE_MAX_CHARS, TicketChangeCoalescer, ticketChangeRecordMatchesField, ticketFieldSourceOf,
+	TICKET_CHANGE_DIFF_MAX_LINES, TicketChangeCoalescer, ticketChangeRecordMatchesField, ticketFieldSourceOf,
 	ticketFieldValuesEqual, ticketTextStats, toTicketChangeActor
 } from '../../common/ticketChangeLog.js';
 import {
@@ -184,7 +184,7 @@ suite('ticketChangeLog', () => {
 		assert.ok(d.text.includes('- Sentence number 30 is here.'));
 		assert.ok(d.text.includes('+ Sentence number 30 was changed.'));
 		assert.strictEqual(d.truncated, false);
-		assert.ok(a.length > TICKET_CHANGE_INLINE_MAX_CHARS);
+		assert.ok(a.length > 500);
 	});
 
 	test('text stats count CJK characters as words', () => {
