@@ -6,8 +6,9 @@
 import * as cp from 'child_process';
 import { CancellationError } from '../../../base/common/errors.js';
 import { generateUuid } from '../../../base/common/uuid.js';
-import { IGitExecOptions, IGitExecResult, IGitPullOptions, ILocalGitService } from '../common/localGitService.js';
+import { IGitExecOptions, IGitExecResult, IGitPullOptions, ILocalGitService, IShellExecRequest } from '../common/localGitService.js';
 import { IRunningGitCommand, startGitCommand } from './gitCommandRunner.js';
+import { startShellCommand } from './shellCommandRunner.js';
 import { ILogService } from '../../log/common/log.js';
 
 export class LocalGitService implements ILocalGitService {
@@ -155,6 +156,17 @@ export class LocalGitService implements ILocalGitService {
 	async exec(operationId: string, args: readonly string[], options?: IGitExecOptions): Promise<IGitExecResult> {
 		this._logService.trace(`[LocalGitService] exec git ${args.join(' ')}${options?.cwd ? ` (cwd: ${options.cwd})` : ''}`);
 		const running = startGitCommand(args, options);
+		this._runningCommands.set(operationId, running);
+		try {
+			return await running.result;
+		} finally {
+			this._runningCommands.delete(operationId);
+		}
+	}
+
+	async execShell(operationId: string, request: IShellExecRequest): Promise<IGitExecResult> {
+		this._logService.trace(`[LocalGitService] exec ${request.shell} -c <script ${request.script.length} chars>${request.cwd ? ` (cwd: ${request.cwd})` : ''}`);
+		const running = startShellCommand(request);
 		this._runningCommands.set(operationId, running);
 		try {
 			return await running.result;

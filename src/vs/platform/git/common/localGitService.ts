@@ -38,6 +38,22 @@ export interface IGitExecResult {
 	readonly error?: string;
 }
 
+/** Shells the AnyAgent `shell` component can run (CI-55). */
+export type LocalShellType = 'zsh' | 'bash' | 'sh';
+
+/** Request of {@link ILocalGitService.execShell} (AnyAgent shell component, CI-55). */
+export interface IShellExecRequest {
+	readonly shell: LocalShellType;
+	/** Script passed as ONE argv entry to `<shell> -c`; never concatenated with other text. */
+	readonly script: string;
+	/** Working directory (native path). Must exist. */
+	readonly cwd?: string;
+	/** Environment variables set over the process environment (user settings and the values of {variables}). */
+	readonly env?: Readonly<Record<string, string>>;
+	readonly timeoutMs?: number;
+	readonly maxOutputBytes?: number;
+}
+
 /**
  * Low-level service for executing git commands on the local machine.
  * Used in the shared process where Node.js APIs are available.
@@ -58,4 +74,9 @@ export interface ILocalGitService {
 	 * terminal), capturing stdout, stderr, exit code and duration. Cancel it with {@link cancel}.
 	 */
 	exec(operationId: string, args: readonly string[], options?: IGitExecOptions): Promise<IGitExecResult>;
+	/**
+	 * Runs `<shell> -c <script>` (CI-55) non-interactively (stdin closed, no controlling terminal), capturing stdout,
+	 * stderr, exit code and duration; the process group is killed on timeout and on {@link cancel}.
+	 */
+	execShell(operationId: string, request: IShellExecRequest): Promise<IGitExecResult>;
 }
