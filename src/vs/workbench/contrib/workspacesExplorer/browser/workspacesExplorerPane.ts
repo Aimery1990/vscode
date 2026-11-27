@@ -4283,7 +4283,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 											'data-subfield-label': subF.label,
 											'data-subfield-type': subF.type,
 											rows: '3',
-											style: 'width: 100%; padding: 6px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff; resize: vertical;'
+											style: 'width: 100%; padding: 6px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff; resize: vertical; font-family: inherit;'
 										})));
 									} else if (subF.type === 'select') {
 										const sSelect = append(subRow, $('select.monaco-select.sub-field-input', {
@@ -4717,7 +4717,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						const ttsTextarea = append(ttsBox, $('textarea.monaco-inputbox.tts-text-input', {
 							placeholder: 'Pure listening text sent to the AI model to synthesize into speech (hidden in ticket view)...',
 							rows: 2,
-							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(236, 72, 153, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
+							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(236, 72, 153, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4; font-family: inherit;'
 						})) as HTMLTextAreaElement;
 						ttsTextarea.value = field.defaultContent || '';
 
@@ -4727,7 +4727,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						const ttsDisplayTextarea = append(ttsBox, $('textarea.monaco-inputbox.tts-display-text-input', {
 							placeholder: 'Annotated text shown to the human reader in the ticket (e.g. vocabulary notes not sent to the AI model)...',
 							rows: 3,
-							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
+							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4; font-family: inherit;'
 						})) as HTMLTextAreaElement;
 						ttsDisplayTextarea.value = field.ttsDisplayText || '';
 

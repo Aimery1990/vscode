@@ -83,7 +83,7 @@ export class AccountSignInModal extends Disposable {
 			align-items: center;
 			position: relative;
 			color: #cccccc;
-			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+			font-family: var(--vscode-font-family);
 		`;
 
 		// Close Button

@@ -157,7 +157,7 @@ export class AccountManagementDialog extends Disposable {
 			flex-direction: column;
 			overflow: hidden;
 			color: #cccccc;
-			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+			font-family: var(--vscode-font-family);
 			animation: anyagentSlideUp 0.2s ease-out;
 		`;
 

@@ -21740,7 +21740,7 @@ ${interpolatedPrompt}`;
 											)
 										)
 									),
-									part('ttsLlmTextInput', $<HTMLTextAreaElement>('textarea.tts-llm-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '3', placeholder: 'Pure listening text sent to AI model for speech synthesis...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
+									part('ttsLlmTextInput', $<HTMLTextAreaElement>('textarea.tts-llm-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '3', placeholder: 'Pure listening text sent to AI model for speech synthesis...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;' },
 										textOf(interpolatedSpeechText)
 									)),
 									$('div', { style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;' },
@@ -21789,7 +21789,7 @@ ${interpolatedPrompt}`;
 										))
 									)
 								),
-								part('ttsTextInput', $<HTMLTextAreaElement>('textarea.tts-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '4', readonly: '', placeholder: 'Reading passage with vocabulary notes and translations...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
+								part('ttsTextInput', $<HTMLTextAreaElement>('textarea.tts-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '4', readonly: '', placeholder: 'Reading passage with vocabulary notes and translations...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;' },
 									textOf(interpolatedDisplayText)
 								)),
 								part('ttsAudioPlayerMount', $('div.tts-audio-player-mount', { style: 'width: 100%; display: flex; align-items: center;' }))

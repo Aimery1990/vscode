@@ -90,7 +90,7 @@
 	overflow: hidden !important;
 	background: var(--vscode-sideBar-background, #181818);
 	color: var(--vscode-sideBar-foreground, #cccccc);
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	font-family: var(--vscode-font-family);
 }
 
 /* Ensure Custom Modules pane header action buttons are permanently visible */

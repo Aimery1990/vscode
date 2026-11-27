@@ -3380,7 +3380,7 @@ export class WorkflowPythonEditorBridge {
 		popover.style.padding = '12px';
 		popover.style.color = '#e4e4e7';
 		popover.style.fontSize = '12px';
-		popover.style.fontFamily = 'var(--monaco-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", sans-serif)';
+		popover.style.fontFamily = 'var(--vscode-font-family)';
 
 		const targetWindow = getWindow(anchorEl);
 		const rect = anchorEl.getBoundingClientRect();
