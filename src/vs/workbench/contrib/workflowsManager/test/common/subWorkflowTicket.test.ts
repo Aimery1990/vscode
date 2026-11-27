@@ -18,6 +18,8 @@ import {
 	buildSubWorkflowTicketMetadata,
 	buildSubWorkflowTicketSummary,
 	getSubWorkflowDefinitionUri,
+	getSubWorkflowMigrationRetryDelay,
+	SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS,
 	getSubWorkflowSourceFolder,
 	getUncoveredLegacySubWorkflows,
 	isLegacySubWorkflowId,
@@ -315,5 +317,12 @@ suite('subWorkflowTicket', () => {
 		const legacy = [makeDef({ id: 'subwf_1' }), makeDef({ id: 'subwf_2' }), makeDef({ id: 'subwf_2' })];
 		const tickets = [makeDef({ id: 'FINDJ-0042', legacyId: 'subwf_1', ticketFolderUri: 'file:///f' })];
 		assert.deepStrictEqual(getUncoveredLegacySubWorkflows(legacy, tickets).map(d => d.id), ['subwf_2']);
+	});
+
+	test('failed migrations are retried a few times in the same session, then on the next start', () => {
+		assert.strictEqual(getSubWorkflowMigrationRetryDelay(0), SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS[0]);
+		assert.ok(getSubWorkflowMigrationRetryDelay(1)! > getSubWorkflowMigrationRetryDelay(0)!);
+		assert.strictEqual(getSubWorkflowMigrationRetryDelay(SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS.length), undefined);
+		assert.strictEqual(getSubWorkflowMigrationRetryDelay(-1), undefined);
 	});
 });

@@ -134,11 +134,14 @@ suite('subWorkflowCallGraph (CI-38)', () => {
 		assert.strictEqual(formatCallChain(cycle!), 'Template \'Job Report\' -> Sub SW-1 (SW-1) -> Template \'Job Report\'');
 	});
 
-	test('a Sub-Workflow encapsulated from the root workflow uses the live (unsaved) nodes', async () => {
-		// The saved definition is clean, but the user just added a self call on the canvas
+	test('a Sub-Workflow is walked from its own definition, never from the canvas it was extracted from', async () => {
+		// Legacy nodes left on the parent canvas (same ids) call the Sub-Workflow, but its own definition is clean
 		const resolver = resolverOf([sub('SW-1', [{ id: 'inner' }], { nodeIds: ['inner'], sourceWorkflowUri: 'file:///main' })]);
-		const liveNodes = [callNode('capsule', 'SW-1'), callNode('inner', 'SW-1')];
-		const cycle = await findSubWorkflowCallCycle({ kind: 'workflow', key: 'file:///main', label: 'Main', nodes: liveNodes }, resolver);
+		const parentNodes = [callNode('capsule', 'SW-1'), callNode('inner', 'SW-1')];
+		assert.strictEqual(await findSubWorkflowCallCycle({ kind: 'workflow', key: 'file:///main', label: 'Main', nodes: parentNodes }, resolver), undefined);
+		// A self call saved on the Sub-Workflow's own canvas is a cycle
+		const selfCalling = resolverOf([sub('SW-1', [callNode('inner', 'SW-1')])]);
+		const cycle = await findSubWorkflowCallCycle({ kind: 'sub_workflow', key: 'SW-1' }, selfCalling);
 		assert.strictEqual(formatCallChain(cycle!), 'Sub SW-1 (SW-1) -> Sub SW-1 (SW-1)');
 	});
 

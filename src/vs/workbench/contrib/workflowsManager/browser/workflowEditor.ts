@@ -3,7 +3,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './media/workflowEditor.css';
-import { collectSubWorkflowRefsFromNodes } from '../common/subWorkflowCallGraph.js';
+import { collectSubWorkflowRefsFromNodes, SubWorkflowCallGraphRoot } from '../common/subWorkflowCallGraph.js';
+import { buildExtractInputBindings, buildSubWorkflowCallNode, collectCanvasVariableNames, extractSubWorkflowFromCanvas, findVariablesUsedOutsideSelection } from '../common/subWorkflowExtract.js';
+import { getSubWorkflowDefinitionUri } from '../common/subWorkflowTicket.js';
 import { $, append, clearNode, h, addDisposableListener, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
 import { isCodeEditor } from '../../../../editor/browser/editorBrowser.js';
@@ -531,8 +533,11 @@ export class WorkflowEditor extends EditorPane {
 	private _flowchartOwnerRegistration: { dispose(): void } | undefined;
 	private _flowchartJsonUri: URI | undefined;
 	private _data: IFlowchartData = { nodes: [], links: [] };
-	/** Set when this editor shows a single Sub-Workflow region (SubWorkflowCanvasEditorInput) instead of the whole canvas. */
-	private _focusSubWorkflowId: string | undefined;
+	/**
+	 * Set when this editor shows a Sub-Workflow ticket's own canvas (SubWorkflowCanvasEditorInput): `_workflowUri` is the
+	 * ticket folder, the canvas is read from / saved to `.agents/sub_workflow.json` through the execution service.
+	 */
+	private _subWorkflowTicket: { id: string; legacyId?: string; sourceWorkflowUri?: string } | undefined;
 	private _peerRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// UI State
@@ -865,11 +870,23 @@ export class WorkflowEditor extends EditorPane {
 		if (this._isPureDiagram) {
 			this._workflowUri = maybeDiagramInput.diagramUri || maybeDiagramInput.resource || URI.file('');
 			this._flowchartJsonUri = this._workflowUri;
+		} else if (input instanceof SubWorkflowCanvasEditorInput) {
+			this._workflowUri = input.ticketFolderUri;
+			this._flowchartJsonUri = getSubWorkflowDefinitionUri(input.ticketFolderUri);
 		} else {
 			this._workflowUri = (input as WorkflowEditorInput).workflowUri;
 			this._flowchartJsonUri = URI.joinPath(this._workflowUri, '.agents', 'workflow_flowchart.json');
 		}
-		this._focusSubWorkflowId = input instanceof SubWorkflowCanvasEditorInput ? input.subWorkflowId : undefined;
+		this._subWorkflowTicket = undefined;
+		if (input instanceof SubWorkflowCanvasEditorInput) {
+			// Its latest saved definition (also makes sure the execution service knows the ticket, for saving)
+			const def = await this._workflowExecutionService.loadSubWorkflowTicket(input.ticketFolderUri);
+			const folderName = input.ticketFolderUri.path.split('/').filter(Boolean).pop() || '';
+			this._subWorkflowTicket = { id: def?.id || folderName, legacyId: def?.legacyId, sourceWorkflowUri: def?.sourceWorkflowUri };
+			if (!def) {
+				this._notificationService.warn(`The Sub-Workflow definition ${this._flowchartJsonUri.toString()} is missing or invalid; changes on this canvas cannot be saved.`);
+			}
+		}
 
 		// This editor is now the exclusive writer of workflow_flowchart.json (prevents background stale write-backs)
 		this._flowchartOwnerRegistration?.dispose();
@@ -880,7 +897,7 @@ export class WorkflowEditor extends EditorPane {
 		await this._loadFlowchartData();
 		const hasSavedViewport = WorkflowEditor._viewportStateByUri.has(this._getViewportKey());
 		this._renderEditor();
-		if (this._focusSubWorkflowId && !hasSavedViewport) {
+		if (this._subWorkflowTicket && !hasSavedViewport) {
 			// First time this Sub-Workflow canvas is shown: frame its nodes
 			setTimeout(() => this._fitView(), 80);
 		}
@@ -922,8 +939,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _getViewportKey(): string {
-		const base = this._workflowUri?.toString() || '';
-		return base && this._focusSubWorkflowId ? `${base}#subworkflow=${this._focusSubWorkflowId}` : base;
+		return this._workflowUri?.toString() || '';
 	}
 
 	private async _loadFlowchartData(): Promise<void> {
@@ -1037,8 +1053,8 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 
-				// Sync back to snapshot if missing in snapshot
-				if (this._workflowUri) {
+				// Sync back to snapshot if missing in snapshot (a Sub-Workflow ticket keeps its definition file only)
+				if (this._workflowUri && !this._subWorkflowTicket) {
 					const snapshot = this._entityPersistenceService.getSnapshot(this._workflowUri);
 					if (snapshot && (!snapshot.customMetadata || !snapshot.customMetadata['flowchartJson'])) {
 						snapshot.customMetadata = {
@@ -1048,6 +1064,10 @@ export class WorkflowEditor extends EditorPane {
 						await this._entityPersistenceService.saveSnapshot(snapshot);
 					}
 				}
+			} else if (this._subWorkflowTicket) {
+				// A Sub-Workflow ticket without a definition file: an empty canvas, written on the first edit
+				this._data = { nodes: [], links: [], routingMode: 'orthogonal' };
+				this._activeRoutingMode = 'orthogonal';
 			} else {
 				// Check if snapshot has flowchartJson backup first
 				let restored = false;
@@ -1108,8 +1128,9 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _saveFlowchartTimer: ReturnType<typeof setTimeout> | null = null;
-	private _isSyncingOwnSubWorkflows = false;
 	private _saveFlowchartPendingSkipHistory: boolean = true;
+	/** True while this (Sub-Workflow) canvas saves its own definition: the change event it fires needs no redraw. */
+	private _isSavingSubWorkflowCanvas = false;
 	private _nodeComponentRenderRaf: number | null = null;
 
 	private async _saveFlowchartData(skipHistory: boolean = false, immediate: boolean = false): Promise<void> {
@@ -1157,39 +1178,30 @@ export class WorkflowEditor extends EditorPane {
 				this._lastSavedStateJson = jsonStr;
 			}
 
+			if (this._subWorkflowTicket) {
+				// A Sub-Workflow's own canvas: saved as its ticket definition (sub_workflow.json + ticket.md summary); every
+				// caller loads this latest version at run time
+				let saved: ISubWorkflowDefinition | undefined;
+				this._isSavingSubWorkflowCanvas = true;
+				try {
+					saved = this._workflowExecutionService.saveSubWorkflowCanvas(this._subWorkflowTicket.id, this._data);
+				} finally {
+					this._isSavingSubWorkflowCanvas = false;
+				}
+				if (!saved) {
+					this._notificationService.error(`Sub-Workflow ${this._subWorkflowTicket.id} was not found; the canvas was not saved.`);
+					return;
+				}
+				this._syncPeerEditors();
+				void this._reportSubWorkflowCallCycle(this._workflowUri!);
+				return;
+			}
+
 			await this._fileService.writeFile(this._flowchartJsonUri, VSBuffer.fromString(jsonStr));
-			// Keep other open canvases of this workflow (e.g. a focused Sub-Workflow canvas) on the same data and redraw them
+			// Keep other open canvases of this workflow on the same data and redraw them
 			this._syncPeerEditors();
 
 			if (this._workflowUri) {
-				// 1. Immediately sync any encapsulated Sub-Workflows owned by this workflow so subWorkflows.library NEVER goes stale
-				try {
-					const curUriStr = this._workflowUri.toString();
-					const ownedSubs = this._workflowExecutionService.getSubWorkflows().filter(sw => sw && sw.sourceWorkflowUri === curUriStr && Array.isArray(sw.nodeIds) && sw.nodeIds.length > 0);
-					this._isSyncingOwnSubWorkflows = true;
-					try {
-						for (const sw of ownedSubs) {
-							const idSet = new Set(sw.nodeIds);
-							const liveSubNodes = (this._data.nodes || []).filter(n => idSet.has(n.id));
-							if (liveSubNodes.length === 0) { continue; }
-							const liveSubLinks = (this._data.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
-							const nextNodesJson = JSON.stringify(liveSubNodes);
-							const nextLinksJson = JSON.stringify(liveSubLinks);
-							if (JSON.stringify(sw.nodes || []) === nextNodesJson && JSON.stringify(sw.links || []) === nextLinksJson) {
-								continue;
-							}
-							this._workflowExecutionService.saveSubWorkflow({
-								...sw,
-								nodes: JSON.parse(nextNodesJson),
-								links: JSON.parse(nextLinksJson),
-								updatedAt: Date.now()
-							});
-						}
-					} finally {
-						this._isSyncingOwnSubWorkflows = false;
-					}
-				} catch { }
-
 				// 2. Persist lightweight structural copy into Entity Persistence Snapshot (strip multi-MB voice audioDataUrl already saved in workflow_flowchart.json)
 				const snapshot = this._entityPersistenceService.getSnapshot(this._workflowUri);
 				if (snapshot) {
@@ -1224,7 +1236,10 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 		const uriStr = workflowUri.toString();
-		const cycleError = await this._workflowExecutionService.checkSubWorkflowCallCycle({ kind: 'workflow', key: uriStr, label: this.input?.getName() || uriStr, nodes }, uriStr);
+		const root: SubWorkflowCallGraphRoot = this._subWorkflowTicket
+			? { kind: 'sub_workflow', key: this._subWorkflowTicket.id }
+			: { kind: 'workflow', key: uriStr, label: this.input?.getName() || uriStr, nodes };
+		const cycleError = await this._workflowExecutionService.checkSubWorkflowCallCycle(root, uriStr);
 		if (cycleError && cycleError !== this._lastReportedCycleError) {
 			this._notificationService.error(`This workflow is invalid: ${cycleError}`);
 		}
@@ -1310,8 +1325,10 @@ export class WorkflowEditor extends EditorPane {
 
 		let renderPending = false;
 		// Live Sub-Workflow progress: its nodes live on this canvas (shown via lightbulb or a focused Sub-Workflow tab)
+		// Live progress of a call of this Sub-Workflow (shown on its own canvas)
 		this._contentDisposables.add(this._workflowExecutionService.onDidChangeSubWorkflowRun(run => {
-			if (this._workflowUri && run.workflowUri === this._workflowUri.toString()) {
+			const own = this._subWorkflowTicket;
+			if (own && run.subWorkflowId && (run.subWorkflowId === own.id || run.subWorkflowId === own.legacyId)) {
 				this._scheduleCanvasRefresh();
 			}
 		}));
@@ -1486,7 +1503,7 @@ export class WorkflowEditor extends EditorPane {
 			this._contentDisposables.add(this._editorService.onDidEditorsChange(scheduleOutlineRerender));
 			this._contentDisposables.add(this._workflowExecutionService.onDidChangeSubWorkflows(() => {
 				this._renderSubWorkflowDropdown();
-				if (this._isSyncingOwnSubWorkflows || this._hasActiveInlineNodeEditor()) {
+				if (this._isSavingSubWorkflowCanvas || this._hasActiveInlineNodeEditor()) {
 					return;
 				}
 				this._renderNodes();
@@ -8417,8 +8434,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _fitView(): void {
-		const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
-		const visibleNodes = (this._data?.nodes || []).filter(n => !hiddenSubWfNodeIds.has(n.id));
+		const visibleNodes = this._data?.nodes || [];
 		if (!visibleNodes.length || !this._canvas) {
 			this._setZoom(1.0);
 			return;
@@ -8454,10 +8470,15 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	/** The latest call of this Sub-Workflow (live while it runs); only on a Sub-Workflow's own canvas. */
+	private _getOwnSubWorkflowRun(): IWorkflowExecutionRun | undefined {
+		return this._subWorkflowTicket ? this._workflowExecutionService.getActiveSubWorkflowRun(this._subWorkflowTicket.id) : undefined;
+	}
+
 	private _getEffectiveRunForNode(nodeId: string): IWorkflowExecutionRun | undefined {
 		const mainRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
-		const subRun = this._workflowExecutionService.getLatestSubWorkflowRunForNode(nodeId, this._workflowUri?.toString());
-		if (!subRun) {
+		const subRun = this._getOwnSubWorkflowRun();
+		if (!subRun || !subRun.nodeStates?.[nodeId]) {
 			return mainRun;
 		}
 		if (!mainRun) {
@@ -8475,9 +8496,8 @@ export class WorkflowEditor extends EditorPane {
 
 	private _getEffectiveRunForLink(link: IFlowchartLink): IWorkflowExecutionRun | undefined {
 		const mainRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
-		const subRun = this._workflowExecutionService.getLatestSubWorkflowRunForNode(link.from, this._workflowUri?.toString())
-			|| this._workflowExecutionService.getLatestSubWorkflowRunForNode(link.to, this._workflowUri?.toString());
-		if (!subRun) {
+		const subRun = this._getOwnSubWorkflowRun();
+		if (!subRun || (!subRun.nodeStates?.[link.from] && !subRun.nodeStates?.[link.to])) {
 			return mainRun;
 		}
 		if (!mainRun) {
@@ -10091,53 +10111,12 @@ export class WorkflowEditor extends EditorPane {
 		};
 	}
 
-	private _getNodeSubWorkflowNamespace(nodeId: string): string | undefined {
-		const curUri = this._workflowUri?.toString() || '';
-		if (!curUri || !nodeId) {
-			return undefined;
-		}
-		const allSubs = this._workflowExecutionService.getSubWorkflows();
-		for (const sw of allSubs) {
-			if (sw.sourceWorkflowUri === curUri && Array.isArray(sw.nodeIds) && sw.nodeIds.includes(nodeId)) {
-				return sw.namespace || sw.id;
-			}
-		}
-		return undefined;
-	}
-
-	private _getHiddenSubWorkflowNodeIds(): Set<string> {
-		const hidden = new Set<string>();
-		const curUri = this._workflowUri?.toString() || '';
-		if (!curUri) {
-			return hidden;
-		}
-		if (this._focusSubWorkflowId) {
-			// Focused Sub-Workflow canvas: show exactly that Sub-Workflow's nodes (regardless of its lightbulb state) and hide everything else
-			const focusSub = this._workflowExecutionService.getSubWorkflowById(this._focusSubWorkflowId);
-			const keep = new Set(Array.isArray(focusSub?.nodeIds) ? focusSub!.nodeIds : []);
-			if (keep.size > 0) {
-				for (const n of (this._data?.nodes || [])) {
-					if (!keep.has(n.id)) {
-						hidden.add(n.id);
-					}
-				}
-				return hidden;
-			}
-		}
-		const allSubs = this._workflowExecutionService.getSubWorkflows();
-		for (const sw of allSubs) {
-			if (sw.sourceWorkflowUri === curUri && sw.isHiddenInSource && Array.isArray(sw.nodeIds)) {
-				for (const nid of sw.nodeIds) {
-					hidden.add(nid);
-				}
-			}
-		}
-		return hidden;
-	}
-
 	/**
-	 * Encapsulates the selected nodes as a Sub-Workflow: creates a `sub_workflow` ticket inside this workflow's folder
-	 * (normal ticket numbering, e.g. FINDJ-0042) whose folder stores the definition (CI-23).
+	 * Encapsulates the selected nodes as a Sub-Workflow, as an "extract" refactor (CI-23): creates a `sub_workflow`
+	 * ticket inside the workflow folder (normal ticket numbering, e.g. FINDJ-0042) holding the selected nodes and their
+	 * internal links, then replaces them on this canvas with ONE node whose Call Sub-Workflow step references the new
+	 * ticket ID (inputs bound to same-named variables). Links crossing the selection border are rewired to that node.
+	 * The parent canvas is only changed after the ticket exists.
 	 */
 	private async _encapsulateNodesAsSubWorkflow(nodeIds: string[], rawName: string): Promise<ISubWorkflowDefinition | undefined> {
 		const cleanName = rawName.trim();
@@ -10145,37 +10124,41 @@ export class WorkflowEditor extends EditorPane {
 			this._notificationService.warn('Please enter a name for the Sub-Workflow.');
 			return undefined;
 		}
-		const idSet = new Set(nodeIds);
-		const subNodes = (this._data.nodes || []).filter(n => idSet.has(n.id));
-		if (subNodes.length === 0) {
-			this._notificationService.warn('Select at least one node to encapsulate as a Sub-Workflow.');
-			return undefined;
-		}
-		const subLinks = (this._data.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
-		const contract = this._workflowExecutionService.resolveWorkflowIOContract({ nodes: subNodes, links: subLinks });
-
 		const curUri = this._workflowUri?.toString() || '';
 		if (!curUri) {
 			this._notificationService.warn('Save the workflow first: a Sub-Workflow is stored as a ticket inside the workflow folder.');
 			return undefined;
 		}
-		const wfName = this.input?.getName() || 'Workflow';
+		const newId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+		const callNodeId = newId('node');
+		const placeholder = (frame: { x: number; y: number; width: number; height: number }): IFlowchartNode => ({ id: callNodeId, type: 'round-rect', ...frame, label: cleanName });
+		const plan = extractSubWorkflowFromCanvas<IFlowchartNode, IFlowchartLink>(this._data.nodes || [], this._data.links || [], nodeIds, placeholder);
+		if (plan.error !== undefined) {
+			this._notificationService.warn(plan.error);
+			return undefined;
+		}
+		const contract = this._workflowExecutionService.resolveWorkflowIOContract({ nodes: plan.subNodes, links: plan.subLinks });
+
+		// On a Sub-Workflow's own canvas, the new ticket goes next to it (inside the same workflow folder)
+		const sourceUri = this._subWorkflowTicket?.sourceWorkflowUri || curUri;
 		const now = Date.now();
 		const draft: ISubWorkflowDefinition = {
 			id: '',
 			name: cleanName,
 			namespace: sanitizePythonVarName(cleanName) || `subwf_${now}`,
-			sourceWorkflowUri: curUri,
-			sourceWorkflowName: wfName,
-			nodeIds: subNodes.map(n => n.id),
-			nodes: JSON.parse(JSON.stringify(subNodes)),
-			links: JSON.parse(JSON.stringify(subLinks)),
+			sourceWorkflowUri: sourceUri,
+			sourceWorkflowName: this._subWorkflowTicket ? undefined : (this.input?.getName() || 'Workflow'),
+			nodeIds: plan.subNodes.map(n => n.id),
+			nodes: JSON.parse(JSON.stringify(plan.subNodes)),
+			links: JSON.parse(JSON.stringify(plan.subLinks)),
 			inputs: contract.inputs,
 			outputs: contract.outputs,
-			isHiddenInSource: false,
 			createdAt: now,
 			updatedAt: now
 		};
+		if (!draft.sourceWorkflowName) {
+			delete draft.sourceWorkflowName;
+		}
 
 		let def: ISubWorkflowDefinition;
 		try {
@@ -10184,39 +10167,59 @@ export class WorkflowEditor extends EditorPane {
 			this._notificationService.error(`Could not create the Sub-Workflow ticket for '${cleanName}': ${err instanceof Error ? err.message : String(err)}`);
 			return undefined;
 		}
-		this._notificationService.info(`Encapsulated '${cleanName}' as Sub-Workflow ticket ${def.id} (${subNodes.length} node(s), ${contract.inputs.length} input(s), ${contract.outputs.length} output(s)).`);
+
+		// The canvas may have changed while the ticket was created: rewrite the current data, and only when every
+		// extracted node is still there (otherwise the parent is left as is and the user is told)
+		const currentIds = new Set((this._data.nodes || []).map(n => n.id));
+		if (draft.nodeIds.some(id => !currentIds.has(id))) {
+			this._notificationService.warn(`Sub-Workflow ticket ${def.id} '${cleanName}' was created, but the selected nodes changed meanwhile, so they were not replaced on this canvas. Add a Call Sub-Workflow step for ${def.id} where needed.`);
+			return def;
+		}
+		const result = extractSubWorkflowFromCanvas<IFlowchartNode, IFlowchartLink>(this._data.nodes || [], this._data.links || [], draft.nodeIds, placeholder);
+		if (result.error !== undefined) {
+			this._notificationService.warn(`Sub-Workflow ticket ${def.id} was created, but this canvas could not be updated: ${result.error}`);
+			return def;
+		}
+		const remainingNodes = result.parentNodes.filter(n => n.id !== callNodeId);
+		const bindings = buildExtractInputBindings(def.inputs || [], collectCanvasVariableNames(remainingNodes));
+		const callNode = buildSubWorkflowCallNode({
+			nodeId: callNodeId,
+			stepId: newId('step'),
+			componentId: newId('comp'),
+			frame: { x: result.callNode.x, y: result.callNode.y, width: result.callNode.width, height: result.callNode.height },
+			subWorkflow: { id: def.id, name: def.name, sourceWorkflowUri: def.sourceWorkflowUri, inputs: def.inputs || [], outputs: def.outputs || [] },
+			inputBindings: bindings
+		}) as IFlowchartNode;
+		for (const step of callNode.pipeline || []) {
+			this._syncComponentStepMetadata(step);
+		}
+		this._ensureNodeFitsPipeline(callNode);
+		this._data.nodes = result.parentNodes.map(n => n.id === callNodeId ? callNode : n);
+		this._data.links = result.parentLinks;
+		this._selectedNodeIds.clear();
+		this._selectedNodeIds.add(callNodeId);
+		this._selectedLinkIds.clear();
+		await this._saveFlowchartData(false, true);
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+
+		const notes = [...result.warnings];
+		const leaked = findVariablesUsedOutsideSelection(plan.subNodes, remainingNodes);
+		if (leaked.length > 0) {
+			notes.push(`Other nodes still use ${leaked.map(v => `'${v}'`).join(', ')}, set inside the extracted nodes: read them from the call step result '${callNode.pipeline?.[0]?.component?.outputVariableName || def.name}' instead.`);
+		}
+		const unbound = Object.entries(bindings).filter(([, v]) => !v).map(([k]) => k);
+		if (unbound.length > 0) {
+			notes.push(`Input(s) ${unbound.join(', ')} use their default value (no variable of the same name on this canvas).`);
+		}
+		this._notificationService.info(`Extracted ${draft.nodeIds.length} node(s) into Sub-Workflow ticket ${def.id} '${cleanName}' (${def.inputs.length} input(s), ${def.outputs.length} output(s)); one node calling it replaces them here.${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`);
 		return def;
 	}
 
-	private _refreshSubWorkflowFromLiveCanvas(subWorkflowId: string, persistIfChanged: boolean = true): ISubWorkflowDefinition | undefined {
-		const sw = this._workflowExecutionService.getSubWorkflowById(subWorkflowId);
-		if (!sw) {
-			return undefined;
-		}
-		const curUri = this._workflowUri?.toString() || '';
-		if (curUri && sw.sourceWorkflowUri === curUri && Array.isArray(sw.nodeIds) && sw.nodeIds.length > 0) {
-			const idSet = new Set(sw.nodeIds);
-			const subNodes = (this._data?.nodes || []).filter(n => idSet.has(n.id));
-			if (subNodes.length > 0) {
-				const subLinks = (this._data?.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
-				const contract = this._workflowExecutionService.resolveWorkflowIOContract({ nodes: subNodes, links: subLinks });
-				const prevInputsJson = JSON.stringify(sw.inputs || []);
-				const prevOutputsJson = JSON.stringify(sw.outputs || []);
-				sw.nodes = JSON.parse(JSON.stringify(subNodes));
-				sw.links = JSON.parse(JSON.stringify(subLinks));
-				sw.inputs = contract.inputs;
-				sw.outputs = contract.outputs;
-				if (persistIfChanged || prevInputsJson !== JSON.stringify(sw.inputs) || prevOutputsJson !== JSON.stringify(sw.outputs)) {
-					sw.updatedAt = Date.now();
-					this._workflowExecutionService.saveSubWorkflow(sw);
-				}
-			}
-		}
-		return sw;
-	}
-
-	private _addSubWorkflowCapsuleToNode(node: IFlowchartNode, rawSubDef: ISubWorkflowDefinition, insertIndex?: number): void {
-		const subDef = this._refreshSubWorkflowFromLiveCanvas(rawSubDef.id) || rawSubDef;
+	private _addSubWorkflowCapsuleToNode(node: IFlowchartNode, subDef: ISubWorkflowDefinition, insertIndex?: number): void {
 		if (!node.pipeline) {
 			node.pipeline = [];
 		}
@@ -10276,14 +10279,12 @@ export class WorkflowEditor extends EditorPane {
 		clearNode(this._subWorkflowWidgetEl);
 		this._outlineOverscrollDisposables.clear();
 		this._outlineOverscrollLists = [];
-		const curUri = this._workflowUri?.toString() || '';
-		const allSubs = curUri
-			? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri)
-			: [];
+		const curUri = this._libraryHomeUri();
+		const ownId = this._subWorkflowTicket?.id;
+		const callable = this._workflowExecutionService.getSubWorkflows().filter(sw => sw.id !== ownId);
+		const allSubs = curUri ? callable.filter(sw => sw.sourceWorkflowUri === curUri) : [];
 		// Sub-Workflow tickets of other workflows: callable from here too (by ticket ID)
-		const otherSubs = curUri
-			? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri !== curUri)
-			: [];
+		const otherSubs = curUri ? callable.filter(sw => sw.sourceWorkflowUri !== curUri) : [];
 
 		const triggerBtn = append(this._subWorkflowWidgetEl, $(`button.wf-subworkflow-trigger-btn${this._isSubWorkflowDropdownOpen ? '.is-open' : ''}`, {
 			type: 'button',
@@ -10389,10 +10390,10 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
-		// Sub-Workflow library (insert / drag into nodes, show-hide region, delete): kept, but collapsed and compact
+		// Sub-Workflow library (insert / drag into nodes, show / hide its own canvas, delete): collapsed and compact
 		const libToggle = append(panel, $(`button.wf-outline-section-toggle${this._outlineLibraryOpen ? '.is-open' : ''}`, {
 			type: 'button',
-			title: 'Sub-Workflow tickets (type sub_workflow): click a name to show / hide it; drag it onto a node (or select a node and press +) to call it by its ticket ID'
+			title: 'Sub-Workflow tickets (type sub_workflow): click a name to show / hide its own canvas (to view and edit it); drag it onto a node (or select a node and press +) to call it by its ticket ID'
 		})) as HTMLButtonElement;
 		append(libToggle, $('span' + ThemeIcon.asCSSSelector(this._outlineLibraryOpen ? Codicon.chevronDown : Codicon.chevronRight)));
 		append(libToggle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
@@ -10439,7 +10440,7 @@ export class WorkflowEditor extends EditorPane {
 			const idText = isTicket ? `Ticket ${sw.id}` : `Legacy ${sw.id} (not migrated to a ticket yet)`;
 			const sourceText = isFromCurrentCanvas ? '' : ` · from ${sw.sourceWorkflowName || 'another workflow'}`;
 			const infoWrap = append(row, $('.wf-subworkflow-info'));
-			infoWrap.title = `Click to show / hide '${sw.name}' below the canvas. To use it, drag it onto a node, or select a node and press +\n${idText}${sourceText}\n${sw.inputs.length} input(s) · ${sw.outputs.length} output(s)`;
+			infoWrap.title = `Click to show / hide the canvas of '${sw.name}' below this one (view and edit it there). To use it, drag it onto a node, or select a node and press +\n${idText}${sourceText}\n${sw.inputs.length} input(s) · ${sw.outputs.length} output(s)`;
 			append(infoWrap, $('.wf-subworkflow-name', {}, sw.name));
 			append(infoWrap, $('.wf-subworkflow-meta', {}, `${isTicket ? sw.id : 'legacy'} · ${sw.inputs.length} in · ${sw.outputs.length} out${sourceText}`));
 			infoWrap.onclick = (e) => {
@@ -10494,8 +10495,8 @@ export class WorkflowEditor extends EditorPane {
 	// ---------------------------------------------------------------------------------------------
 
 	private _renderWorkflowOutline(panel: HTMLElement): void {
-		const focusDef = this._focusSubWorkflowId ? this._workflowExecutionService.getSubWorkflowById(this._focusSubWorkflowId) : undefined;
-		const scopeText = this._focusSubWorkflowId ? `Nodes of Sub-Workflow '${focusDef?.name || this._focusSubWorkflowId}'` : 'Nodes on canvas';
+		const ownDef = this._subWorkflowTicket ? this._workflowExecutionService.getSubWorkflowById(this._subWorkflowTicket.id) : undefined;
+		const scopeText = this._subWorkflowTicket ? `Nodes of Sub-Workflow '${ownDef?.name || this._subWorkflowTicket.id}'` : 'Nodes on canvas';
 		append(panel, $('.wf-outline-section-label', {}, `${scopeText} · click: locate on the flowchart, show details, expand`));
 
 		const columnsEl = append(panel, $('.wf-outline-columns'));
@@ -10787,27 +10788,23 @@ export class WorkflowEditor extends EditorPane {
 		return newGroup.id;
 	}
 
+	/**
+	 * The workflow whose Sub-Workflows the library lists first: this workflow, or for a Sub-Workflow's own canvas the
+	 * workflow it belongs to (its siblings).
+	 */
+	private _libraryHomeUri(): string {
+		return this._subWorkflowTicket?.sourceWorkflowUri || this._workflowUri?.toString() || '';
+	}
+
 	private _outlineSubWorkflowsOfCanvas(): ISubWorkflowDefinition[] {
-		const curUri = this._workflowUri?.toString() || '';
-		return curUri ? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri) : [];
+		const curUri = this._libraryHomeUri();
+		const ownId = this._subWorkflowTicket?.id;
+		return curUri ? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri && sw.id !== ownId) : [];
 	}
 
 	private _buildOutlineRootItems(): IWfOutlineItem[] {
-		if (this._focusSubWorkflowId) {
-			const focusDef = this._workflowExecutionService.getSubWorkflowById(this._focusSubWorkflowId);
-			const focusItem = this._outlineSubWorkflowItem(this._focusSubWorkflowId, focusDef?.name || this._focusSubWorkflowId, 'focus', new Set<string>(), '');
-			const nodes = focusItem.children ? focusItem.children() : [];
-			return Array.isArray(nodes) ? nodes : [];
-		}
 		const subs = this._outlineSubWorkflowsOfCanvas();
-		const nodesInSubWorkflows = new Set<string>();
-		for (const sw of subs) {
-			for (const id of sw.nodeIds || []) {
-				nodesInSubWorkflows.add(id);
-			}
-		}
-		// Nodes of a Sub-Workflow are listed under the capsule that calls it
-		const topNodes = (this._data?.nodes || []).filter(n => !nodesInSubWorkflows.has(n.id)).sort((a, b) => (a.y - b.y) || (a.x - b.x));
+		const topNodes = [...(this._data?.nodes || [])].sort((a, b) => (a.y - b.y) || (a.x - b.x));
 		const items = topNodes.map(n => this._outlineNodeItem(n, 'root', true, new Set<string>(), undefined));
 
 		const calledSubIds = new Set<string>();
@@ -10860,7 +10857,10 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _outlineSubWorkflowShowHide(subWorkflowId: string): Pick<IWfOutlineItem, 'open' | 'isShown' | 'hide'> {
-		const isFlowEditor = (e: EditorInput) => e instanceof SubWorkflowCanvasEditorInput && !e.isDisposed() && e.subWorkflowId === subWorkflowId;
+		const isFlowEditor = (e: EditorInput) => {
+			const folder = this._workflowExecutionService.getSubWorkflowById(subWorkflowId)?.ticketFolderUri;
+			return e instanceof SubWorkflowCanvasEditorInput && !e.isDisposed() && !!folder && e.ticketFolderUri.toString() === folder;
+		};
 		return {
 			open: () => this._openOutlineSubWorkflow(subWorkflowId),
 			isShown: () => this._isEditorOpen(isFlowEditor),
@@ -10941,27 +10941,18 @@ export class WorkflowEditor extends EditorPane {
 					return [];
 				}
 				const nextVisited = new Set(visitedSubs).add(subWorkflowId);
-				const isOnThisCanvas = def.sourceWorkflowUri === (this._workflowUri?.toString() || '');
-				const liveById = new Map((this._data?.nodes || []).map(n => [n.id, n] as const));
-				const nodes: IFlowchartNode[] = isOnThisCanvas
-					? (def.nodeIds || []).map(id => liveById.get(id) || subWorkflowSnapshotNodes(def).find(sn => sn?.id === id)).filter((n): n is IFlowchartNode => !!n)
-					: subWorkflowSnapshotNodes(def).filter((n): n is IFlowchartNode => !!n);
+				// Its own definition (its canvas), never nodes of the canvas it was extracted from
+				const nodes: IFlowchartNode[] = subWorkflowSnapshotNodes(def).filter((n): n is IFlowchartNode => !!n);
 				return [...nodes]
 					.sort((a, b) => (a.y - b.y) || (a.x - b.x))
-					.map(n => this._outlineNodeItem(n, itemKey, isOnThisCanvas && liveById.has(n.id), nextVisited, subWorkflowId));
+					.map(n => this._outlineNodeItem(n, itemKey, false, nextVisited, subWorkflowId));
 			},
 			...this._outlineSubWorkflowShowHide(subWorkflowId)
 		};
 	}
 
 	private async _openOutlineSubWorkflow(subWorkflowId: string): Promise<EditorInput> {
-		// Shown in its own split below the canvas, so its region no longer needs to be expanded on the main canvas
-		const def = this._workflowExecutionService.getSubWorkflowById(subWorkflowId);
-		if (def && !def.isHiddenInSource && def.sourceWorkflowUri === this._workflowUri?.toString()) {
-			def.isHiddenInSource = true;
-			def.updatedAt = Date.now();
-			this._workflowExecutionService.saveSubWorkflow(def);
-		}
+		// Its own canvas, in a split below this one
 		return openSubWorkflowLiveView(this._editorService, this._editorGroupService, this._workflowExecutionService, subWorkflowId, {
 			parentWorkflowUri: this._workflowUri?.toString(),
 			preserveFocus: true,
@@ -11101,7 +11092,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			};
 		});
-		const ownerSub = this._outlineSubWorkflowsOfCanvas().find(sw => (sw.nodeIds || []).includes(node.id));
+		const ownerSub = this._subWorkflowTicket ? this._workflowExecutionService.getSubWorkflowById(this._subWorkflowTicket.id) : undefined;
 		const workflowName = this.input?.getName() || decodeURIComponent(this._workflowUri?.path.split('/').filter(Boolean).pop() || 'Workflow');
 		const virtualModule = {
 			id: `wf_node_${node.id}`,
@@ -11208,16 +11199,32 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 		if (!deepestShown && allowOpen && deepest.ownerSubWorkflowId) {
-			this._openOutlineSubWorkflow(deepest.ownerSubWorkflowId)
-				.then(() => setTimeout(() => this._locateOnCanvas(targets, false), 500))
+			// A node of a Sub-Workflow lives on that Sub-Workflow's own canvas: open it and highlight the node there
+			const ownerId = deepest.ownerSubWorkflowId;
+			this._openOutlineSubWorkflow(ownerId)
+				.then(input => setTimeout(() => {
+					if (!(input instanceof SubWorkflowCanvasEditorInput)) {
+						return;
+					}
+					const subUri = input.ticketFolderUri.toString();
+					WorkflowEditor._outlineLocated.set(subUri, { targets: targets.filter(t => t.ownerSubWorkflowId === ownerId), owner: this });
+					for (const ed of WorkflowEditor._openWorkflowEditors) {
+						if (!ed._isPureDiagram && ed._workflowUri?.toString() === subUri) {
+							ed._applyOutlineLocateHighlight(true);
+						}
+					}
+				}, 500))
 				.catch(() => { /* nothing to highlight */ });
 		}
 	}
 
 	private _clearOutlineLocate(): void {
-		const uri = this._workflowUri?.toString();
 		this._outlineSelectedKey = undefined;
-		if (uri && WorkflowEditor._outlineLocated.get(uri)?.owner === this) {
+		// This canvas and any Sub-Workflow canvas it highlighted nodes on
+		for (const [uri, located] of Array.from(WorkflowEditor._outlineLocated)) {
+			if (located.owner !== this) {
+				continue;
+			}
 			WorkflowEditor._outlineLocated.delete(uri);
 			for (const ed of WorkflowEditor._openWorkflowEditors) {
 				if (ed._workflowUri?.toString() === uri) {
@@ -11251,7 +11258,7 @@ export class WorkflowEditor extends EditorPane {
 		located.targets.forEach((target, i) => {
 			const nodeDom = this._getNodeDom(target.nodeId);
 			if (!nodeDom) {
-				return; // not rendered here (e.g. inside a hidden Sub-Workflow region, or another Sub-Workflow's canvas)
+				return; // not rendered here (e.g. a node of another Sub-Workflow's canvas)
 			}
 			const nodeEl = nodeDom.nodeEl;
 			nodeEl.classList.add('wf-outline-locate-node');
@@ -11402,12 +11409,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
-
 		for (const node of this._data.nodes) {
-			if (hiddenSubWfNodeIds.has(node.id)) {
-				continue;
-			}
 			if (this._deduplicateNodePipeline(node)) {
 				this._saveFlowchartData();
 			}
@@ -14640,7 +14642,6 @@ export class WorkflowEditor extends EditorPane {
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
 			const fromPort = this._tempLinkFromPort || 'right';
-			const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
 
 			// Check for target node snapping (ONLY visible nodes; prefer directly hovered DOM node first)
 			let snapNode: IFlowchartNode | undefined;
@@ -14650,7 +14651,7 @@ export class WorkflowEditor extends EditorPane {
 			const hoveredNodeEl = hoveredTarget?.closest('.workflow-node') as HTMLElement | null;
 			if (hoveredNodeEl) {
 				const hoveredNodeId = hoveredNodeEl.getAttribute('data-node-id');
-				if (hoveredNodeId && hoveredNodeId !== this._tempLinkFromNodeId && !hiddenSubWfNodeIds.has(hoveredNodeId)) {
+				if (hoveredNodeId && hoveredNodeId !== this._tempLinkFromNodeId) {
 					snapNode = this._data.nodes.find(n => n.id === hoveredNodeId);
 					if (snapNode && hoveredPortEl) {
 						const classes = Array.from(hoveredPortEl.classList);
@@ -14662,7 +14663,7 @@ export class WorkflowEditor extends EditorPane {
 			if (!snapNode) {
 				let bestNodeDist = Infinity;
 				for (const node of this._data.nodes) {
-					if (node.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(node.id)) { continue; }
+					if (node.id === this._tempLinkFromNodeId) { continue; }
 					// Detect if cursor is near or inside visible target node bounding box
 					if (currentX >= node.x - 24 && currentX <= node.x + node.width + 24 &&
 						currentY >= node.y - 24 && currentY <= node.y + node.height + 24) {
@@ -14786,9 +14787,7 @@ export class WorkflowEditor extends EditorPane {
 			for (const baseId of this._selectBoxBaseNodeIds) {
 				this._selectedNodeIds.add(baseId);
 			}
-			const hiddenBoxIds = this._getHiddenSubWorkflowNodeIds();
 			const overlappingNodes = this._data.nodes.filter(node =>
-				!hiddenBoxIds.has(node.id) &&
 				!(node.x + node.width < x_start ||
 					node.x > x_start + width ||
 					node.y + node.height < y_start ||
@@ -14949,13 +14948,12 @@ export class WorkflowEditor extends EditorPane {
 
 				// If not dropped directly on DOM node, check coordinate-based proximity snapping (within 24px, ONLY visible nodes)
 				if (!targetNode && this._canvas) {
-					const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
 					const rect = this._canvas.getBoundingClientRect();
 					const upX = (e.clientX - rect.left) / this._zoomLevel;
 					const upY = (e.clientY - rect.top) / this._zoomLevel;
 					let bestDist = Infinity;
 					for (const n of this._data.nodes) {
-						if (n.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(n.id)) { continue; }
+						if (n.id === this._tempLinkFromNodeId) { continue; }
 						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
 							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
 							const d = Math.hypot(upX - (n.x + n.width / 2), upY - (n.y + n.height / 2));
@@ -15043,13 +15041,11 @@ export class WorkflowEditor extends EditorPane {
 				}
 
 				if (!targetNode && this._canvas) {
-					const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
 					const rect = this._canvas.getBoundingClientRect();
 					const upX = (e.clientX - rect.left) / this._zoomLevel;
 					const upY = (e.clientY - rect.top) / this._zoomLevel;
 					let bestDist = Infinity;
 					for (const n of this._data.nodes) {
-						if (hiddenSubWfNodeIds.has(n.id)) { continue; }
 						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
 							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
 							const d = Math.hypot(upX - (n.x + n.width / 2), upY - (n.y + n.height / 2));
@@ -16002,12 +15998,7 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
-
 		for (const link of this._data.links) {
-			if (hiddenSubWfNodeIds.has(link.from) || hiddenSubWfNodeIds.has(link.to)) {
-				continue;
-			}
 			const fromNode = this._data.nodes.find(n => n.id === link.from);
 			const toNode = this._data.nodes.find(n => n.id === link.to);
 
@@ -16534,7 +16525,7 @@ export class WorkflowEditor extends EditorPane {
 					}
 				};
 
-				// Caller nodes: reopen the live view of each Sub-Workflow this node invokes
+				// Caller nodes: open the own canvas (live view while it runs) of each Sub-Workflow this node invokes
 				const targetNodeForSub = this._data.nodes.find(n => n.id === targetId);
 				const calledSubWorkflows = new Map<string, string>();
 				for (const step of (targetNodeForSub?.pipeline || [])) {
@@ -16547,8 +16538,8 @@ export class WorkflowEditor extends EditorPane {
 				for (const [subWorkflowId, subWorkflowName] of calledSubWorkflows) {
 					const liveViewItem = append(menu, $('.context-menu-item'));
 					liveViewItem.textContent = calledSubWorkflows.size > 1
-						? `\u29C9 Show Sub-Workflow Live View: ${subWorkflowName}`
-						: '\u29C9 Show Sub-Workflow Live View';
+						? `\u29C9 Open Sub-Workflow: ${subWorkflowName}`
+						: '\u29C9 Open Sub-Workflow';
 					liveViewItem.onclick = () => {
 						this._closeContextMenu();
 						openSubWorkflowLiveView(this._editorService, this._editorGroupService, this._workflowExecutionService, subWorkflowId, {
@@ -20311,8 +20302,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// 2. Workflow-wide variables and handles: same-scope nodes first, then live runtime context, then remaining canvas nodes
-		const nodeNamespace = currentNode?.id ? this._getNodeSubWorkflowNamespace(currentNode.id) : undefined;
+		// 2. Workflow-wide variables and handles: canvas nodes first, then live runtime context
 		const collectFromNode = (n: IFlowchartNode) => {
 			for (const v of (n.outputVariables || [])) {
 				addVar(v.name, 'workflow');
@@ -20367,17 +20357,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		const sameScopeNodes: IFlowchartNode[] = [];
-		const otherScopeNodes: IFlowchartNode[] = [];
 		for (const n of this._data.nodes) {
-			const otherNodeNamespace = this._getNodeSubWorkflowNamespace(n.id);
-			if (otherNodeNamespace === nodeNamespace) {
-				sameScopeNodes.push(n);
-			} else {
-				otherScopeNodes.push(n);
-			}
-		}
-		for (const n of sameScopeNodes) {
 			collectFromNode(n);
 		}
 		// Overlay live runtime context variables from the effective run (if any)
@@ -20390,10 +20370,6 @@ export class WorkflowEditor extends EditorPane {
 				if (!k || k.startsWith('@') || k.startsWith('__') || skipCtxKeys.has(k)) { continue; }
 				addVar(k, 'workflow');
 			}
-		}
-		// Include variables from other canvas nodes as fallback so early/shared variables (e.g. time_now, raw_*) are always discoverable
-		for (const n of otherScopeNodes) {
-			collectFromNode(n);
 		}
 		return result;
 	}

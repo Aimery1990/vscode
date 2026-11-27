@@ -3,15 +3,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * Sub-Workflow Live View
+ * Sub-Workflow canvas (CI-23)
  *
- * Opens the user's real workflow canvas (the regular Workflow Editor) in a side editor group, focused on a
- * single Sub-Workflow: only that Sub-Workflow's nodes are shown, with their live run states. The focused
- * editor shares the in-memory flowchart data with any other open editor of the same workflow, so inspecting
- * or editing capsules there is the same as doing it on the main canvas.
+ * A Sub-Workflow ticket is an independent workflow with its own canvas: opening it (from the explorer, the
+ * Sub-Workflow Library, a Call Sub-Workflow step, or this module's command) shows its definition
+ * (`.agents/sub_workflow.json`) in the regular Workflow Editor, editable like any workflow. Saving writes the
+ * definition back, and every caller runs that latest version.
  *
- * It is opened automatically whenever a workflow starts invoking a Sub-Workflow, and can be reopened from the
- * caller node's context menu or the "Show Sub-Workflow Live View" command.
+ * The same canvas is the live view of a running call: it opens automatically whenever a workflow starts invoking a
+ * Sub-Workflow, showing the call's live node states.
  */
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -19,6 +19,8 @@ import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { ILogService } from '../../../../platform/log/common/log.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
@@ -40,26 +42,32 @@ const RUN_STATUS_TEXT: Record<string, string> = {
 	stopped: 'Stopped'
 };
 
+/** Command that opens a Sub-Workflow's own canvas; argument: its ticket ID (or legacy id), or its ticket folder URI. */
+export const OPEN_SUB_WORKFLOW_COMMAND_ID = 'workbench.action.workflowsManager.openSubWorkflow';
+
 /**
- * A Workflow Editor input focused on one Sub-Workflow of `workflowUri`. Resolved by the regular Workflow Editor
- * (it is a `WorkflowEditorInput` subclass); the editor detects `subWorkflowId` and only renders that region.
+ * The Workflow Editor input of a Sub-Workflow ticket's own canvas. `workflowUri` is the ticket folder; the editor
+ * reads and writes `<ticket folder>/.agents/sub_workflow.json` instead of a workflow flowchart file.
  */
 export class SubWorkflowCanvasEditorInput extends WorkflowEditorInput {
 	static readonly CANVAS_ID = 'workbench.input.subWorkflowCanvasEditor';
 
-	private readonly _focusResource: URI;
+	private readonly _canvasResource: URI;
 
 	constructor(
-		workflowUri: URI,
-		workflowName: string,
-		public readonly subWorkflowId: string,
+		ticketFolderUri: URI,
 		public readonly subWorkflowName: string
 	) {
-		super(workflowUri, workflowName);
-		this._focusResource = URI.from({
+		super(ticketFolderUri, subWorkflowName);
+		this._canvasResource = URI.from({
 			scheme: 'vscode-subworkflow-canvas',
-			path: `/${encodeURIComponent(workflowUri.toString())}/${encodeURIComponent(subWorkflowId)}`
+			path: `/${encodeURIComponent(ticketFolderUri.toString())}`
 		});
+	}
+
+	/** The Sub-Workflow ticket folder. */
+	get ticketFolderUri(): URI {
+		return this.workflowUri;
 	}
 
 	override get typeId(): string {
@@ -67,7 +75,7 @@ export class SubWorkflowCanvasEditorInput extends WorkflowEditorInput {
 	}
 
 	override get resource(): URI {
-		return this._focusResource;
+		return this._canvasResource;
 	}
 
 	override getName(): string {
@@ -75,13 +83,11 @@ export class SubWorkflowCanvasEditorInput extends WorkflowEditorInput {
 	}
 
 	override matches(other: EditorInput | IUntypedEditorInput): boolean {
-		return other instanceof SubWorkflowCanvasEditorInput
-			&& other.subWorkflowId === this.subWorkflowId
-			&& other.workflowUri.toString() === this.workflowUri.toString();
+		return other instanceof SubWorkflowCanvasEditorInput && other.ticketFolderUri.toString() === this.ticketFolderUri.toString();
 	}
 }
 
-/** Restores open Sub-Workflow canvas tabs on start-up (same identity fields as the constructor). */
+/** Restores open Sub-Workflow canvas tabs on start-up. Tabs of the former "focused region of the parent canvas" view are dropped. */
 class SubWorkflowCanvasEditorInputSerializer implements IEditorSerializer {
 	canSerialize(input: EditorInput): boolean {
 		return input instanceof SubWorkflowCanvasEditorInput;
@@ -91,21 +97,21 @@ class SubWorkflowCanvasEditorInputSerializer implements IEditorSerializer {
 		if (!(input instanceof SubWorkflowCanvasEditorInput)) {
 			return undefined;
 		}
-		return JSON.stringify({
-			workflowUri: input.workflowUri.toString(),
-			workflowName: input.workflowName,
-			subWorkflowId: input.subWorkflowId,
-			subWorkflowName: input.subWorkflowName
-		});
+		return JSON.stringify({ ticketFolderUri: input.ticketFolderUri.toString(), subWorkflowName: input.subWorkflowName });
 	}
 
 	deserialize(_instantiationService: IInstantiationService, raw: string): SubWorkflowCanvasEditorInput | undefined {
 		try {
-			const data = JSON.parse(raw);
-			if (typeof data?.workflowUri !== 'string' || typeof data?.subWorkflowId !== 'string') {
+			const data: unknown = JSON.parse(raw);
+			if (!data || typeof data !== 'object') {
 				return undefined;
 			}
-			return new SubWorkflowCanvasEditorInput(URI.parse(data.workflowUri), data.workflowName || 'Workflow', data.subWorkflowId, data.subWorkflowName || data.subWorkflowId);
+			const folder: unknown = Reflect.get(data, 'ticketFolderUri');
+			const name: unknown = Reflect.get(data, 'subWorkflowName');
+			if (typeof folder !== 'string' || !folder) {
+				return undefined;
+			}
+			return new SubWorkflowCanvasEditorInput(URI.parse(folder), typeof name === 'string' && name ? name : 'Sub-Workflow');
 		} catch {
 			return undefined;
 		}
@@ -115,9 +121,26 @@ class SubWorkflowCanvasEditorInputSerializer implements IEditorSerializer {
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
 	.registerEditorSerializer(SubWorkflowCanvasEditorInput.CANVAS_ID, SubWorkflowCanvasEditorInputSerializer);
 
+/** The canvas input of a Sub-Workflow, by ticket ID (or legacy id). Throws for an unknown or not migrated one. */
+async function resolveCanvasInput(workflowExecutionService: IWorkflowExecutionService, subWorkflowId: string): Promise<SubWorkflowCanvasEditorInput> {
+	const def = await workflowExecutionService.resolveSubWorkflow(subWorkflowId);
+	if (!def) {
+		throw new Error(localize('swcvNotFound', "Sub-Workflow '{0}' was not found: no sub_workflow ticket with this ID.", subWorkflowId));
+	}
+	if (!def.ticketFolderUri) {
+		throw new Error(localize('swcvLegacy', "Sub-Workflow '{0}' ({1}) is not a ticket yet: its migration has not finished. Try again after a restart.", def.name, def.id));
+	}
+	return new SubWorkflowCanvasEditorInput(URI.parse(def.ticketFolderUri), def.name);
+}
+
+/** Opens a Sub-Workflow ticket folder's own canvas in the active group (the explorer / ticket page entry point). */
+export async function openSubWorkflowTicketCanvas(editorService: IEditorService, ticketFolderUri: URI, name: string): Promise<void> {
+	await editorService.openEditor(new SubWorkflowCanvasEditorInput(ticketFolderUri, name), { pinned: true });
+}
+
 /**
- * Opens (or reveals) the focused Sub-Workflow canvas in an editor group other than the one showing the parent
- * workflow, so both canvases stay side by side. With `onlyIfNotOpen`, does nothing if it is already open.
+ * Opens (or reveals) a Sub-Workflow's own canvas, by ticket ID, in an editor group other than the one showing the
+ * calling workflow, so both canvases stay side by side. With `onlyIfNotOpen`, does nothing if it is already open.
  */
 export async function openSubWorkflowLiveView(
 	editorService: IEditorService,
@@ -126,14 +149,7 @@ export async function openSubWorkflowLiveView(
 	subWorkflowId: string,
 	options?: { parentWorkflowUri?: string; onlyIfNotOpen?: boolean; preserveFocus?: boolean; group?: () => number }
 ): Promise<SubWorkflowCanvasEditorInput> {
-	const subDef = workflowExecutionService.getSubWorkflowById(subWorkflowId);
-	const sourceUriStr = subDef?.sourceWorkflowUri || options?.parentWorkflowUri;
-	if (!sourceUriStr) {
-		throw new Error(localize('swlvNoSource', "Cannot locate the workflow that contains Sub-Workflow '{0}'.", subDef?.name || subWorkflowId));
-	}
-	const sourceUri = URI.parse(sourceUriStr);
-	const sourceName = subDef?.sourceWorkflowName || decodeURIComponent(sourceUri.path.replace(/\/+$/, '').split('/').pop() || 'Workflow');
-	const input = new SubWorkflowCanvasEditorInput(sourceUri, sourceName, subWorkflowId, subDef?.name || subWorkflowId);
+	const input = await resolveCanvasInput(workflowExecutionService, subWorkflowId);
 
 	const existing = editorService.findEditors(input.resource);
 	if (existing.length > 0) {
@@ -149,9 +165,9 @@ export async function openSubWorkflowLiveView(
 		return input;
 	}
 
-	// Prefer a group that does not show the parent workflow canvas, else create a side group
-	const parentUriStr = options?.parentWorkflowUri || sourceUriStr;
-	const parentGroup = editorGroupsService.groups.find(g => g.editors.some(e => e instanceof WorkflowEditorInput && !(e instanceof SubWorkflowCanvasEditorInput) && e.workflowUri.toString() === parentUriStr));
+	// Prefer a group that does not show the calling workflow canvas, else create a side group
+	const parentUriStr = options?.parentWorkflowUri;
+	const parentGroup = parentUriStr ? editorGroupsService.groups.find(g => g.editors.some(e => e instanceof WorkflowEditorInput && e.workflowUri.toString() === parentUriStr)) : undefined;
 	const parentGroupId = parentGroup ? parentGroup.id : editorGroupsService.activeGroup.id;
 	const sideGroup = editorGroupsService.groups.find(g => g.id !== parentGroupId);
 	await editorService.openEditor(input, { pinned: true, preserveFocus: options?.preserveFocus ?? true }, sideGroup ? sideGroup.id : SIDE_GROUP);
@@ -195,6 +211,65 @@ class SubWorkflowLiveViewAutoOpenContribution extends Disposable implements IWor
 }
 
 registerWorkbenchContribution2(SubWorkflowLiveViewAutoOpenContribution.ID, SubWorkflowLiveViewAutoOpenContribution, WorkbenchPhase.AfterRestored);
+
+// ---------------------------------------------------------------------------------------------
+// Legacy Sub-Workflow migration at startup (not on the first read of the library)
+// ---------------------------------------------------------------------------------------------
+
+class SubWorkflowStartupMigrationContribution extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.subWorkflowStartupMigration';
+
+	constructor(
+		@IWorkflowExecutionService workflowExecutionService: IWorkflowExecutionService,
+		@ILogService logService: ILogService
+	) {
+		super();
+		// Idempotent: each legacy id is migrated once (stored), the profile-storage backup is kept, failures are retried
+		workflowExecutionService.migrateLegacySubWorkflows()
+			.catch(err => logService.error('[WorkflowExecution] Sub-Workflow startup migration failed:', err));
+	}
+}
+
+registerWorkbenchContribution2(SubWorkflowStartupMigrationContribution.ID, SubWorkflowStartupMigrationContribution, WorkbenchPhase.AfterRestored);
+
+registerAction2(class OpenSubWorkflowAction extends Action2 {
+	constructor() {
+		super({
+			id: OPEN_SUB_WORKFLOW_COMMAND_ID,
+			title: localize2('openSubWorkflow', "Open Sub-Workflow"),
+			category: localize2('workflowsCategory', "Workflows"),
+			f1: true
+		});
+	}
+
+	async run(accessor: ServicesAccessor, target?: string): Promise<void> {
+		const workflowExecutionService = accessor.get(IWorkflowExecutionService);
+		const editorService = accessor.get(IEditorService);
+		const quickInputService = accessor.get(IQuickInputService);
+		const notificationService = accessor.get(INotificationService);
+		try {
+			const ref = (typeof target === 'string' ? target : '').trim();
+			if (ref.includes('://')) {
+				const folderUri = URI.parse(ref);
+				const def = await workflowExecutionService.loadSubWorkflowTicket(folderUri);
+				await openSubWorkflowTicketCanvas(editorService, folderUri, def?.name || folderUri.path.split('/').filter(Boolean).pop() || 'Sub-Workflow');
+				return;
+			}
+			let id = ref;
+			if (!id) {
+				await workflowExecutionService.whenSubWorkflowsReady();
+				const items: (IQuickPickItem & { def: ISubWorkflowDefinition })[] = workflowExecutionService.getSubWorkflows().map(def => ({ label: def.name, description: def.id, def }));
+				const picked = await quickInputService.pick(items, { placeHolder: localize('swcvPick', "Select a Sub-Workflow to open") });
+				id = picked?.def.id || '';
+			}
+			if (id) {
+				await editorService.openEditor(await resolveCanvasInput(workflowExecutionService, id), { pinned: true });
+			}
+		} catch (err) {
+			notificationService.error(err instanceof Error ? err.message : String(err));
+		}
+	}
+});
 
 registerAction2(class ShowSubWorkflowLiveViewAction extends Action2 {
 	constructor() {

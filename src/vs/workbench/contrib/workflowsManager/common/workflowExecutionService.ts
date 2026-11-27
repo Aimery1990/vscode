@@ -111,6 +111,7 @@ export interface IWorkflowExecutionService {
 	/**
 	 * Resolves a Call Sub-Workflow reference (ticket ID or legacy id): the loaded Sub-Workflows first, then the ticket
 	 * with that ID on disk (searched from `contextUri`, e.g. the calling workflow), when it is a `sub_workflow` ticket.
+	 * A ticket-backed Sub-Workflow is re-read from its definition file, so callers always get the latest saved version.
 	 */
 	resolveSubWorkflow(reference: string, contextUri?: string): Promise<ISubWorkflowDefinition | undefined>;
 	/**
@@ -133,8 +134,23 @@ export interface IWorkflowExecutionService {
 	getLatestSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;
 	/** The currently executing run of this Sub-Workflow if any, otherwise its latest finished snapshot. */
 	getActiveSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;
-	getLatestSubWorkflowRunForNode(nodeId: string, workflowUri?: URI | string): IWorkflowExecutionRun | undefined;
 	saveSubWorkflow(def: ISubWorkflowDefinition): void;
+	/**
+	 * Loads the Sub-Workflow ticket in `folderUri` (its latest saved definition) and keeps it in the known list; used by
+	 * the Sub-Workflow's own canvas. `undefined` when the folder has no valid definition file.
+	 */
+	loadSubWorkflowTicket(folderUri: URI): Promise<ISubWorkflowDefinition | undefined>;
+	/**
+	 * Saves the Sub-Workflow's own canvas as its definition: nodes and links, and the inputs / outputs contract derived
+	 * from them. Writes `.agents/sub_workflow.json` and the ticket.md summary; every caller runs this version from now on.
+	 * Returns the saved definition, or `undefined` for an unknown (or not ticket-backed) Sub-Workflow.
+	 */
+	saveSubWorkflowCanvas(subWorkflowId: string, canvas: { nodes: unknown[]; links: unknown[] }): ISubWorkflowDefinition | undefined;
+	/**
+	 * Runs the one-time migration of legacy (profile-storage) Sub-Workflows to tickets now, at startup. Idempotent;
+	 * failed migrations are retried later. Never rejects.
+	 */
+	migrateLegacySubWorkflows(): Promise<void>;
 	deleteSubWorkflow(id: string): void;
 	/**
 	 * Registers an open Workflow Editor as the exclusive writer of `<workflow>/.agents/workflow_flowchart.json`.

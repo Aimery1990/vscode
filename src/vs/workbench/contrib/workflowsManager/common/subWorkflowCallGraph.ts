@@ -294,17 +294,8 @@ export async function findSubWorkflowCallCycle(root: SubWorkflowCallGraphRoot, r
 		}
 		return templateCache.get(key) ?? undefined;
 	};
-	const rootWorkflow = root.kind === 'workflow' ? root : undefined;
-	const nodesOfSub = (def: ISubWorkflowGraphDefinition): readonly unknown[] => {
-		if (rootWorkflow && def.sourceWorkflowUri === rootWorkflow.key && def.nodeIds && def.nodeIds.length > 0) {
-			const ids = new Set(def.nodeIds);
-			const live = rootWorkflow.nodes.filter(n => isRecord(n) && typeof n.id === 'string' && ids.has(n.id));
-			if (live.length > 0) {
-				return live;
-			}
-		}
-		return def.nodes;
-	};
+	// A Sub-Workflow is an independent workflow: its own definition is what it calls (never the canvas it came from)
+	const nodesOfSub = (def: ISubWorkflowGraphDefinition): readonly unknown[] => def.nodes;
 	const subVertex = async (ref: string): Promise<Pending | undefined> => {
 		const def = await resolveSub(ref);
 		if (!def) {

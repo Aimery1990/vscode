@@ -7,8 +7,9 @@ import { ISubWorkflowDefinition, IWorkflowInputParamDef, IWorkflowOutputDef } fr
 
 /**
  * Sub-Workflow tickets (CI-23): encapsulating nodes on a workflow canvas, or a program / AI creating a ticket of type
- * `sub_workflow` inside a workflow folder, creates a Sub-Workflow ticket inside that workflow folder. Its definition is stored in `<ticket folder>/.agents/sub_workflow.json`; ticket.md
- * carries the name, the source workflow and an inputs / outputs summary. This file holds the pure logic
+ * `sub_workflow` inside a workflow folder, creates a Sub-Workflow ticket inside that workflow folder. It is an
+ * independent workflow: its definition (its own canvas) is stored in `<ticket folder>/.agents/sub_workflow.json`;
+ * ticket.md carries the name, the source workflow and an inputs / outputs summary. This file holds the pure logic
  * (definition (de)serialization, summaries, legacy-id resolution and the migration plan).
  */
 export const SUB_WORKFLOW_DEFINITION_FILE_NAME = 'sub_workflow.json';
@@ -522,6 +523,14 @@ export function planSubWorkflowMigration(
 		plan.push(def);
 	}
 	return plan;
+}
+
+/** Delays before retrying failed migrations in the same session (then the next start retries again). */
+export const SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS: readonly number[] = [30_000, 120_000, 600_000];
+
+/** The delay before retry number `attempt` (0-based), or `undefined` when this session should stop retrying. */
+export function getSubWorkflowMigrationRetryDelay(attempt: number): number | undefined {
+	return attempt >= 0 && attempt < SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS.length ? SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS[attempt] : undefined;
 }
 
 /** Parses the stored list of migrated legacy ids. */

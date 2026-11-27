@@ -31,6 +31,7 @@ import {
 	buildSubWorkflowTicketIndex,
 	buildSubWorkflowTicketMetadata,
 	getSubWorkflowDefinitionUri,
+	getSubWorkflowMigrationRetryDelay,
 	getSubWorkflowSourceFolder,
 	getUncoveredLegacySubWorkflows,
 	isLegacySubWorkflowId,
@@ -81,6 +82,8 @@ interface IInternalWorkflowRun extends IWorkflowExecutionRun {
 	_executedTicketIdsWindow?: string[];
 	/** Who called whom down to this run (CI-38 recursion / depth guard). */
 	_callChain?: ISubWorkflowCallChain;
+	/** A Sub-Workflow run: the ticket folder whose own canvas shows its nodes (node component updates go there). */
+	_canvasUri?: string;
 }
 
 /** Callers (the Workflow editor, Sub-Workflow runs) pass the in-memory flowchart as `initialData`. */
@@ -993,7 +996,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private readonly _lastWrittenSubWorkflowMeta = new Map<string, string>();
 	private _subWorkflowDiscoveryTimer: ReturnType<typeof setTimeout> | undefined;
 	private _subWorkflowSnapshotListener: IDisposable | undefined;
-	private _subWorkflowsByNodeIdCache = new Map<string, ISubWorkflowDefinition[]>();
 
 	private readonly _runs = new Map<string, IWorkflowExecutionRun>();
 	private readonly _activeRunsByWorkflow = new Map<string, string>();
@@ -1119,40 +1121,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			throw new Error(guardError);
 		}
 
-		// Always refresh Sub-Workflow nodes/links from the live source workflow_flowchart.json if available,
-		// so any edits the user saved on the canvas (e.g. changing Output variable names) ALWAYS take effect immediately
-		// instead of running a stale snapshot of the Sub-Workflow ticket definition
-		let liveNodes: IFlowchartNode[] = JSON.parse(JSON.stringify(subDef.nodes || []));
-		let liveLinks: IFlowchartLink[] = JSON.parse(JSON.stringify(subDef.links || []));
-		if (subDef.sourceWorkflowUri && Array.isArray(subDef.nodeIds) && subDef.nodeIds.length > 0) {
-			try {
-				const parentLiveData = (subDef.sourceWorkflowUri === parentRun.workflowUri && (parentRun as IInternalWorkflowRun)._liveFlowchartData)
-					? (parentRun as IInternalWorkflowRun)._liveFlowchartData
-					: undefined;
-				const sourceFlowchart = (parentLiveData && Array.isArray(parentLiveData.nodes) && parentLiveData.nodes.length > 0)
-					? parentLiveData
-					: await this._loadFlowchartData(subDef.sourceWorkflowUri);
-				if (sourceFlowchart && Array.isArray(sourceFlowchart.nodes) && sourceFlowchart.nodes.length > 0) {
-					const subIdSet = new Set(subDef.nodeIds);
-					const matchedLiveNodes = sourceFlowchart.nodes.filter(n => n && subIdSet.has(n.id));
-					if (matchedLiveNodes.length > 0) {
-						liveNodes = JSON.parse(JSON.stringify(matchedLiveNodes));
-						if (Array.isArray(sourceFlowchart.links)) {
-							liveLinks = JSON.parse(JSON.stringify(
-								sourceFlowchart.links.filter(l => l && subIdSet.has(l.from) && subIdSet.has(l.to))
-							));
-						}
-						// Keep the Sub-Workflow ticket definition in sync with the live source canvas
-						this.saveSubWorkflow({
-							...subDef,
-							nodes: liveNodes,
-							links: liveLinks,
-							updatedAt: Date.now()
-						});
-					}
-				}
-			} catch { }
-		}
+		// A Sub-Workflow is an independent workflow: its ticket definition (its own canvas) is what runs. The workflow it
+		// was extracted from is never read here (resolveSubWorkflow already returned the latest saved definition).
+		const liveNodes: IFlowchartNode[] = JSON.parse(JSON.stringify(subDef.nodes || []));
+		const liveLinks: IFlowchartLink[] = JSON.parse(JSON.stringify(subDef.links || []));
 
 		const childFlowchartData: IFlowchartData = {
 			nodes: liveNodes,
@@ -1190,6 +1162,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			logs: []
 		};
 		(childRun as IInternalWorkflowRun)._callChain = extendSubWorkflowCallChain(parentChain, frame, childRunId);
+		const childCanvasUri = subDef.ticketFolderUri || childWorkflowUri;
+		(childRun as IInternalWorkflowRun)._canvasUri = childCanvasUri;
 		(childRun as IInternalWorkflowRun)._displayRunId = (parentRun as IInternalWorkflowRun)._displayRunId || parentRun.runId;
 		(childRun as IInternalWorkflowRun)._displayWorkflowUri = (parentRun as IInternalWorkflowRun)._displayWorkflowUri || parentRun.workflowUri;
 
@@ -1239,10 +1213,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 			this._saveLatestSubWorkflowRun(subDef, childRun);
 			this._onDidChangeSubWorkflowRun.fire(childRun);
-			// Sync all executed node component outputs/logs/inputs back to the source workflow canvas
+			// Show the executed node component outputs / logs / inputs on the Sub-Workflow's own canvas (if it is open)
 			for (const childNode of childFlowchartData.nodes) {
 				try {
-					this._onDidUpdateNodeComponents.fire({ workflowUri: childWorkflowUri, nodeId: childNode.id, node: childNode });
+					this._onDidUpdateNodeComponents.fire({ workflowUri: childCanvasUri, nodeId: childNode.id, node: childNode });
 				} catch { }
 			}
 			this._runs.delete(childRunId);
@@ -1575,23 +1549,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private _rebuildSubWorkflowIndexes(list: ISubWorkflowDefinition[]): void {
 		this._subWorkflowsCache = list;
 		this._subWorkflowByIdCache = buildSubWorkflowLookup(list);
-		this._subWorkflowsByNodeIdCache.clear();
-		for (const sw of list) {
-			if (!sw || !sw.id) {
-				continue;
-			}
-			if (Array.isArray(sw.nodeIds)) {
-				for (const nid of sw.nodeIds) {
-					if (!nid) { continue; }
-					let arr = this._subWorkflowsByNodeIdCache.get(nid);
-					if (!arr) {
-						arr = [];
-						this._subWorkflowsByNodeIdCache.set(nid, arr);
-					}
-					arr.push(sw);
-				}
-			}
-		}
 	}
 
 	public getActiveSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined {
@@ -1599,41 +1556,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const activeRunId = this._activeSubWorkflowRunIds.get(runKey);
 		const live = activeRunId ? this._runs.get(activeRunId) : undefined;
 		return live || this.getLatestSubWorkflowRun(subWorkflowId);
-	}
-
-	public getLatestSubWorkflowRunForNode(nodeId: string, workflowUri?: URI | string): IWorkflowExecutionRun | undefined {
-		if (!nodeId) {
-			return undefined;
-		}
-		this._ensureLatestSubWorkflowRunsLoaded();
-		if (this._latestSubWorkflowRuns.size === 0 && this._activeSubWorkflowRunIds.size === 0) {
-			return undefined;
-		}
-		// Ensure index cache is populated (O(1) lookup, zero JSON.parse)
-		if (this._subWorkflowsCache === null) {
-			this.getSubWorkflows();
-		}
-		const matchingSubs = this._subWorkflowsByNodeIdCache.get(nodeId);
-		if (!matchingSubs || matchingSubs.length === 0) {
-			return undefined;
-		}
-		const uriStr = workflowUri ? (typeof workflowUri === 'string' ? workflowUri : workflowUri.toString()) : '';
-		let fallbackRun: IWorkflowExecutionRun | undefined;
-		for (const sw of matchingSubs) {
-			// A Sub-Workflow that is executing right now shows its live states; otherwise its latest finished snapshot
-			const liveRunId = this._activeSubWorkflowRunIds.get(sw.id);
-			const run = (liveRunId ? this._runs.get(liveRunId) : undefined) || this._latestSubWorkflowRuns.get(sw.id);
-			if (!run) {
-				continue;
-			}
-			if (uriStr && sw.sourceWorkflowUri === uriStr) {
-				return run;
-			}
-			if (!fallbackRun || (run.updatedAt || 0) > (fallbackRun.updatedAt || 0)) {
-				fallbackRun = run;
-			}
-		}
-		return fallbackRun;
 	}
 
 	public getSubWorkflows(): ISubWorkflowDefinition[] {
@@ -1667,6 +1589,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 		await this.whenSubWorkflowsReady();
 		const known = this.getSubWorkflowById(ref);
+		if (known?.ticketFolderUri) {
+			return this._reloadSubWorkflowTicket(known);
+		}
 		if (known || isLegacySubWorkflowId(ref)) {
 			return known;
 		}
@@ -1685,6 +1610,71 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this.logService.warn(`[WorkflowExecution] Could not look up Sub-Workflow ticket '${ref}':`, err);
 			return undefined;
 		}
+	}
+
+	/**
+	 * Callers always run the latest saved version: waits for pending writes of this ticket, then re-reads its definition
+	 * file (cheap) so an edit saved from its canvas, by another window or by AI is picked up. Keeps the cached copy when
+	 * the file is unchanged or unreadable.
+	 */
+	private async _reloadSubWorkflowTicket(known: ISubWorkflowDefinition): Promise<ISubWorkflowDefinition> {
+		await this._subWorkflowTicketWrites.get(known.id);
+		if (!known.ticketFolderUri) {
+			return known;
+		}
+		const fileUri = getSubWorkflowDefinitionUri(URI.parse(known.ticketFolderUri));
+		try {
+			const text = (await this.fileService.readFile(fileUri)).value.toString();
+			if (text === this._lastWrittenSubWorkflowJson.get(known.id)) {
+				return this.getSubWorkflowById(known.id) || known;
+			}
+			const fresh = parseSubWorkflowDefinition(text, known.id);
+			if (!fresh) {
+				return known;
+			}
+			fresh.ticketFolderUri = known.ticketFolderUri;
+			this._lastWrittenSubWorkflowJson.set(fresh.id, text);
+			this._upsertSubWorkflowTicket(fresh);
+			return fresh;
+		} catch {
+			return known;
+		}
+	}
+
+	public async loadSubWorkflowTicket(folderUri: URI): Promise<ISubWorkflowDefinition | undefined> {
+		await this.whenSubWorkflowsReady();
+		const folder = folderUri.toString();
+		const known = (this._subWorkflowsCache || []).find(d => d.ticketFolderUri === folder);
+		if (known) {
+			return this._reloadSubWorkflowTicket(known);
+		}
+		const fallbackId = this.entityPersistenceService.getSnapshot(folderUri)?.ticketId || folderUri.path.split('/').filter(Boolean).pop() || '';
+		const def = await this._readSubWorkflowTicket(folderUri, fallbackId);
+		if (def) {
+			this._upsertSubWorkflowTicket(def);
+		}
+		return def;
+	}
+
+	public saveSubWorkflowCanvas(subWorkflowId: string, canvas: { nodes: unknown[]; links: unknown[] }): ISubWorkflowDefinition | undefined {
+		const def = this.getSubWorkflowById(subWorkflowId);
+		if (!def || !def.ticketFolderUri) {
+			return undefined;
+		}
+		const nodes: IFlowchartNode[] = JSON.parse(JSON.stringify(canvas.nodes || []));
+		const links: IFlowchartLink[] = JSON.parse(JSON.stringify(canvas.links || []));
+		const contract = this.resolveWorkflowIOContract({ nodes, links });
+		const next: ISubWorkflowDefinition = {
+			...def,
+			nodes,
+			links,
+			nodeIds: nodes.map(n => n.id),
+			inputs: contract.inputs,
+			outputs: contract.outputs,
+			updatedAt: Date.now()
+		};
+		this.saveSubWorkflow(next);
+		return this.getSubWorkflowById(def.id) || next;
 	}
 
 	public async createSubWorkflowTicket(draft: ISubWorkflowDefinition): Promise<ISubWorkflowDefinition> {
@@ -1711,7 +1701,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 		this._rebuildSubWorkflowIndexes(list);
 		if (cleaned.ticketFolderUri) {
-			// The source canvas stays the source of truth: every refresh is written back to the ticket file
+			// The ticket file is the definition: every save of its canvas is written there (and ticket.md is updated)
 			this._queueSubWorkflowTicketWrite(cleaned);
 		} else {
 			this._storeLegacySubWorkflow(cleaned);
@@ -1854,19 +1844,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		// 2. One-time migration of the legacy profile-storage library (the stored data is kept as a backup)
-		const legacyDefs = this._readLegacySubWorkflowLibrary();
-		const migratedIds = parseMigratedLegacyIds(this.storageService.get(SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY, StorageScope.PROFILE));
-		const plan = planSubWorkflowMigration(legacyDefs, ticketDefs, migratedIds);
-		for (const legacy of plan) {
-			try {
-				const migrated = await this._createSubWorkflowTicketNow(legacy, true);
-				addTicketDef(migrated);
-				this._markLegacySubWorkflowsMigrated([legacy.id]);
-				this.logService.info(`[WorkflowExecution] Migrated Sub-Workflow '${legacy.name}' (${legacy.id}) to ticket ${migrated.id} at ${migrated.ticketFolderUri}`);
-			} catch (err) {
-				// Stays usable from the legacy library (below); the migration is retried on the next start
-				this.logService.error(`[WorkflowExecution] Failed to migrate Sub-Workflow '${legacy.name}' (${legacy.id}) to a ticket:`, err);
-			}
+		const { migrated, failed } = await this._migrateLegacySubWorkflowsNow(ticketDefs);
+		for (const def of migrated) {
+			addTicketDef(def);
+		}
+		if (failed > 0) {
+			this._scheduleSubWorkflowMigrationRetry();
 		}
 
 		// Legacy definitions without a loaded ticket (migration failed, or the migrated ticket folder was not found)
@@ -1877,6 +1860,70 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			await this._ensureSubWorkflowTicketSnapshot(def);
 		}
 		this._onDidChangeSubWorkflows.fire();
+	}
+
+	public async migrateLegacySubWorkflows(): Promise<void> {
+		// Loading the Sub-Workflow tickets runs the migration (once per legacy id; failures are retried later)
+		await this.whenSubWorkflowsReady();
+	}
+
+	/**
+	 * Migrates the legacy definitions that still need a ticket (see planSubWorkflowMigration): each gets a Sub-Workflow
+	 * ticket and is marked migrated; the profile-storage library is never changed (it stays as the backup).
+	 */
+	private async _migrateLegacySubWorkflowsNow(ticketDefs: readonly ISubWorkflowDefinition[]): Promise<{ migrated: ISubWorkflowDefinition[]; failed: number }> {
+		const legacyDefs = this._readLegacySubWorkflowLibrary();
+		const migratedIds = parseMigratedLegacyIds(this.storageService.get(SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY, StorageScope.PROFILE));
+		const plan = planSubWorkflowMigration(legacyDefs, ticketDefs, migratedIds);
+		const migrated: ISubWorkflowDefinition[] = [];
+		let failed = 0;
+		for (const legacy of plan) {
+			try {
+				const def = await this._createSubWorkflowTicketNow(legacy, true);
+				migrated.push(def);
+				this._markLegacySubWorkflowsMigrated([legacy.id]);
+				this.logService.info(`[WorkflowExecution] Migrated Sub-Workflow '${legacy.name}' (${legacy.id}) to ticket ${def.id} at ${def.ticketFolderUri}`);
+			} catch (err) {
+				// Stays usable from the legacy library under its legacy id; the migration is retried
+				failed++;
+				this.logService.error(`[WorkflowExecution] Failed to migrate Sub-Workflow '${legacy.name}' (${legacy.id}) to a ticket:`, err);
+			}
+		}
+		return { migrated, failed };
+	}
+
+	private _subWorkflowMigrationAttempt = 0;
+	private _subWorkflowMigrationRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+	private _scheduleSubWorkflowMigrationRetry(): void {
+		if (this._subWorkflowMigrationRetryTimer) {
+			return;
+		}
+		const delay = getSubWorkflowMigrationRetryDelay(this._subWorkflowMigrationAttempt++);
+		if (delay === undefined) {
+			this.logService.warn('[WorkflowExecution] Sub-Workflow migration: some legacy Sub-Workflows could not be migrated; retrying on the next start.');
+			return;
+		}
+		this.logService.info(`[WorkflowExecution] Sub-Workflow migration: retrying the failed ones in ${Math.round(delay / 1000)}s.`);
+		this._subWorkflowMigrationRetryTimer = setTimeout(() => {
+			this._subWorkflowMigrationRetryTimer = undefined;
+			this._subWorkflowTicketSequencer.queue(async () => {
+				const ticketDefs = (this._subWorkflowsCache || []).filter(d => !!d.ticketFolderUri);
+				const { migrated, failed } = await this._migrateLegacySubWorkflowsNow(ticketDefs);
+				if (migrated.length > 0) {
+					const all = [...ticketDefs, ...migrated];
+					this._rebuildSubWorkflowIndexes([...all, ...getUncoveredLegacySubWorkflows(this._readLegacySubWorkflowLibrary(), all)]);
+					this._storeSubWorkflowTicketIndex();
+					for (const def of migrated) {
+						await this._ensureSubWorkflowTicketSnapshot(def);
+					}
+					this._onDidChangeSubWorkflows.fire();
+				}
+				if (failed > 0) {
+					this._scheduleSubWorkflowMigrationRetry();
+				}
+			}).catch(err => this.logService.error('[WorkflowExecution] Sub-Workflow migration retry failed:', err));
+		}, delay);
 	}
 
 	private _scheduleSubWorkflowSnapshotDiscovery(): void {
@@ -2986,13 +3033,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 
-		// If running a partial/selective node that belongs to an expanded Sub-Workflow on the canvas,
-		// inherit that Sub-Workflow's latest execution snapshot contextVariables (e.g. jd_data_list, job_view_idx)
-		// so running a node inside an expanded Sub-Workflow has all of that Sub-Workflow's variables!
+		// A partial / selective run on a Sub-Workflow ticket's own canvas inherits the variables of that Sub-Workflow's
+		// latest call (e.g. jd_data_list, job_view_idx), so a node in the middle has what it needs
 		if (isPartialRun && !options?.isSubWorkflowRun) {
-			const anchorNodeId = options?.entryNodeId || options?.selectedNodeIds?.[0];
-			if (anchorNodeId) {
-				const subRun = this.getLatestSubWorkflowRunForNode(anchorNodeId, uriStr);
+			const ownSubWorkflow = (this._subWorkflowsCache || []).find(d => d.ticketFolderUri === uriStr);
+			if (ownSubWorkflow) {
+				const subRun = this.getActiveSubWorkflowRun(ownSubWorkflow.id);
 				if (subRun?.contextVariables) {
 					for (const [k, v] of Object.entries(subRun.contextVariables)) {
 						if (v !== undefined && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
@@ -3039,22 +3085,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// If any visible upstream node already has a persisted `lastExecutionOutput` (the exact value shown in UI "Last Runtime Value")
 		// that is missing from `inheritedContextVariables` (e.g. from older runs before sidecar archiving), backfill it here so
 		// downstream nodes can immediately consume it without re-running upstream nodes.
-		// Strictly exclude encapsulated Sub-Workflow internal nodes so private sub-workflow variables never leak into parent scope.
 		if (isPartialRun && !options?.isSubWorkflowRun) {
-			const hiddenSubNodeIds = new Set<string>();
-			try {
-				const allSubs = this.getSubWorkflows();
-				for (const sw of allSubs) {
-					if (sw && sw.sourceWorkflowUri === uriStr && Array.isArray(sw.nodeIds)) {
-						for (const nid of sw.nodeIds) {
-							if (nid) { hiddenSubNodeIds.add(nid); }
-						}
-					}
-				}
-			} catch { }
 			const selectedSet = new Set(options?.selectedNodeIds || []);
 			for (const n of flowchartData.nodes) {
-				if (!n || hiddenSubNodeIds.has(n.id) || selectedSet.has(n.id)) {
+				if (!n || selectedSet.has(n.id)) {
 					continue;
 				}
 				for (const st of (n.pipeline || [])) {
@@ -4557,7 +4591,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								stepComp.lastExecutionDurationMs = Date.now() - stepStartMs;
 								stepComp.lastExecutedAt = new Date().toISOString();
 								stepComp.lastExecutionLog = `>>> ${detailMsg}\nInputs: ${JSON.stringify(resolvedInputs, null, 2)}`;
-								this._onDidUpdateNodeComponents.fire({ workflowUri: run.workflowUri, nodeId: node.id, node });
+								this._onDidUpdateNodeComponents.fire({ workflowUri: this._canvasUriOf(run), nodeId: node.id, node });
 								throw new Error(detailMsg);
 							}
 
@@ -4575,7 +4609,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							stepComp.lastExecutionDurationMs = Date.now() - stepStartMs;
 							stepComp.lastExecutedAt = new Date().toISOString();
 							stepComp.lastExecutionLog = `>>> Sub-Workflow '${subDef.name}' completed in ${stepComp.lastExecutionDurationMs}ms\nInputs: ${JSON.stringify(resolvedInputs)}\nOutputs: ${childOutput === null ? 'None' : JSON.stringify(childOutput, null, 2)}`;
-							this._onDidUpdateNodeComponents.fire({ workflowUri: run.workflowUri, nodeId: node.id, node });
+							this._onDidUpdateNodeComponents.fire({ workflowUri: this._canvasUriOf(run), nodeId: node.id, node });
 							this._emitLog(run, 'info', `[Step #${i + 1}] Sub-Workflow '${subDef.name}' completed (${stepComp.lastExecutionDurationMs}ms) -> ${outVarName} = ${childOutPreview}`, { nodeId: node.id });
 							break;
 						}
@@ -6433,7 +6467,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			const isDirectFile = uri.path.endsWith('.json') || uri.path.endsWith('.workflow');
 			const candidateUris: URI[] = isDirectFile
 				? [uri]
-				: [URI.joinPath(uri, '.agents', 'workflow_flowchart.json')];
+				: [URI.joinPath(uri, '.agents', 'workflow_flowchart.json'), getSubWorkflowDefinitionUri(uri)];
 			for (const candidateUri of candidateUris) {
 				if (await this.fileService.exists(candidateUri)) {
 					const fileContent = await this.fileService.readFile(candidateUri);
@@ -6523,12 +6557,23 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private readonly _nodeComponentPersistDebounceMap = new Map<string, ReturnType<typeof setTimeout>>();
 
+	/** The canvas showing a run's nodes: the workflow itself, or the Sub-Workflow ticket folder for a Sub-Workflow run. */
+	private _canvasUriOf(run: IWorkflowExecutionRun): string {
+		return (run as IInternalWorkflowRun)._canvasUri || run.workflowUri;
+	}
+
 	private async _persistAndNotifyNodeComponents(run: IWorkflowExecutionRun, node: IFlowchartNode): Promise<void> {
+		const canvasUri = this._canvasUriOf(run);
 		this._onDidUpdateNodeComponents.fire({
-			workflowUri: run.workflowUri,
+			workflowUri: canvasUri,
 			nodeId: node.id,
 			node
 		});
+		if (canvasUri !== run.workflowUri) {
+			// A Sub-Workflow run: an open canvas of the ticket merges the telemetry itself; its definition file is never
+			// rewritten from here (and the parent workflow's file is never touched)
+			return;
+		}
 
 		// If an open Workflow Editor owns this workflow's flowchart file, it merges runtime telemetry from the event above
 		// and saves the file itself. Never write the file from here, otherwise a read-modify-write race can revert the
