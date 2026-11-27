@@ -140,11 +140,15 @@ export class CreateTicketTool implements IToolImpl {
 					},
 					ticket_type: {
 						type: 'string',
-						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\'). Freestyle tickets cannot be created by tools (only manually in the UI). \'sub_workflow\' is reserved too: sub-workflows are created only by encapsulating nodes on a workflow canvas.'
+						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\'). Freestyle tickets cannot be created by tools (only manually in the UI). \'sub_workflow\' creates a reusable sub-workflow: parent_path must be a workflow ticket (or inside one); pass its definition in sub_workflow_definition.'
 					},
 					title: {
 						type: 'string',
 						description: 'Mandatory business title for README.md.'
+					},
+					sub_workflow_definition: {
+						type: 'object',
+						description: 'Only for ticket_type \'sub_workflow\' (optional): the sub-workflow definition {name, nodes: [{id, label, type, pipeline...}], links: [{from, to}], inputs: [{name, label, defaultValue}], outputs: [{varName, label, defaultFormat}]}. Node ids must be unique and links must connect given nodes. Omit it for an empty sub-workflow (no nodes). The ticket ID it gets is what Call Sub-Workflow steps use.'
 					},
 					description: {
 						type: 'string',

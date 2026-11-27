@@ -83,10 +83,16 @@ export interface ICreateResourceOptions {
 	 */
 	allowFreestyle?: boolean;
 	/**
-	 * Set only by Sub-Workflow encapsulation (and its one-time migration): Sub-Workflow tickets (type `sub_workflow`)
-	 * may only be created there. Without it, creating a Sub-Workflow ticket is refused.
+	 * Sub-Workflow tickets (type `sub_workflow`) only: the optional definition (object or JSON text with name, nodes,
+	 * links, inputs, outputs). Validated; when omitted the ticket gets an empty definition (no nodes, empty contract).
+	 * The ticket must be created inside a workflow folder (the parent workflow), otherwise creation fails.
 	 */
-	allowSubWorkflow?: boolean;
+	subWorkflowDefinition?: unknown;
+	/**
+	 * Internal (encapsulation and the one-time migration): `subWorkflowDefinition` is a complete definition whose
+	 * source workflow is already known, so the parent folder is not checked for being a workflow folder.
+	 */
+	subWorkflowSourceKnown?: boolean;
 }
 
 export type CanonicalStatusCategory = 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed';
@@ -157,6 +163,8 @@ export const IWorkspacesExplorerService = createDecorator<IWorkspacesExplorerSer
 export interface IWorkspacesExplorerService {
 	readonly _serviceBrand: undefined;
 	readonly onDidChangeWorkspaces: Event<void>;
+	/** Fires with the ticket folder after a `sub_workflow` ticket (and its definition file) was created. */
+	readonly onDidCreateSubWorkflowTicket: Event<URI>;
 
 	getActiveUserEmail(): string;
 	getWorkspaces(): Promise<IWorkspaceItem[]>;

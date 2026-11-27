@@ -45,16 +45,16 @@ export function isReservedFreestyleTemplate(template: { id?: string; name?: stri
 }
 
 /**
- * A "Sub-Workflow" ticket (CI-23) is created only by encapsulating nodes on a workflow canvas. Its definition
- * (nodes, links, inputs / outputs contract) is stored in the ticket folder; the ticket type is reserved like Freestyle.
+ * A "Sub-Workflow" ticket (CI-23) lives inside its parent workflow folder. It is created by encapsulating nodes on a
+ * workflow canvas, or by programs / AI (create_tickets, CREATE_TICKETS, the createTicket tool) with a target inside a
+ * workflow folder. Its definition (nodes, links, inputs / outputs contract) is stored in the ticket folder. The type
+ * name is reserved: no template may use it.
  */
 export const SUB_WORKFLOW_TICKET_TYPE = 'sub_workflow';
 
-export const SUB_WORKFLOW_TYPE_DEFINITION = 'A Sub-Workflow ticket is a reusable group of workflow nodes, created by encapsulating nodes on a workflow canvas. Its definition (nodes, links, inputs / outputs) is stored in .agents/sub_workflow.json inside the ticket folder; the source workflow canvas stays the source of truth.';
+export const SUB_WORKFLOW_TYPE_DEFINITION = 'A Sub-Workflow ticket is a reusable group of workflow nodes inside its parent workflow folder (created by encapsulating nodes on a workflow canvas, or by a program / AI). Its definition (nodes, links, inputs / outputs) is stored in .agents/sub_workflow.json inside the ticket folder; the source workflow canvas stays the source of truth.';
 export const SUB_WORKFLOW_TYPE_PROMPT = 'A Sub-Workflow ticket is called from workflows by its ticket ID (Call Sub-Workflow step). Edit its nodes on the source workflow canvas, not in this ticket.';
 
-/** Error returned by every non-encapsulation path that tries to create a Sub-Workflow ticket. */
-export const SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR = 'Sub-Workflow tickets can only be created by encapsulating nodes on a workflow canvas (Workflow Outline > Encapsulate Selected Nodes); choose a template type. To call an existing sub-workflow, find it with GET_TICKETS(ticket_type="sub_workflow") and put its ticket ID into a Call Sub-Workflow step.';
 
 /** "sub_workflow" (also `Sub Workflow`, `sub-workflow`, `SUBWORKFLOW`) is reserved for Sub-Workflow tickets. */
 export function isReservedSubWorkflowName(value: string | undefined | null): boolean {
@@ -79,7 +79,7 @@ export function isReservedTemplate(template: { id?: string; name?: string } | un
 /** Error shown when a template would be created or renamed to a reserved name (Freestyle or Sub-Workflow). */
 export function getReservedTypeNameMessage(value: string): string {
 	if (isReservedSubWorkflowName(value)) {
-		return `"${value}" is reserved for Sub-Workflow tickets (created by encapsulating workflow nodes). Please choose a different template name.`;
+		return `"${value}" is reserved for Sub-Workflow tickets (ticket type sub_workflow). Please choose a different template name.`;
 	}
 	return getReservedFreestyleNameMessage(value);
 }
@@ -119,16 +119,16 @@ export function getReservedTemplateNameError(template: { id?: string; name?: str
 
 /**
  * Programmatic ticket creation (workflow components, the ticket runtime, AI tools) may not create Freestyle
- * or Sub-Workflow tickets. Returns the error to report when `ticketType` is one of the reserved types.
+ * tickets. Returns the error to report when `ticketType` is the reserved Freestyle type. Sub-Workflow tickets may be
+ * created programmatically (inside a workflow folder, see the Sub-Workflow ticket creation).
  */
 export function getProgrammaticTicketTypeError(ticketType: string | undefined): string | undefined {
-	if (isReservedFreestyleName(ticketType)) {
-		return FREESTYLE_PROGRAMMATIC_CREATE_ERROR;
-	}
-	if (isReservedSubWorkflowName(ticketType)) {
-		return SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR;
-	}
-	return undefined;
+	return isReservedFreestyleName(ticketType) ? FREESTYLE_PROGRAMMATIC_CREATE_ERROR : undefined;
+}
+
+/** Error when a (legacy) template uses the reserved Sub-Workflow name: a naming clash with the sub_workflow type. */
+export function getSubWorkflowTemplateClashMessage(templateName: string): string {
+	return `The template "${templateName}" uses the name reserved for the sub_workflow ticket type. Rename that template; sub_workflow tickets are created without a template.`;
 }
 
 /** Error to report when a matched template uses a reserved name (it would produce a ticket read as that type). */
@@ -136,7 +136,13 @@ export function getReservedTemplateCreateError(template: { id?: string; name?: s
 	if (!template) {
 		return undefined;
 	}
-	return getProgrammaticTicketTypeError(template.id) ?? getProgrammaticTicketTypeError(template.name);
+	if (isReservedFreestyleName(template.id) || isReservedFreestyleName(template.name)) {
+		return FREESTYLE_PROGRAMMATIC_CREATE_ERROR;
+	}
+	if (isReservedSubWorkflowName(template.id) || isReservedSubWorkflowName(template.name)) {
+		return getSubWorkflowTemplateClashMessage(template.name || template.id || '');
+	}
+	return undefined;
 }
 
 /** Where a Freestyle ticket's own structure is stored: `<ticket folder>/.agents/freestyle_schema.json`. */

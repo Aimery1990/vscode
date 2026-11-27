@@ -6,8 +6,8 @@ import { URI } from '../../../../base/common/uri.js';
 import { ISubWorkflowDefinition, IWorkflowInputParamDef, IWorkflowOutputDef } from './workflowExecutionModel.js';
 
 /**
- * Sub-Workflow tickets (CI-23): encapsulating nodes on a workflow canvas creates a ticket of type `sub_workflow`
- * inside the workflow folder. Its definition is stored in `<ticket folder>/.agents/sub_workflow.json`; ticket.md
+ * Sub-Workflow tickets (CI-23): encapsulating nodes on a workflow canvas, or a program / AI creating a ticket of type
+ * `sub_workflow` inside a workflow folder, creates a Sub-Workflow ticket inside that workflow folder. Its definition is stored in `<ticket folder>/.agents/sub_workflow.json`; ticket.md
  * carries the name, the source workflow and an inputs / outputs summary. This file holds the pure logic
  * (definition (de)serialization, summaries, legacy-id resolution and the migration plan).
  */
@@ -565,4 +565,154 @@ export function getUncoveredLegacySubWorkflows(legacyDefs: readonly ISubWorkflow
 		result.push(def);
 	}
 	return result;
+}
+
+/** Error when a Sub-Workflow ticket would be created outside a workflow folder. */
+export function getSubWorkflowParentError(targetPath: string): string {
+	return `A sub_workflow ticket must be created inside a workflow folder (the parent workflow): set the target path / parent to that workflow ticket (e.g. path="FINDJ-0003"). '${targetPath}' is not inside a workflow folder.`;
+}
+
+/** What a program / AI may pass as the definition of a new Sub-Workflow ticket (all optional). */
+export interface ISubWorkflowDefinitionInputDefaults {
+	name: string;
+	sourceWorkflowUri: string;
+	sourceWorkflowName?: string;
+	now?: number;
+}
+
+function inputError(message: string): { error: string } {
+	return { error: `Invalid sub_workflow definition: ${message}` };
+}
+
+/**
+ * Validates the optional definition given when a program or AI creates a Sub-Workflow ticket and turns it into a
+ * draft (id still empty; the ticket ID is assigned on creation). `raw` may be undefined (an empty definition: no
+ * nodes, empty contract), a JSON string, or an object with optional `name`, `nodes`, `links`, `inputs`, `outputs`,
+ * `description`, `namespace`. Nodes need unique string ids; links need `from` / `to` naming those nodes; inputs need
+ * a `name`; outputs need a `varName` or `label`. The source workflow is always the parent workflow folder.
+ */
+export function buildSubWorkflowDraftFromInput(raw: unknown, defaults: ISubWorkflowDefinitionInputDefaults): { draft: ISubWorkflowDefinition; error?: undefined } | { draft?: undefined; error: string } {
+	let value: unknown = raw;
+	if (typeof value === 'string') {
+		const text = value.trim();
+		if (!text) {
+			value = undefined;
+		} else {
+			try {
+				value = JSON.parse(text);
+			} catch {
+				return inputError('it is not valid JSON.');
+			}
+		}
+	}
+	if (value === undefined || value === null) {
+		value = {};
+	}
+	if (!isRecord(value)) {
+		return inputError('expected an object with optional name, nodes, links, inputs and outputs.');
+	}
+	const rec: Record<string, unknown> = value;
+
+	const listOf = (key: string): unknown[] | { error: string } => {
+		const v = rec[key];
+		if (v === undefined || v === null) {
+			return [];
+		}
+		return Array.isArray(v) ? v : inputError(`"${key}" must be a list.`);
+	};
+	const nodes = listOf('nodes');
+	const links = listOf('links');
+	const inputs = listOf('inputs');
+	const outputs = listOf('outputs');
+	for (const list of [nodes, links, inputs, outputs]) {
+		if (!Array.isArray(list)) {
+			return list;
+		}
+	}
+	const nodeList = nodes as unknown[];
+	const nodeIds: string[] = [];
+	for (let i = 0; i < nodeList.length; i++) {
+		const node = nodeList[i];
+		if (!isRecord(node) || typeof node.id !== 'string' || !node.id.trim()) {
+			return inputError(`nodes[${i}] must be an object with a string "id".`);
+		}
+		if (nodeIds.includes(node.id)) {
+			return inputError(`node id "${node.id}" is used twice.`);
+		}
+		nodeIds.push(node.id);
+	}
+	const linkList = links as unknown[];
+	for (let i = 0; i < linkList.length; i++) {
+		const link = linkList[i];
+		if (!isRecord(link) || typeof link.from !== 'string' || typeof link.to !== 'string') {
+			return inputError(`links[${i}] must be an object with string "from" and "to".`);
+		}
+		if (!nodeIds.includes(link.from) || !nodeIds.includes(link.to)) {
+			return inputError(`links[${i}] connects "${link.from}" -> "${link.to}", but both must be ids of the given nodes.`);
+		}
+	}
+	const inputList = inputs as unknown[];
+	for (let i = 0; i < inputList.length; i++) {
+		const input = inputList[i];
+		if (!isRecord(input) || typeof input.name !== 'string' || !input.name.trim()) {
+			return inputError(`inputs[${i}] must be an object with a string "name".`);
+		}
+	}
+	const outputList = outputs as unknown[];
+	for (let i = 0; i < outputList.length; i++) {
+		const output = outputList[i];
+		if (!isRecord(output) || !((typeof output.varName === 'string' && output.varName.trim()) || (typeof output.label === 'string' && output.label.trim()))) {
+			return inputError(`outputs[${i}] must be an object with a string "varName" or "label".`);
+		}
+	}
+	if (rec.name !== undefined && typeof rec.name !== 'string') {
+		return inputError('"name" must be a string.');
+	}
+	const now = defaults.now ?? Date.now();
+	const normalized = normalizeSubWorkflowDefinition({
+		name: (typeof rec.name === 'string' && rec.name.trim()) ? rec.name.trim() : defaults.name,
+		description: rec.description,
+		namespace: rec.namespace,
+		id: 'pending',
+		nodes: nodeList,
+		nodeIds,
+		links: linkList,
+		inputs: inputList,
+		outputs: outputList,
+		createdAt: now,
+		updatedAt: now
+	});
+	if (!normalized) {
+		return inputError('it could not be read.');
+	}
+	normalized.id = '';
+	normalized.sourceWorkflowUri = defaults.sourceWorkflowUri;
+	if (defaults.sourceWorkflowName) {
+		normalized.sourceWorkflowName = defaults.sourceWorkflowName;
+	}
+	normalized.isHiddenInSource = false;
+	return { draft: normalized };
+}
+
+/**
+ * The parent workflow of a new Sub-Workflow ticket: the nearest folder, `start` itself or one of its ancestors, that
+ * `isWorkflowFolder` accepts. `undefined` when there is none (the ticket must not be created there).
+ */
+export async function findEnclosingWorkflowFolder(start: URI, isWorkflowFolder: (folder: URI) => Promise<boolean>, maxDepth = 12): Promise<URI | undefined> {
+	let curr = start;
+	for (let depth = 0; depth < maxDepth; depth++) {
+		if (await isWorkflowFolder(curr)) {
+			return curr;
+		}
+		const parentPath = curr.path.replace(/\/+$/, '').replace(/\/[^/]*$/, '');
+		if (parentPath === curr.path.replace(/\/+$/, '')) {
+			break;
+		}
+		const next = curr.with({ path: parentPath || '/' });
+		if (next.path === curr.path) {
+			break;
+		}
+		curr = next;
+	}
+	return undefined;
 }

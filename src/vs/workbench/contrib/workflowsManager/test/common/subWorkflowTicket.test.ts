@@ -9,6 +9,9 @@ import { ISubWorkflowDefinition } from '../../common/workflowExecutionModel.js';
 import {
 	SUB_WORKFLOW_DEFINITION_REL_PATH,
 	applySubWorkflowMetadataToTicketMd,
+	buildSubWorkflowDraftFromInput,
+	findEnclosingWorkflowFolder,
+	getSubWorkflowParentError,
 	buildSubWorkflowContract,
 	buildSubWorkflowLookup,
 	buildSubWorkflowTicketIndex,
@@ -242,6 +245,70 @@ suite('subWorkflowTicket', () => {
 		assert.deepStrictEqual(migrated.nodes, legacy.nodes);
 		assert.strictEqual(legacy.id, 'subwf_9_zz', 'the legacy definition is not modified');
 		assert.ok(serializeSubWorkflowDefinition(migrated).includes('"legacyId": "subwf_9_zz"'));
+	});
+
+	test('creates a valid sub_workflow ticket definition from a program / AI definition', () => {
+		const defaults = { name: 'From Title', sourceWorkflowUri: 'file:///ws/FINDJ-0003', sourceWorkflowName: 'Find Leads', now: 5 };
+		// No definition: a valid empty one (no nodes, empty contract)
+		const empty = buildSubWorkflowDraftFromInput(undefined, defaults);
+		assert.strictEqual(empty.error, undefined);
+		assert.deepStrictEqual({ ...empty.draft }, {
+			id: '', name: 'From Title', nodeIds: [], nodes: [], links: [], inputs: [], outputs: [], createdAt: 5, updatedAt: 5,
+			sourceWorkflowUri: 'file:///ws/FINDJ-0003', sourceWorkflowName: 'Find Leads', isHiddenInSource: false
+		});
+		assert.strictEqual(buildSubWorkflowDraftFromInput('  ', defaults).draft?.nodes.length, 0);
+		assert.strictEqual(buildSubWorkflowDraftFromInput(null, defaults).draft?.name, 'From Title');
+
+		const full = {
+			name: 'Lead Search',
+			nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+			links: [{ from: 'a', to: 'b' }],
+			inputs: [{ name: 'query', defaultValue: 'AI' }],
+			outputs: [{ varName: 'leads', defaultFormat: 'json' }],
+			sourceWorkflowUri: 'file:///elsewhere'
+		};
+		const draft = buildSubWorkflowDraftFromInput(full, defaults).draft!;
+		assert.strictEqual(draft.name, 'Lead Search');
+		assert.deepStrictEqual(draft.nodeIds, ['a', 'b']);
+		assert.strictEqual(draft.links.length, 1);
+		assert.strictEqual(draft.inputs[0].name, 'query');
+		assert.strictEqual(draft.outputs[0].varName, 'leads');
+		assert.strictEqual(draft.sourceWorkflowUri, 'file:///ws/FINDJ-0003', 'the source is always the parent workflow');
+		// JSON text works too and the result serializes like any other definition
+		const fromJson = buildSubWorkflowDraftFromInput(JSON.stringify(full), defaults).draft!;
+		assert.deepStrictEqual(fromJson.nodeIds, ['a', 'b']);
+		const stored = parseSubWorkflowDefinition(serializeSubWorkflowDefinition({ ...fromJson, id: 'FINDJ-0050' }))!;
+		assert.strictEqual(stored.id, 'FINDJ-0050');
+		assert.strictEqual(buildSubWorkflowTicketMetadata(stored)['Inputs'], 'query (default: "AI")');
+	});
+
+	test('invalid sub_workflow definitions are rejected with a clear message', () => {
+		const defaults = { name: 'X', sourceWorkflowUri: 'file:///ws/W' };
+		const errorOf = (raw: unknown) => buildSubWorkflowDraftFromInput(raw, defaults).error || '';
+		assert.ok(errorOf('{bad').includes('not valid JSON'));
+		assert.ok(errorOf(42).includes('expected an object'));
+		assert.ok(errorOf([]).includes('expected an object'));
+		assert.ok(errorOf({ nodes: {} }).includes('"nodes" must be a list'));
+		assert.ok(errorOf({ nodes: [{ label: 'no id' }] }).includes('nodes[0]'));
+		assert.ok(errorOf({ nodes: [{ id: 'a' }, { id: 'a' }] }).includes('used twice'));
+		assert.ok(errorOf({ nodes: [{ id: 'a' }], links: [{ from: 'a', to: 'zz' }] }).includes('links[0]'));
+		assert.ok(errorOf({ links: [{ from: 'a' }] }).includes('links[0]'));
+		assert.ok(errorOf({ inputs: [{ label: 'x' }] }).includes('inputs[0]'));
+		assert.ok(errorOf({ outputs: [{ defaultFormat: 'json' }] }).includes('outputs[0]'));
+		assert.ok(errorOf({ name: 3 }).includes('"name"'));
+		assert.ok(errorOf({ nodes: 'x' }).startsWith('Invalid sub_workflow definition'));
+	});
+
+	test('creation fails outside a workflow folder and uses the nearest enclosing workflow', async () => {
+		const workflows = new Set(['/ws/FINDJ-0003']);
+		const isWorkflow = async (folder: URI) => workflows.has(folder.path);
+		assert.strictEqual((await findEnclosingWorkflowFolder(URI.file('/ws/FINDJ-0003'), isWorkflow))?.path, '/ws/FINDJ-0003');
+		assert.strictEqual((await findEnclosingWorkflowFolder(URI.file('/ws/FINDJ-0003/FINDJ-0042/notes'), isWorkflow))?.path, '/ws/FINDJ-0003');
+		assert.strictEqual(await findEnclosingWorkflowFolder(URI.file('/ws/FINDJ-0001'), isWorkflow), undefined);
+		assert.strictEqual(await findEnclosingWorkflowFolder(URI.file('/'), isWorkflow), undefined);
+		const message = getSubWorkflowParentError('/ws/FINDJ-0001');
+		assert.ok(message.includes('must be created inside a workflow folder'));
+		assert.ok(message.includes('/ws/FINDJ-0001'));
 	});
 
 	test('legacy definitions without a loaded ticket stay usable', () => {

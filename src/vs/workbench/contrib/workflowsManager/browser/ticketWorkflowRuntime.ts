@@ -16,8 +16,8 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
-import { createDefaultFreestyleSchema, getProgrammaticTicketTypeError, getReservedTemplateCreateError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
-import { ISubWorkflowContract, ISubWorkflowTicketSummary, buildSubWorkflowContract, buildSubWorkflowTicketSummary, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition, subWorkflowSummaryFromMetadata } from '../common/subWorkflowTicket.js';
+import { SUB_WORKFLOW_TICKET_TYPE, createDefaultFreestyleSchema, getProgrammaticTicketTypeError, getReservedTemplateCreateError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { ISubWorkflowContract, ISubWorkflowTicketSummary, buildSubWorkflowContract, buildSubWorkflowTicketMetadata, buildSubWorkflowTicketSummary, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition, subWorkflowSummaryFromMetadata } from '../common/subWorkflowTicket.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
@@ -590,8 +590,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const title = options.title?.trim() || 'New Ticket';
 			const ticketType = options.ticketType?.trim() || 'task';
 
-			// Freestyle tickets can only be created manually in the UI (create dialog) and Sub-Workflow tickets only by
-			// encapsulating workflow nodes; never by workflows, Python or AI tools
+			// Freestyle tickets can only be created manually in the UI (create dialog), never by workflows, Python or AI tools
 			const reservedTypeError = getProgrammaticTicketTypeError(ticketType);
 			if (reservedTypeError) {
 				throw new Error(reservedTypeError);
@@ -610,6 +609,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// 2. Prepare target parent folder path & find root workspace URI
 			const targetSubPath = (options.targetPath || '').trim().replace(/^\/+|\/+$/g, '');
 			const parentFolderUri = targetSubPath ? URI.joinPath(wsUri, targetSubPath) : wsUri;
+
+			if (isSubWorkflowTicketType(ticketType)) {
+				return await this._createSubWorkflowTicket(options, parentFolderUri, title);
+			}
 			const rootWsUri = await this.workspacesExplorerService.findWorkspaceRootUri(parentFolderUri);
 
 			// 3. Generate sequential ticket ID and code matching workspace convention (e.g. NEOWO-0011)
@@ -4356,7 +4359,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				icon: 'new-file',
 				category: 'processing',
 				description: 'Creates a new ticket from a ticket template (type), e.g. one record per training run.',
-				executionBehavior: 'Config: wfTicketType* (template id), wfTicketTitle (supports {var}; default "New Ticket"), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}} matching the template Inputs. Returns a ticket handle {success, ticketId, ticketName, ticketType, entityUri, targetFolder, fields}. In workflow nodes it compiles to Python: v = CREATE_TICKETS(ticket_type=..., title=..., path=..., params={...}). The reserved types "freestyle" and "sub_workflow" cannot be created this way (sub-workflows are created only by encapsulating nodes on a canvas).',
+				executionBehavior: 'Config: wfTicketType* (template id), wfTicketTitle (supports {var}; default "New Ticket"), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}} matching the template Inputs. Returns a ticket handle {success, ticketId, ticketName, ticketType, entityUri, targetFolder, fields}. In workflow nodes it compiles to Python: v = CREATE_TICKETS(ticket_type=..., title=..., path=..., params={...}). Freestyle tickets cannot be created this way. wfTicketType "sub_workflow" creates a reusable sub-workflow ticket: wfTicketPath must be the parent workflow folder (or a folder inside it; "." when the workflow itself runs), and the optional wfTicketParams.definition {name, nodes, links, inputs, outputs} (object or JSON) is validated; without it the sub-workflow is empty (no nodes).',
 				supportedInputs: ['template id', 'title', 'folder', 'template Inputs values'],
 				supportedOutputs: ['ticket handle (pass it to Run Tickets / Get Outputs as {var})']
 			},
@@ -4416,7 +4419,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				icon: 'layers',
 				category: 'composite',
 				description: 'Calls a reusable sub-workflow (a sub_workflow ticket) inside a node: passes inputs in, runs it, and hands its outputs to the next steps. Works in the workflow it was encapsulated from and in any other workflow.',
-				executionBehavior: 'Config: subWorkflowId* (the sub-workflow TICKET ID, e.g. FINDJ-0042: find it with GET_TICKETS(ticket_type="sub_workflow"), read its inputs / outputs with GET_TICKET(id)), subWorkflowInputs {inputName: expression or {var}}. Runs the sub-workflow with those inputs; the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. Creating a new sub-workflow is a separate action (encapsulate selected nodes on a workflow canvas, which creates the sub_workflow ticket), not done by this component or by CREATE_TICKETS.',
+				executionBehavior: 'Config: subWorkflowId* (the sub-workflow TICKET ID, e.g. FINDJ-0042: find it with GET_TICKETS(ticket_type="sub_workflow"), read its inputs / outputs with GET_TICKET(id)), subWorkflowInputs {inputName: expression or {var}}. Runs the sub-workflow with those inputs; the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. Creating a new sub-workflow is a separate action, not done by this component: encapsulate selected nodes on a workflow canvas, or CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {...}}).',
 				supportedInputs: ['sub-workflow ticket id', 'input bindings'],
 				supportedOutputs: ['sub-workflow outputs (single value or dictionary)'],
 				usableIn: ['node']
@@ -4699,6 +4702,46 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 		}
 		return results;
+	}
+
+	/**
+	 * CREATE_TICKETS / create_tickets / Python with ticket_type "sub_workflow": the same creation path as encapsulation
+	 * (createResourceUnderWorkspace). The target must be inside a workflow folder; the optional definition comes from
+	 * params.definition (object or JSON), or from params with nodes / links / inputs / outputs keys.
+	 */
+	private async _createSubWorkflowTicket(options: ITicketCreateOptions, parentFolderUri: URI, title: string): Promise<ITicketCreateResult> {
+		const params: Record<string, unknown> = { ...(options.parameters || {}), ...(options.fieldValues || {}) };
+		const definition = params.definition !== undefined
+			? params.definition
+			: ((params.nodes !== undefined || params.links !== undefined || params.inputs !== undefined || params.outputs !== undefined) ? params : undefined);
+		const result = await this.workspacesExplorerService.createResourceUnderWorkspace({
+			type: SUB_WORKFLOW_TICKET_TYPE,
+			targetParentUri: parentFolderUri,
+			name: (options.folderName || options.name || '').trim(),
+			title: options.title?.trim() || undefined,
+			description: options.description,
+			status: options.status,
+			priority: options.priority,
+			subWorkflowDefinition: definition
+		});
+		if (result.alreadyExists) {
+			throw new Error(`Ticket folder ${result.uri.fsPath} already exists. Cannot create duplicate ticket with the same name.`);
+		}
+		const ticketId = this.entityPersistenceService.getSnapshot(result.uri)?.ticketId || result.uri.path.split('/').filter(Boolean).pop() || '';
+		const def = await this._readSubWorkflowDefinition(result.uri, ticketId);
+		return {
+			success: true,
+			ticketId: def?.id || ticketId,
+			ticketName: result.uri.path.split('/').filter(Boolean).pop() || ticketId,
+			ticketType: SUB_WORKFLOW_TICKET_TYPE,
+			title: def?.name || title,
+			status: options.status || 'Todo',
+			entityUri: result.uri.toString(),
+			targetFolder: result.uri.fsPath,
+			parameters: params,
+			fields: def ? buildSubWorkflowTicketMetadata(def) : {},
+			isHandle: true
+		};
 	}
 
 	/** Reads the definition file of a Sub-Workflow ticket; `undefined` when it is missing or invalid. */

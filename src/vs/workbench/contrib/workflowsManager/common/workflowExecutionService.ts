@@ -85,8 +85,9 @@ export interface IWorkflowExecutionService {
 	 */
 	resolveSubWorkflow(reference: string, contextUri?: string): Promise<ISubWorkflowDefinition | undefined>;
 	/**
-	 * Encapsulation only: creates the Sub-Workflow ticket for `draft` inside its source workflow folder (normal ticket
-	 * numbering) and stores the definition in the ticket folder. Returns the definition with its ticket ID as `id`.
+	 * Encapsulation: creates the Sub-Workflow ticket for `draft` inside its source workflow folder (normal ticket
+	 * numbering) and stores the definition in the ticket folder, through the same createResourceUnderWorkspace path that
+	 * programs and AI use. Returns the definition with its ticket ID as `id`.
 	 */
 	createSubWorkflowTicket(draft: ISubWorkflowDefinition): Promise<ISubWorkflowDefinition>;
 	getLatestSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;

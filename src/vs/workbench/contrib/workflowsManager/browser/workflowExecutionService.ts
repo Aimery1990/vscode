@@ -37,8 +37,7 @@ import {
 	parseSubWorkflowTicketIndex,
 	planSubWorkflowMigration,
 	serializeSubWorkflowDefinition,
-	stripHeavyMediaFromSubWorkflow,
-	toMigratedSubWorkflowDefinition
+	stripHeavyMediaFromSubWorkflow
 } from '../common/subWorkflowTicket.js';
 import {
 	ISubWorkflowDefinition,
@@ -1039,6 +1038,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		@IPathService private readonly pathService: IPathService
 	) {
 		this._cleanupStaleKernelDirsOnStartup().catch(() => { });
+		this.workspacesExplorerService.onDidCreateSubWorkflowTicket(folderUri => {
+			this._onSubWorkflowTicketCreated(folderUri).catch(err => this.logService.warn('[WorkflowExecution] Could not load the new Sub-Workflow ticket:', err));
+		});
 	}
 
 	private _coerceInputLiteral(val: unknown): unknown {
@@ -1743,36 +1745,44 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			parentUri = await this._getGlobalSubWorkflowParentFolder();
 		}
 		const legacyId = isMigration ? (draft.legacyId || draft.id) : draft.legacyId;
-		const preview: ISubWorkflowDefinition = { ...draft, legacyId };
+		// The same creation path as programs / AI: createResourceUnderWorkspace writes the ticket, ticket.md summary and
+		// the definition file; the source workflow is known here, so the parent folder check is skipped
+		const known: ISubWorkflowDefinition = { ...draft, id: '', legacyId };
+		if (!known.legacyId) {
+			delete known.legacyId;
+		}
 		const result = await this.workspacesExplorerService.createResourceUnderWorkspace({
 			type: SUB_WORKFLOW_TICKET_TYPE,
 			targetParentUri: parentUri,
 			name: '',
 			title: draft.name,
-			description: buildSubWorkflowTicketDescription(preview),
-			customMetadata: buildSubWorkflowTicketMetadata(preview),
-			allowSubWorkflow: true
+			subWorkflowDefinition: known,
+			subWorkflowSourceKnown: true
 		});
 		if (result.alreadyExists) {
 			throw new Error(`A ticket folder already exists at ${result.uri.toString()}; the Sub-Workflow ticket was not created.`);
 		}
 		const folderUri = result.uri;
-		const snapshot = this.entityPersistenceService.getSnapshot(folderUri);
-		const ticketId = snapshot?.ticketId || folderUri.path.split('/').filter(Boolean).pop() || '';
-		if (!ticketId) {
-			throw new Error('The Sub-Workflow ticket was created without a ticket ID.');
+		const fallbackId = this.entityPersistenceService.getSnapshot(folderUri)?.ticketId || folderUri.path.split('/').filter(Boolean).pop() || '';
+		const def = await this._readSubWorkflowTicket(folderUri, fallbackId);
+		if (!def) {
+			throw new Error(`The Sub-Workflow ticket was created at ${folderUri.toString()}, but its definition file could not be read.`);
 		}
-		const def: ISubWorkflowDefinition = isMigration
-			? toMigratedSubWorkflowDefinition(draft, ticketId, folderUri.toString())
-			: { ...JSON.parse(JSON.stringify(draft)), id: ticketId, ticketFolderUri: folderUri.toString() };
-		if (!def.legacyId) {
-			delete def.legacyId;
-		}
-		const text = serializeSubWorkflowDefinition(def);
-		await this.fileService.writeFile(getSubWorkflowDefinitionUri(folderUri), VSBuffer.fromString(text));
-		this._lastWrittenSubWorkflowJson.set(def.id, text);
 		this._lastWrittenSubWorkflowMeta.set(def.id, JSON.stringify(buildSubWorkflowTicketMetadata(def)));
 		return def;
+	}
+
+	/** A sub_workflow ticket created by any path (programs, AI, encapsulation): load it so Call Sub-Workflow finds it at once. */
+	private async _onSubWorkflowTicketCreated(folderUri: URI): Promise<void> {
+		await this.whenSubWorkflowsReady();
+		const folder = folderUri.toString();
+		if ((this._subWorkflowsCache || []).some(d => d.ticketFolderUri === folder)) {
+			return;
+		}
+		const def = await this._readSubWorkflowTicket(folderUri, folderUri.path.split('/').filter(Boolean).pop() || '');
+		if (def && !(this._subWorkflowsCache || []).some(d => d.ticketFolderUri === folder)) {
+			this._upsertSubWorkflowTicket(def);
+		}
 	}
 
 	/** Makes sure GET_TICKETS sees the Sub-Workflow ticket (and its inputs / outputs summary) even before the explorer scanned it. */

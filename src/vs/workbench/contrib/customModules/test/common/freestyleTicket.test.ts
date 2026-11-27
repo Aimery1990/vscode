@@ -9,7 +9,6 @@ import { ICustomModule } from '../../../entityPersistence/common/entityPersisten
 import {
 	FREESTYLE_PROGRAMMATIC_CREATE_ERROR,
 	FREESTYLE_TICKET_TYPE,
-	SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR,
 	getReservedTemplateCreateError,
 	getReservedTypeNameMessage,
 	isReservedSubWorkflowName,
@@ -163,13 +162,13 @@ suite('freestyleTicket', () => {
 		assert.strictEqual(isReservedTemplate({ id: 'bug', name: 'Bug' }), false);
 	});
 
-	test('programmatic creation of sub_workflow tickets fails with a clear message', () => {
-		assert.strictEqual(getProgrammaticTicketTypeError('sub_workflow'), SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR);
-		assert.strictEqual(getProgrammaticTicketTypeError('Sub-Workflow'), SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR);
-		assert.ok(SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR.includes('encapsulating'));
-		assert.ok(SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR.includes('GET_TICKETS(ticket_type="sub_workflow")'));
-		// A (legacy) template whose id or name collides is refused the same way
-		assert.strictEqual(getReservedTemplateCreateError({ id: 'sub-workflow', name: 'My Flow' }), SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR);
+	test('programs and AI may create sub_workflow tickets; only a clashing template is refused', () => {
+		assert.strictEqual(getProgrammaticTicketTypeError('sub_workflow'), undefined);
+		assert.strictEqual(getProgrammaticTicketTypeError('Sub-Workflow'), undefined);
+		assert.strictEqual(getProgrammaticTicketTypeError('Freestyle'), FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
+		// A (legacy) template whose id or name collides with the reserved name is a naming clash
+		assert.ok(getReservedTemplateCreateError({ id: 'sub-workflow', name: 'My Flow' })?.includes('reserved for the sub_workflow ticket type'));
+		assert.ok(getReservedTemplateCreateError({ id: 'x', name: 'Sub Workflow' })?.includes('"Sub Workflow"'));
 		assert.strictEqual(getReservedTemplateCreateError({ id: 'x', name: 'Freestyle' }), FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
 		assert.strictEqual(getReservedTemplateCreateError({ id: 'bug', name: 'Bug' }), undefined);
 		assert.strictEqual(getReservedTemplateCreateError(undefined), undefined);

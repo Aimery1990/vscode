@@ -12,7 +12,7 @@ import { IAgentsManagerService } from '../../../agentsManager/common/agentsManag
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ISqliteTableOperationResult, ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { findTemplateField, getTemplateFields, parseTemplateYaml } from '../../../customModules/common/templateYaml.js';
-import { getProgrammaticTicketTypeError, isFreestyleTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
+import { getProgrammaticTicketTypeError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
 import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
@@ -71,6 +71,8 @@ export interface ICreateTicketToolOptions {
 	link_to?: string;
 	attachments?: string[];
 	custom_values?: Record<string, unknown>;
+	/** ticket_type "sub_workflow" only: optional definition (object or JSON text: name, nodes, links, inputs, outputs). */
+	sub_workflow_definition?: unknown;
 	worklog_record: IWorklogRecord;
 }
 
@@ -1046,8 +1048,7 @@ export class TicketDataEngine {
 	 * 2. anyagent_create_ticket
 	 */
 	public async createTicket(options: ICreateTicketToolOptions) {
-		// Freestyle tickets can only be created manually in the UI (create dialog) and Sub-Workflow tickets only by
-		// encapsulating workflow nodes; never by AI tools
+		// Freestyle tickets can only be created manually in the UI (create dialog), never by AI tools
 		const reservedTypeError = getProgrammaticTicketTypeError(options.ticket_type);
 		if (reservedTypeError) {
 			throw new Error(reservedTypeError);
@@ -1076,7 +1077,8 @@ export class TicketDataEngine {
 		const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(wsUri);
 		const initialStatus = options.status || wsStatuses.initialStatus || 'Todo';
 
-		// 4. Create resource
+		// 4. Create resource (a sub_workflow ticket must be inside a workflow folder; its definition is validated there)
+		const isSubWorkflow = isSubWorkflowTicketType(options.ticket_type);
 		const result = await this.workspacesExplorerService.createResourceUnderWorkspace({
 			workspaceUri: wsUri,
 			targetParentUri: parentFolderUri,
@@ -1089,7 +1091,8 @@ export class TicketDataEngine {
 			assignedAgentName: options.assigned_agent || 'None',
 			linkTo: options.link_to || 'None',
 			ticketPrompt: options.ticket_prompt,
-			customMetadata: options.custom_values ? this._flattenCustomValues(options.custom_values) : undefined
+			customMetadata: (options.custom_values && !isSubWorkflow) ? this._flattenCustomValues(options.custom_values) : undefined,
+			subWorkflowDefinition: isSubWorkflow ? (options.sub_workflow_definition ?? options.custom_values?.definition) : undefined
 		});
 
 		// 5. Append initial worklog record

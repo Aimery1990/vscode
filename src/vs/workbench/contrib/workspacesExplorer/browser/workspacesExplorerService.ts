@@ -14,7 +14,9 @@ import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR, ensureFreestyleSchema, isFreestyleTicketType, isSubWorkflowTicketType } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, ensureFreestyleSchema, isFreestyleTicketType, isSubWorkflowTicketType } from '../../customModules/common/freestyleTicket.js';
+import { ISubWorkflowDefinition } from '../../workflowsManager/common/workflowExecutionModel.js';
+import { buildSubWorkflowDraftFromInput, findEnclosingWorkflowFolder, buildSubWorkflowTicketDescription, buildSubWorkflowTicketMetadata, getSubWorkflowDefinitionUri, getSubWorkflowParentError, normalizeSubWorkflowDefinition, serializeSubWorkflowDefinition } from '../../workflowsManager/common/subWorkflowTicket.js';
 import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { EditorsOrder } from '../../../common/editor.js';
@@ -30,6 +32,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	private readonly _onDidChangeWorkspaces = this._register(new Emitter<void>());
 	readonly onDidChangeWorkspaces: Event<void> = this._onDidChangeWorkspaces.event;
+
+	private readonly _onDidCreateSubWorkflowTicket = this._register(new Emitter<URI>());
+	readonly onDidCreateSubWorkflowTicket: Event<URI> = this._onDidCreateSubWorkflowTicket.event;
 
 	private activeUserEmail: string = '';
 	private activeUserInitPromise: Promise<void>;
@@ -1484,10 +1489,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (isFreestyleTicketType(options.type) && !options.allowFreestyle) {
 			throw new Error(FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
 		}
-		// Sub-Workflow tickets are created only by encapsulating workflow nodes (which sets allowSubWorkflow)
-		if (isSubWorkflowTicketType(options.type) && !options.allowSubWorkflow) {
-			throw new Error(SUB_WORKFLOW_PROGRAMMATIC_CREATE_ERROR);
-		}
 		const targetFolderUri = options.targetParentUri || options.workspaceUri || URI.file('/Users/aimery/repos/jobs');
 		let workspaceRootUri: URI;
 		if (options.workspaceUri && !options.targetParentUri) {
@@ -1526,6 +1527,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			this._onDidChangeWorkspaces.fire();
 			return { alreadyExists, uri: fileUri };
 		}
+
+		// A Sub-Workflow ticket (encapsulation, programs, AI) belongs to a workflow: validated before anything is written
+		const subWorkflowDraft = isSubWorkflowTicketType(type) ? await this._prepareSubWorkflowDraft(options, targetFolderUri) : undefined;
 
 		const activeCode = await this.resolveEntityCode(targetFolderUri, options.code);
 
@@ -1626,7 +1630,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
-			title: options.title || name,
+			title: options.title || subWorkflowDraft?.name || name,
 			entityType: type,
 			entityCode: activeCode,
 			status: options.status || 'Todo',
@@ -1635,7 +1639,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			assignedAgentName: options.assignedAgentName,
 			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
-			description: description || (options.title ? options.title : `${parentType} ${type}`),
+			description: description || (subWorkflowDraft ? buildSubWorkflowTicketDescription(subWorkflowDraft) : (options.title ? options.title : `${parentType} ${type}`)),
 			belongsToWorkspaceUri: (isIndependentAgent || isIndependentWorkflow) ? undefined : workspaceRootUri.toString(),
 			role: description || `${parentType} Agent`,
 			modelName: finalModel.modelId,
@@ -1650,7 +1654,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			linkedBy: options.linkedBy,
 			attachments: attachmentNames,
 			git: (options.gitRepoUrl || options.gitBranch) ? { remoteUrl: options.gitRepoUrl, branch: options.gitBranch } : undefined,
-			customMetadata: options.customMetadata
+			customMetadata: subWorkflowDraft ? { ...(options.customMetadata || {}), ...buildSubWorkflowTicketMetadata(subWorkflowDraft) } : options.customMetadata
 		}, targetFolderUri, true);
 
 		if (type === 'agent' && this.agentsManagerService) {
@@ -1680,6 +1684,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}
 
+		// A Sub-Workflow ticket stores its definition (with the ticket ID as id) in the ticket folder
+		if (subWorkflowDraft) {
+			const definition: ISubWorkflowDefinition = { ...subWorkflowDraft, id: name };
+			await this.fileService.writeFile(getSubWorkflowDefinitionUri(entityFolderUri), VSBuffer.fromString(serializeSubWorkflowDefinition(definition)));
+		}
+
 		// Update persistent workspace sequence counter for activeCode (strictly monotonic)
 		const matchNum = sanitizedName.match(/[-_](\d+)$/);
 		if (matchNum) {
@@ -1690,6 +1700,57 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 
 		this._onDidChangeWorkspaces.fire();
+		if (subWorkflowDraft) {
+			this._onDidCreateSubWorkflowTicket.fire(entityFolderUri);
+		}
 		return { alreadyExists: false, uri: entityFolderUri };
+	}
+
+	/**
+	 * The definition of a new Sub-Workflow ticket. Encapsulation and the migration pass a complete definition whose
+	 * source workflow is known; every other caller (programs, AI) must target a folder inside a workflow folder and
+	 * may pass an optional definition, which is validated (none: an empty definition).
+	 */
+	private async _prepareSubWorkflowDraft(options: ICreateResourceOptions, targetFolderUri: URI): Promise<ISubWorkflowDefinition> {
+		const defaultName = (options.title || '').trim() || 'Sub-Workflow';
+		if (options.subWorkflowSourceKnown) {
+			const draft = normalizeSubWorkflowDefinition(options.subWorkflowDefinition, 'pending');
+			if (!draft) {
+				throw new Error('Invalid sub_workflow definition: a nodes list is required.');
+			}
+			draft.id = '';
+			return draft;
+		}
+		const workflowFolder = await findEnclosingWorkflowFolder(targetFolderUri, folder => this._isWorkflowFolder(folder));
+		if (!workflowFolder) {
+			throw new Error(getSubWorkflowParentError(targetFolderUri.fsPath));
+		}
+		const workflowSnapshot = this.entityPersistenceService.getSnapshot(workflowFolder);
+		const result = buildSubWorkflowDraftFromInput(options.subWorkflowDefinition, {
+			name: defaultName,
+			sourceWorkflowUri: workflowFolder.toString(),
+			sourceWorkflowName: workflowSnapshot?.title || workflowFolder.path.split('/').filter(Boolean).pop()
+		});
+		if (result.error !== undefined) {
+			throw new Error(result.error);
+		}
+		return result.draft;
+	}
+
+	private async _isWorkflowFolder(folderUri: URI): Promise<boolean> {
+		try {
+			if (await this.fileService.exists(URI.joinPath(folderUri, '.agents', 'workflow_flowchart.json'))) {
+				return true;
+			}
+			if (this.entityPersistenceService.getSnapshot(folderUri)?.entityType === 'workflow') {
+				return true;
+			}
+			if (await this.fileService.exists(URI.joinPath(folderUri, '.agents', 'ticket.md'))) {
+				return await this.detectCustomEntityTypeFromDisk(folderUri) === 'workflow';
+			}
+		} catch {
+			// not readable: not a workflow folder
+		}
+		return false;
 	}
 }
