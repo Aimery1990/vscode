@@ -36,6 +36,8 @@ import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
 import { EntityDetailEditor } from './entityDetailEditor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
+import { openSubWorkflowTicketCanvas } from '../../workflowsManager/browser/subWorkflowLiveView.js';
+import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
@@ -1332,6 +1334,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 							try {
 								if (child.type === 'workflow') {
 									await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
+								} else if (isSubWorkflowTicketType(child.type)) {
+									await openSubWorkflowTicketCanvas(this.editorService, child.uri, child.name);
 								} else {
 									await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name, false), { pinned: true });
 								}
@@ -1678,6 +1682,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				if (child.type === 'workflow') {
 					await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
+				} else if (isSubWorkflowTicketType(child.type)) {
+					// A Sub-Workflow ticket is an independent workflow: open its own canvas
+					await openSubWorkflowTicketCanvas(this.editorService, child.uri, child.name);
 				} else if (child.type === 'folder' || child.type === 'workspace' || child.type === 'project' || child.type === 'job') {
 					if (!this.expandedWorkspaces.has(canonicalChildId)) {
 						this.expandedWorkspaces.add(canonicalChildId);

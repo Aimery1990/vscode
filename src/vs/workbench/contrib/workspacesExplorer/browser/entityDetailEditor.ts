@@ -2032,7 +2032,7 @@ export class EntityDetailEditor extends EditorPane {
 		return card;
 	}
 
-	/** Sub-Workflow tickets (CI-23): reads the definition shown read-only on the page; clears it for other tickets. */
+	/** Sub-Workflow tickets (CI-23): reads the definition summarized on the page; clears it for other tickets. */
 	private async _loadSubWorkflowDefinition(ticketId: string): Promise<void> {
 		this._subWorkflowDef = undefined;
 		this._subWorkflowDefMissing = false;
@@ -2050,7 +2050,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._subWorkflowDefMissing = !this._subWorkflowDef;
 	}
 
-	/** Read-only card of a Sub-Workflow ticket: name, source workflow, inputs and outputs. */
+	/** Summary card of a Sub-Workflow ticket (name, source workflow, inputs, outputs) with a button to open its canvas. */
 	private _buildSubWorkflowCard(): HTMLElement {
 		const def = this._subWorkflowDef;
 		const rowStyle = 'display: flex; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.45;';
@@ -2059,8 +2059,15 @@ export class EntityDetailEditor extends EditorPane {
 		const listOrNone = (items: string[]) => items.length > 0
 			? $('ul', { style: 'margin: 2px 0 6px 0; padding-left: 18px; font-size: 12px;' }, ...items.map(t => $('li', undefined, t)))
 			: $('div', { style: 'font-size: 12px; opacity: 0.6; margin: 2px 0 6px 0;' }, 'none');
+		const openBtn = def ? $('button.wf-step-open-subworkflow', {
+			type: 'button',
+			title: `Open the canvas of Sub-Workflow ${def.id} to view and edit it`,
+			'aria-label': `Open the canvas of Sub-Workflow ${def.id}`,
+			'data-sub-workflow-id': def.id,
+			style: 'display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(34, 211, 238, 0.45); background: rgba(6, 182, 212, 0.16); color: #67e8f9; cursor: pointer;'
+		}, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal))) : undefined;
 		const title = $('div.section-title', undefined,
-			$('div', { style: 'display: flex; align-items: center; gap: 8px;' }, $('span', undefined, 'Sub-Workflow (read-only)'))
+			$('div', { style: 'display: flex; align-items: center; gap: 8px;' }, $('span', undefined, 'Sub-Workflow'), ...(openBtn ? [openBtn] : []))
 		);
 		if (!def) {
 			return $('div.section-card', undefined, title,
@@ -2080,7 +2087,7 @@ export class EntityDetailEditor extends EditorPane {
 			listOrNone(inputs),
 			$('div', { style: 'font-size: 12px; opacity: 0.7;' }, `Outputs (${outputs.length})`),
 			listOrNone(outputs),
-			$('div', { style: 'font-size: 11px; opacity: 0.6; margin-top: 4px;' }, `Edit its nodes on the source workflow canvas. Call it from any workflow with a Call Sub-Workflow step using ticket ID ${def.id}.`)
+			$('div', { style: 'font-size: 11px; opacity: 0.6; margin-top: 4px;' }, `An independent workflow: open its canvas to edit it. Call it from any workflow with a Call Sub-Workflow step using ticket ID ${def.id}; every caller runs the latest saved version.`)
 		);
 	}
 
@@ -2950,14 +2957,14 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
-			// 0.005 Workflow node view: a Sub-Workflow card opens that Sub-Workflow's flowchart
+			// 0.005 Workflow node view / Sub-Workflow ticket: opens that Sub-Workflow's own canvas
 			const openSubWorkflowBtn = target.closest('.wf-step-open-subworkflow') as HTMLElement | null;
 			if (openSubWorkflowBtn) {
 				e.preventDefault();
 				e.stopPropagation();
 				const subWorkflowId = openSubWorkflowBtn.getAttribute('data-sub-workflow-id');
 				if (subWorkflowId) {
-					await this._commandService.executeCommand('workbench.action.workflowsManager.showSubWorkflowLiveView', subWorkflowId);
+					await this._commandService.executeCommand('workbench.action.workflowsManager.openSubWorkflow', subWorkflowId);
 				}
 				return;
 			}
@@ -3027,7 +3034,8 @@ export class EntityDetailEditor extends EditorPane {
 					// A Freestyle ticket has no template to preview: the badge shows / hides the component toolbox
 					this._toggleComponentToolbox();
 				} else if (isSubWorkflowTicketType(ticketType)) {
-					// A Sub-Workflow ticket has no template: it is edited on its source workflow canvas
+					// A Sub-Workflow ticket has no template: the badge opens its own canvas
+					await this._commandService.executeCommand('workbench.action.workflowsManager.openSubWorkflow', this._entityUri?.toString());
 					return;
 				} else if (ticketType) {
 					await this._customModulesService.openModuleTicketPreview(ticketType, this._entityUri);

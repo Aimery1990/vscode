@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, append, clearNode, Dimension, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, Dimension, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
@@ -6979,9 +6979,25 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}));
 					}
 
+					if (field.subWorkflowId) {
+						// A Sub-Workflow is an independent workflow: open its own canvas to view / edit it
+						const openSubBtn = append(subHeader, $('button', {
+							type: 'button',
+							title: `Open the canvas of Sub-Workflow ${field.subWorkflowId}`,
+							'aria-label': `Open the canvas of Sub-Workflow ${field.subWorkflowId}`,
+							style: 'display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 4px; cursor: pointer; background: rgba(6, 182, 212, 0.16); border: 1px solid rgba(34, 211, 238, 0.42); color: #67e8f9; flex-shrink: 0;'
+						})) as HTMLButtonElement;
+						append(openSubBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
+						const openSubListener = addDisposableListener(openSubBtn, 'click', (e: MouseEvent) => {
+							e.stopPropagation();
+							void this._commandService.executeCommand('workbench.action.workflowsManager.openSubWorkflow', field.subWorkflowId);
+						});
+						this._renderCleanupFns.push(() => openSubListener.dispose());
+					}
+
 					const refreshSubBtn = append(subHeader, $('button', {
 						type: 'button',
-						title: 'Refresh latest Inputs & Outputs from the source Sub-Workflow (clears previous execution output)',
+						title: 'Refresh latest Inputs & Outputs from the Sub-Workflow ticket (clears previous execution output)',
 						style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(52, 211, 153, 0.42); color: #6ee7b7; flex-shrink: 0;'
 					})) as HTMLButtonElement;
 					append(refreshSubBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.refresh)));
