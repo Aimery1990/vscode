@@ -2,7 +2,8 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, clearNode, Dimension, h, isHTMLElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, Dimension, EventType, h, isHTMLElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
+import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { Mutable } from '../../../../base/common/types.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
@@ -45,6 +46,7 @@ import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTi
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
@@ -120,6 +122,7 @@ interface IEditorParts {
 	addLogBox?: HTMLElement;
 	aiEditBtn?: HTMLButtonElement;
 	browserContentDisplay?: HTMLElement;
+	browserCredsMount?: HTMLElement;
 	browserCtxHiddenGroup?: HTMLElement;
 	browserFetchStatus?: HTMLElement;
 	browserPrimitiveCard?: HTMLElement;
@@ -129,7 +132,6 @@ interface IEditorParts {
 	closeStatusLifecyclePopoverBtn?: HTMLButtonElement;
 	codicon?: HTMLElement;
 	copyJsonBtnLabel?: HTMLElement;
-	credSecretText?: HTMLElement;
 	customFieldView?: HTMLElement;
 	descContentBox?: HTMLElement;
 	entityDetailRunTicketBtn?: HTMLButtonElement;
@@ -969,6 +971,8 @@ export class EntityDetailEditor extends EditorPane {
 	private static _promptSentInspectorOverlay: HTMLElement | undefined;
 	private readonly _outputPaginationState = new Map<string, { page: number; pageSize: number }>();
 	private readonly _sshPanelExpandedByFieldKey = new Map<string, boolean>();
+	/** Listeners of the credential editors of the browser cards (rebuilt with the page). */
+	private readonly _browserCredsDisposables = this._register(new DisposableStore());
 	private _isTicketRunning: boolean = false;
 	/** Not assigned anywhere in this editor (always undefined); read by the parameter-token chips and the Python runner. */
 	private readonly _parameterValues?: Record<string, unknown>;
@@ -2191,9 +2195,10 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				customMetadata[fLabel] = JSON.stringify(paramObj);
 			} else if (fType === 'browser') {
+				// The template's credentials are not copied: a run falls back to them while the ticket has none of its own
 				customMetadata[fLabel] = JSON.stringify({
 					url: f.defaultUrl || '',
-					credentials: Array.isArray(f.credentials) ? f.credentials : [],
+					credentials: [],
 					content: f.defaultContent || '',
 					lastFetched: ''
 				});
@@ -2382,6 +2387,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateMediaPlayerPrimitiveCards();
 		await this._hydrateTablePrimitiveCards();
 		await this._hydrateSshPrimitiveCards();
+		this._hydrateBrowserCredentialEditors();
 		this._appendWorkflowRuntimeBlocks(mod);
 		this._applySavedScrollPosition(scrollKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
@@ -2612,6 +2618,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateMediaPlayerPrimitiveCards();
 			await this._hydrateTablePrimitiveCards();
 			await this._hydrateSshPrimitiveCards();
+			this._hydrateBrowserCredentialEditors();
 			this._applySavedScrollPosition(scrollKey);
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
@@ -3001,24 +3008,6 @@ export class EntityDetailEditor extends EditorPane {
 				}
 			}
 
-			// 0.12 Credential Eye Toggle click
-			const credEyeBtn = target.closest('.cred-toggle-eye') as HTMLElement | null;
-			if (credEyeBtn) {
-				e.preventDefault();
-				e.stopPropagation();
-				const item = credEyeBtn.closest('.browser-cred-item');
-				const textSpan = partsOf(item).credSecretText as HTMLElement | null;
-				if (textSpan) {
-					const realVal = textSpan.getAttribute('data-real') || '';
-					if (textSpan.textContent === '••••••••') {
-						textSpan.textContent = realVal;
-					} else {
-						textSpan.textContent = '••••••••';
-					}
-				}
-				return;
-			}
-
 			// 0.125 Parameter Copy Tag click
 			const copyParamTag = target.closest('.ticket-param-copy-tag') as HTMLElement | null;
 			if (copyParamTag) {
@@ -3109,7 +3098,7 @@ export class EntityDetailEditor extends EditorPane {
 				const card = newTabBtn.closest('.browser-primitive-card') as HTMLElement | null;
 				const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
 				let url = urlInput?.value.trim() || 'https://www.google.com';
-				url = this._interpolateParameters(url);
+				url = resolveBrowserCredentialUrl(url, this._getBrowserCredentials(newTabBtn.getAttribute('data-field-key') || ''), t => this._interpolateParameters(t)).url;
 				if (!/^https?:\/\//i.test(url)) {
 					url = 'https://' + url;
 				}
@@ -8131,12 +8120,14 @@ export class EntityDetailEditor extends EditorPane {
 
 	private async _fetchUrlContent(
 		rawUrl: string,
-		credentials?: Array<{ key: string; value: string }>
+		maskText: (text: string) => string = text => text
 	): Promise<{ title: string; content: string; isAuthRequired?: boolean; rawError?: string }> {
 		let targetUrl = rawUrl.trim();
 		if (!/^https?:\/\//i.test(targetUrl)) {
 			targetUrl = 'https://' + targetUrl;
 		}
+		// `targetUrl` may carry credential values: everything returned shows the masked URL and masked errors
+		const shownUrl = maskText(targetUrl);
 
 		// 1. Try headless extraction via IWebContentExtractorService first
 		// This uses the integrated browser's session partition ('persist:vscode-browser'),
@@ -8152,15 +8143,15 @@ export class EntityDetailEditor extends EditorPane {
 				if (extractResults && extractResults.length > 0) {
 					const first = extractResults[0];
 					if (first.status === 'ok' && first.result && first.result.length > 30) {
-						const title = first.title || targetUrl;
-						const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${first.result}`;
+						const title = maskText(first.title || targetUrl);
+						const formatted = `# ${title}\nURL: ${shownUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${first.result}`;
 						return { title, content: formatted };
 					} else if (first.status === 'error' && /auth|401|403|login|session|verification/i.test(first.error)) {
 						return {
-							title: targetUrl,
-							content: first.result || first.error,
+							title: shownUrl,
+							content: first.result || maskText(first.error),
 							isAuthRequired: true,
-							rawError: first.error
+							rawError: maskText(first.error)
 						};
 					}
 				}
@@ -8183,25 +8174,7 @@ export class EntityDetailEditor extends EditorPane {
 				// Fallback to renderer requestService
 			}
 
-			const extraHeaders: Record<string, string> = {};
-			if (credentials && Array.isArray(credentials)) {
-				for (const c of credentials) {
-					if (!c.key || !c.value) { continue; }
-					const lowerKey = c.key.toLowerCase().trim();
-					if (lowerKey === 'cookie') {
-						extraHeaders['Cookie'] = c.value;
-					} else if (lowerKey === 'li_at') {
-						extraHeaders['Cookie'] = (extraHeaders['Cookie'] ? extraHeaders['Cookie'] + '; ' : '') + `li_at=${c.value}`;
-					} else if (lowerKey === 'token' || lowerKey === 'bearer') {
-						extraHeaders['Authorization'] = `Bearer ${c.value}`;
-					} else if (lowerKey === 'authorization') {
-						extraHeaders['Authorization'] = c.value;
-					} else {
-						extraHeaders[c.key.trim()] = c.value;
-					}
-				}
-			}
-
+			// Credentials are not sent as headers: they are used only where the URL references them as {name}
 			const requestOptions = {
 				type: 'GET',
 				url: targetUrl,
@@ -8211,8 +8184,7 @@ export class EntityDetailEditor extends EditorPane {
 					'Accept-Language': 'en-US,en;q=0.9',
 					'Sec-Fetch-Dest': 'document',
 					'Sec-Fetch-Mode': 'navigate',
-					'Sec-Fetch-Site': 'none',
-					...extraHeaders
+					'Sec-Fetch-Site': 'none'
 				},
 				timeout: 20000,
 				callSite: 'browserPrimitive'
@@ -8222,16 +8194,16 @@ export class EntityDetailEditor extends EditorPane {
 			const text = await asText(context);
 			html = text || '';
 		} catch (err) {
-			const rawErr = (err as Error | undefined)?.message || String(err);
+			const rawErr = maskText((err as Error | undefined)?.message || String(err));
 			return {
-				title: targetUrl,
-				content: `Failed to fetch URL (${targetUrl}): ${rawErr}`,
+				title: shownUrl,
+				content: `Failed to fetch URL (${shownUrl}): ${rawErr}`,
 				rawError: rawErr
 			};
 		}
 
 		if (!html) {
-			return { title: targetUrl, content: `Empty response received from ${targetUrl}`, rawError: 'Empty response body' };
+			return { title: shownUrl, content: `Empty response received from ${shownUrl}`, rawError: 'Empty response body' };
 		}
 
 		// Detect true authentication walls (redirects to login, 401, 403, or authwall pages)
@@ -8241,7 +8213,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		if (isAuthPage) {
 			return {
-				title: targetUrl,
+				title: shownUrl,
 				content: html,
 				isAuthRequired: true,
 				rawError: `HTTP ${statusCode}: Authentication or Session Verification Required`
@@ -8249,7 +8221,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		try {
-			let title = targetUrl;
+			let title = shownUrl;
 			const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
 			if (titleMatch && titleMatch[1]) {
 				title = titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
@@ -8261,11 +8233,11 @@ export class EntityDetailEditor extends EditorPane {
 				? cleanedText.slice(0, maxChars) + '\n\n... [Content truncated for display and AI context]'
 				: cleanedText;
 
-			const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
+			const formatted = `# ${title}\nURL: ${shownUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
 			return { title, content: formatted };
 		} catch (parseErr) {
 			const cleaned = this._cleanHtmlToText(html);
-			return { title: targetUrl, content: cleaned };
+			return { title: shownUrl, content: cleaned };
 		}
 	}
 
@@ -8391,10 +8363,15 @@ export class EntityDetailEditor extends EditorPane {
 			if (urlInput) { urlInput.value = url; }
 		}
 
-		let finalUrl = this._interpolateParameters(url);
+		// {name} of a credential -> its encoded value; only the masked URL is shown or stored
+		const resolved = resolveBrowserCredentialUrl(url, this._getBrowserCredentials(fieldKey), t => this._interpolateParameters(t));
+		let finalUrl = resolved.url;
+		let shownUrl = resolved.maskedUrl;
 		if (!/^https?:\/\//i.test(finalUrl)) {
 			finalUrl = 'https://' + finalUrl;
+			shownUrl = 'https://' + shownUrl;
 		}
+		const mask = (text: string) => maskSecrets(text, resolved.secrets);
 
 		const statusEl = partsOf(card).browserFetchStatus as HTMLElement | null;
 		const contentEl = partsOf(card).browserContentDisplay as HTMLElement | null;
@@ -8420,31 +8397,8 @@ export class EntityDetailEditor extends EditorPane {
 			statusEl.style.color = '#38bdf8';
 		}
 
-		let creds: Array<{ key: string; value: string }> | undefined;
-		// Looked up by field key on the parsed data itself (and a legacy `data` map, if present)
-		const parsedRecord = this._lastParsedData as (IParsedTicketData & Record<string, unknown> & { data?: Record<string, unknown> }) | undefined;
-		const rawVal = parsedRecord ? (parsedRecord[fieldKey] || parsedRecord.data?.[fieldKey]) : undefined;
-		if (rawVal) {
-			if (typeof rawVal === 'object' && Array.isArray((rawVal as IStoredPrimitiveValue).credentials)) {
-				creds = (rawVal as IStoredPrimitiveValue).credentials;
-			} else if (typeof rawVal === 'string') {
-				try {
-					const parsed = JSON.parse(rawVal);
-					if (Array.isArray(parsed.credentials)) {
-						creds = parsed.credentials;
-					}
-				} catch { }
-			}
-		}
-		if (!creds && this._lastCustomModule?.fields) {
-			const matchingF = this._lastCustomModule.fields.find(f => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase() || f.key?.toLowerCase() === fieldKey.toLowerCase());
-			if (matchingF?.credentials) {
-				creds = matchingF.credentials;
-			}
-		}
-
 		try {
-			const result = await this._fetchUrlContent(finalUrl, creds);
+			const result = await this._fetchUrlContent(finalUrl, mask);
 			if (result.isAuthRequired) {
 				throw new Error(result.rawError || 'Authentication Required');
 			}
@@ -8463,7 +8417,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._saveBrowserPrimitiveData(fieldKey, url, result.content, `${new Date().toLocaleDateString()} ${timestamp}`);
 			// Suppress notificationService.info toast to prevent webview "Paused due to Notification" overlay
 		} catch (err) {
-			const rawErr = (err as Error | undefined)?.message || String(err);
+			const rawErr = mask((err as Error | undefined)?.message || String(err));
 			const isAuthOrCors = /auth|401|403|login|session|verification/i.test(rawErr);
 			const timestamp = new Date().toLocaleString();
 			if (isAuthOrCors) {
@@ -8472,7 +8426,7 @@ export class EntityDetailEditor extends EditorPane {
 					statusEl.style.color = '#fbbf24';
 				}
 				const formattedNotice = `[AUTH REQUIRED / PROTECTED PAGE]
-Target URL: ${finalUrl}
+Target URL: ${shownUrl}
 Timestamp: ${timestamp}
 Status: Authentication Required / Access Restricted
 
@@ -8481,13 +8435,13 @@ ${rawErr}
 
 --- [AUTOMATION & TROUBLESHOOTING GUIDANCE] ---
 1. Why this happened:
-   The destination endpoint (${finalUrl}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
+   The destination endpoint (${shownUrl}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
 
 2. Interactive Login:
    Click the "Open in Tab" or "+ New Tab" button directly above this card to open a browser tab beside and log in.
 
-3. Automated AI Agent usage:
-   In the "Credentials / Authentication" section above, configure your login credentials (username/email & password or session token). AI agents will use these credentials when automating tasks on this ticket.`;
+3. Credentials in the URL:
+   If the site accepts a token or key in the URL, add it under "Credentials" above and reference it in the URL as {name}.`;
 
 				if (contentEl) {
 					contentEl.textContent = formattedNotice;
@@ -8500,7 +8454,7 @@ ${rawErr}
 					statusEl.style.color = '#ef4444';
 				}
 				const formattedErr = `[HTTP / NETWORK FETCH ERROR]
-Target URL: ${finalUrl}
+Target URL: ${shownUrl}
 Timestamp: ${timestamp}
 
 --- [RAW SERVER & NETWORK ERROR] ---
@@ -8519,8 +8473,157 @@ ${rawErr}
 		}
 	}
 
+	/** The stored ticket value of a browser card, parsed (a JSON string or an object), or undefined. */
+	private _readBrowserTicketValue(fieldKey: string): IStoredPrimitiveValue | undefined {
+		const parsedRecord = this._lastParsedData as (IParsedTicketData & Record<string, unknown>) | undefined;
+		const rawVal: unknown = this._lastParsedData?.customMetadata?.[fieldKey] ?? parsedRecord?.[fieldKey];
+		if (typeof rawVal === 'string') {
+			try {
+				const parsed: unknown = JSON.parse(rawVal);
+				return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as IStoredPrimitiveValue : undefined;
+			} catch {
+				return undefined;
+			}
+		}
+		return rawVal && typeof rawVal === 'object' && !Array.isArray(rawVal) ? rawVal as IStoredPrimitiveValue : undefined;
+	}
+
+	/** The template's browser component for `fieldKey` (matched by label, id or key). */
+	private _findTemplateBrowserField(fieldKey: string): ICustomField | undefined {
+		const lower = fieldKey.toLowerCase();
+		return this._lastCustomModule?.fields?.find(f => f.label?.toLowerCase() === lower || f.id?.toLowerCase() === lower || f.key?.toLowerCase() === lower);
+	}
+
+	/** Credentials a fetch of this card uses: the ticket's own when it has any, otherwise the template's. */
+	private _getBrowserCredentials(fieldKey: string): ICredentialPair[] {
+		return pickBrowserCredentials(this._readBrowserTicketValue(fieldKey)?.credentials, this._findTemplateBrowserField(fieldKey)?.credentials);
+	}
+
+	/**
+	 * Builds the credential editor of every browser card: any number of `name -> value` rows that can be added, edited
+	 * and removed. The URL references a credential as `{name}`. Changes are saved into the ticket's own value.
+	 */
+	private _hydrateBrowserCredentialEditors(): void {
+		this._browserCredsDisposables.clear();
+		const cards = (this._pageParts.browserPrimitiveCards ?? []) as HTMLElement[];
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const mount = partsOf(card).browserCredsMount as HTMLElement | null;
+			if (!mount || !fieldKey) {
+				continue;
+			}
+			clearNode(mount);
+			const ownCreds = this._readBrowserTicketValue(fieldKey)?.credentials;
+			const fromTemplate = !(Array.isArray(ownCreds) && ownCreds.some(c => c && typeof c.key === 'string' && c.key.trim()));
+			const rows: ICredentialPair[] = this._getBrowserCredentials(fieldKey)
+				.filter(c => c && typeof c === 'object')
+				.map((c, idx) => ({ id: c.id || `cred_${Date.now()}_${idx + 1}`, key: String(c.key ?? ''), value: String(c.value ?? '') }));
+
+			const box = append(mount, $('div', { style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;' }));
+			const header = append(box, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+			append(header, $('span', { style: 'font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em;' }, localize('browserCreds.title', "Credentials")));
+			const hint = append(header, $('span', { style: 'font-size: 10px; opacity: 0.55; flex: 1;' }));
+			hint.textContent = fromTemplate && rows.length > 0
+				? localize('browserCreds.hintTemplate', "From the template. Use {name} in the URL; values are hidden in logs and outputs. Edits here apply to this ticket only.")
+				: localize('browserCreds.hint', "Use {name} in the URL; values are hidden in logs and outputs.");
+			const addBtn = append(header, $('button', {
+				type: 'button',
+				title: localize('browserCreds.add', "Add credential"),
+				'aria-label': localize('browserCreds.add', "Add credential"),
+				style: 'cursor: pointer; background: transparent; border: none; color: #a78bfa; padding: 2px 4px; display: inline-flex; align-items: center;'
+			})) as HTMLButtonElement;
+			append(addBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+			const list = append(box, $('div', { style: 'display: flex; flex-direction: column; gap: 5px;' }));
+
+			const save = () => this._saveBrowserCredentials(card, fieldKey, rows.filter(r => r.key.trim() || r.value.trim()));
+			const rowStore = this._browserCredsDisposables.add(new DisposableStore());
+			const renderRows = () => {
+				rowStore.clear();
+				clearNode(list);
+				if (rows.length === 0) {
+					append(list, $('div', { style: 'font-size: 10.5px; opacity: 0.45; font-style: italic;' }, localize('browserCreds.empty', "No credentials. Add one and reference it in the URL as {name}.")));
+					return;
+				}
+				rows.forEach((row, idx) => {
+					const rowEl = append(list, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+					const keyInp = append(rowEl, $('input', {
+						type: 'text',
+						value: row.key,
+						placeholder: localize('browserCreds.name', "name, e.g. user"),
+						'aria-label': localize('browserCreds.nameLabel', "Credential name"),
+						style: 'width: 150px; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+					})) as HTMLInputElement;
+					append(rowEl, $('span', { style: 'opacity: 0.5; font-size: 11px;' }, '='));
+					const valInp = append(rowEl, $('input', {
+						type: 'password',
+						value: row.value,
+						placeholder: localize('browserCreds.value', "value or {VARIABLE}"),
+						'aria-label': localize('browserCreds.valueLabel', "Credential value"),
+						style: 'flex: 1; min-width: 100px; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+					})) as HTMLInputElement;
+					const eyeBtn = append(rowEl, $('button', {
+						type: 'button',
+						title: localize('browserCreds.toggle', "Show / hide value"),
+						'aria-label': localize('browserCreds.toggle', "Show / hide value"),
+						style: 'cursor: pointer; background: transparent; border: none; color: inherit; opacity: 0.65; padding: 2px 4px; display: inline-flex; align-items: center;'
+					})) as HTMLButtonElement;
+					const eyeIcon = append(eyeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.eye)));
+					const delBtn = append(rowEl, $('button', {
+						type: 'button',
+						title: localize('browserCreds.remove', "Remove credential"),
+						'aria-label': localize('browserCreds.remove', "Remove credential"),
+						style: 'cursor: pointer; background: transparent; border: none; color: #ef4444; opacity: 0.75; padding: 2px 4px; display: inline-flex; align-items: center;'
+					})) as HTMLButtonElement;
+					append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+
+					rowStore.add(addDisposableListener(keyInp, EventType.INPUT, () => { row.key = keyInp.value; }));
+					rowStore.add(addDisposableListener(valInp, EventType.INPUT, () => { row.value = valInp.value; }));
+					rowStore.add(addDisposableListener(keyInp, EventType.CHANGE, () => save()));
+					rowStore.add(addDisposableListener(valInp, EventType.CHANGE, () => save()));
+					rowStore.add(addDisposableListener(eyeBtn, EventType.CLICK, e => {
+						e.preventDefault();
+						e.stopPropagation();
+						const show = valInp.type === 'password';
+						valInp.type = show ? 'text' : 'password';
+						eyeIcon.className = ThemeIcon.asClassName(show ? Codicon.eyeClosed : Codicon.eye);
+					}));
+					rowStore.add(addDisposableListener(delBtn, EventType.CLICK, e => {
+						e.preventDefault();
+						e.stopPropagation();
+						rows.splice(idx, 1);
+						renderRows();
+						save();
+					}));
+				});
+			};
+			this._browserCredsDisposables.add(addDisposableListener(addBtn, EventType.CLICK, e => {
+				e.preventDefault();
+				e.stopPropagation();
+				rows.push({ id: `cred_${Date.now()}_${rows.length + 1}`, key: '', value: '' });
+				renderRows();
+			}));
+			renderRows();
+		}
+	}
+
+	/** Saves the credential rows of a browser card into the ticket's own value (URL, content and fetch time are kept). */
+	private async _saveBrowserCredentials(card: HTMLElement, fieldKey: string, credentials: ICredentialPair[]): Promise<void> {
+		const stored = this._readBrowserTicketValue(fieldKey) ?? {};
+		const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
+		const bData: IStoredPrimitiveValue = {
+			...stored,
+			url: stored.url ?? urlInput?.value.trim() ?? '',
+			content: stored.content ?? '',
+			lastFetched: stored.lastFetched ?? '',
+			credentials
+		};
+		// Saved without reloading the page, so editing the next row keeps its focus
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(bData));
+	}
+
 	private async _saveBrowserPrimitiveData(fieldKey: string, url: string, content: string, lastFetched: string): Promise<void> {
 		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
+		// Only the ticket's own credentials are kept (the template's are not copied: a run falls back to them)
 		let creds: ICredentialPair[] = [];
 		if (rawVal) {
 			try {
@@ -8529,12 +8632,6 @@ ${rawErr}
 					creds = parsed.credentials;
 				}
 			} catch { }
-		}
-		if (creds.length === 0 && this._lastCustomModule?.fields) {
-			const matchingF = this._lastCustomModule.fields.find(f => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase());
-			if (matchingF?.credentials) {
-				creds = matchingF.credentials;
-			}
 		}
 		const bData = {
 			url,
@@ -20918,7 +21015,7 @@ ${interpolatedPrompt}`;
 						} else if (typeof v === 'object' && v !== null) {
 							const stored = v as IStoredPrimitiveValue;
 							if (stored.url) { browserUrl = stored.url; }
-							if (Array.isArray(stored.credentials)) { browserCreds = stored.credentials; }
+							if (Array.isArray(stored.credentials) && stored.credentials.length > 0) { browserCreds = stored.credentials; }
 							if (stored.content) { browserContent = stored.content; }
 							if (stored.lastFetched) { lastFetchedText = stored.lastFetched; }
 						}
@@ -21028,25 +21125,8 @@ ${interpolatedPrompt}`;
 							)
 						),
 						' ',
-						...(browserCreds.length > 0 ? [
-							$('div', { style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px;' },
-								$('div', { style: 'font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px;' },
-									$('span', undefined, '\uD83D\uDD11 Credentials / Authentication'),
-									$('span', { style: 'font-size: 9.5px; opacity: 0.5; font-weight: normal; text-transform: none;' },
-										'(Available for AI automated navigation)'
-									)
-								),
-								$('div', { style: 'display: flex; flex-wrap: wrap; gap: 8px;' },
-									...browserCreds.map(c => withParts(() => $('div.browser-cred-item', { style: 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;' },
-										$('span', { style: 'opacity: 0.7; font-weight: 600;' }, textOf(c.key), ':'),
-										part('credSecretText', $('span.cred-secret-text', { 'data-real': textOf(c.value), style: 'font-family: monospace;' },
-											'\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'
-										)),
-										$('span.cred-toggle-eye', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;', title: 'Click to show/hide' }, '\uD83D\uDC41\uFE0F')
-									)))
-								)
-							)
-						] : []),
+						// Credential editor (name -> value pairs referenced as {name} in the URL), built by _hydrateBrowserCredentialEditors
+						part('browserCredsMount', $('div.browser-creds-mount', { style: 'margin-bottom: 10px;' })),
 						' ',
 						$('div.browser-content-container', { style: 'display: flex; flex-direction: column; gap: 6px;' },
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },

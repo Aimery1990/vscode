@@ -35,6 +35,7 @@ import { isWindows } from '../../../../base/common/platform.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
+import { maskSecrets, resolveBrowserCredentialUrl } from '../common/browserCredentials.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentItem, IAgentCredential, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService, findUnresolvedTemplateVariables } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
@@ -3515,7 +3516,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					newTabBtn.onclick = async () => {
 						this._syncDraft();
 						const rawUrl = urlInput.value.trim() || 'https://www.google.com';
-						let targetUrl = this._interpolateSchemaReferences(rawUrl, field, allBrowserSchemaFields, await this._getHydratedWorkflowRuntimeContext());
+						const newTabCtx = await this._getHydratedWorkflowRuntimeContext();
+						let targetUrl = resolveBrowserCredentialUrl(rawUrl, field.credentials, t => this._interpolateSchemaReferences(t, field, allBrowserSchemaFields, newTabCtx)).url;
 						if (!/^https?:\/\//i.test(targetUrl)) {
 							targetUrl = 'https://' + targetUrl;
 						}
@@ -3536,8 +3538,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 
 					const credsTop = append(credsBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' }));
-					append(credsTop, $('div', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: #a78bfa;' }, 'Authentication Credentials (Key-Value Pairs):'));
-					append(credsTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Available for AI & automated login'));
+					append(credsTop, $('div', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: #a78bfa;' }, 'Credentials (name = value):'));
+					append(credsTop, $('span', { style: 'font-size: 10px; opacity: 0.55; flex: 1;' }, 'Use {name} in the URL; the value is URL-encoded at run time and hidden in logs and outputs.'));
 
 					if (!field.credentials) {
 						field.credentials = [];
@@ -3550,7 +3552,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (!field.credentials || field.credentials.length === 0) {
 							append(credsListContainer, $('div', {
 								style: 'font-size: 11px; opacity: 0.5; font-style: italic; padding: 4px 0;'
-							}, 'No credentials configured. Click "+ Add Credential Row" below to define login parameters.'));
+							}, 'No credentials. Add one and reference it in the URL as {name}.'));
 						} else {
 							field.credentials.forEach((c, cIdx) => {
 								const row = append(credsListContainer, $('.cred-row', {
@@ -3561,30 +3563,48 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									style: 'font-size: 10px; font-weight: 700; color: #a78bfa; padding: 2px 6px; background: rgba(167, 139, 250, 0.12); border-radius: 3px; min-width: 24px; text-align: center;'
 								}, `#${cIdx + 1}`));
 
-								// Key Input
+								// Name input (referenced in the URL as {name})
 								const keyInp = append(row, $('input.monaco-inputbox', {
-									placeholder: 'Key (e.g. username, password, token)',
+									placeholder: 'name, e.g. user',
+									'aria-label': 'Credential name',
 									style: 'width: 140px; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.25); color: inherit;'
 								})) as HTMLInputElement;
 								keyInp.value = c.key;
-								keyInp.oninput = () => { c.key = keyInp.value; };
+								keyInp.oninput = () => { c.key = keyInp.value; this._syncDraft(); };
+								keyInp.onchange = () => { this._persistCurrentModule().catch(() => { }); };
 
-								// Colon separator
-								append(row, $('span', { style: 'opacity: 0.5; font-size: 12px;' }, ':'));
+								append(row, $('span', { style: 'opacity: 0.5; font-size: 12px;' }, '='));
 
-								// Value Input
+								// Value input (hidden by default)
 								const valInp = append(row, $('input.monaco-inputbox', {
-									placeholder: 'Value / Credential secret',
-									type: 'text',
+									placeholder: 'value or {VARIABLE}',
+									'aria-label': 'Credential value',
+									type: 'password',
 									style: 'flex: 1; min-width: 120px; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.25); color: inherit;'
 								})) as HTMLInputElement;
 								valInp.value = c.value;
-								valInp.oninput = () => { c.value = valInp.value; };
+								valInp.oninput = () => { c.value = valInp.value; this._syncDraft(); };
+								valInp.onchange = () => { this._persistCurrentModule().catch(() => { }); };
+
+								const eyeBtn = append(row, $('button', {
+									type: 'button',
+									title: 'Show / hide value',
+									'aria-label': 'Show / hide value',
+									style: 'cursor: pointer; opacity: 0.65; color: inherit; background: transparent; border: none; padding: 3px 5px; display: inline-flex; align-items: center; justify-content: center;'
+								})) as HTMLButtonElement;
+								const eyeIcon = append(eyeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.eye)));
+								eyeBtn.onclick = (e: MouseEvent) => {
+									e.preventDefault();
+									e.stopPropagation();
+									const show = valInp.type === 'password';
+									valInp.type = show ? 'text' : 'password';
+									eyeIcon.className = ThemeIcon.asClassName(show ? Codicon.eyeClosed : Codicon.eye);
+								};
 
 								// Delete row button
 								const delBtn = append(row, $('button', {
 									type: 'button',
-									title: 'Remove Credential Row',
+									title: 'Remove credential',
 									style: 'cursor: pointer; opacity: 0.72; font-size: 11.5px; color: #ef4444; background: transparent; border: none; padding: 3px 5px; display: inline-flex; align-items: center; justify-content: center;'
 								})) as HTMLButtonElement;
 								append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
@@ -3603,18 +3623,24 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					renderCredRows();
 
-					// Add Row button
-					const addRowBtn = append(credsBox, $('button.monaco-button', {
-						style: 'align-self: flex-start; padding: 4px 12px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.3); color: #a78bfa; font-weight: 500;'
-					}));
-					addRowBtn.innerText = '+ Add Credential Row';
-					addRowBtn.onclick = () => {
+					// Add credential button (icon)
+					const addRowBtn = append(credsTop, $('button', {
+						type: 'button',
+						title: 'Add credential',
+						'aria-label': 'Add credential',
+						style: 'cursor: pointer; padding: 2px 5px; border-radius: 4px; background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.3); color: #a78bfa; display: inline-flex; align-items: center;'
+					})) as HTMLButtonElement;
+					append(addRowBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+					addRowBtn.onclick = (e: MouseEvent) => {
+						e.preventDefault();
+						e.stopPropagation();
 						if (!field.credentials) { field.credentials = []; }
 						field.credentials.push({
 							id: `cred_${Date.now()}_${field.credentials.length + 1}`,
 							key: '',
 							value: ''
 						});
+						this._syncDraft();
 						renderCredRows();
 					};
 
@@ -16407,12 +16433,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 	private async _fetchUrlContent(
 		rawUrl: string,
-		credentials?: Array<{ key: string; value: string }>
+		maskText: (text: string) => string = text => text
 	): Promise<{ title: string; content: string; isAuthRequired?: boolean; rawError?: string }> {
 		let targetUrl = rawUrl.trim();
 		if (!/^https?:\/\//i.test(targetUrl)) {
 			targetUrl = 'https://' + targetUrl;
 		}
+		// `targetUrl` may carry credential values: everything returned shows the masked URL and masked errors
+		const shownUrl = maskText(targetUrl);
 
 		// 1. Try headless extraction via IWebContentExtractorService first
 		// This uses the integrated browser's session partition ('persist:vscode-browser'),
@@ -16428,15 +16456,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				if (extractResults && extractResults.length > 0) {
 					const first = extractResults[0];
 					if (first.status === 'ok' && first.result && first.result.length > 30) {
-						const title = first.title || targetUrl;
-						const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${first.result}`;
+						const title = maskText(first.title || targetUrl);
+						const formatted = `# ${title}\nURL: ${shownUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${first.result}`;
 						return { title, content: formatted };
 					} else if (first.status === 'error' && /auth|401|403|login|session|verification/i.test(first.error)) {
 						return {
-							title: targetUrl,
-							content: first.result || first.error,
+							title: shownUrl,
+							content: first.result || maskText(first.error),
 							isAuthRequired: true,
-							rawError: first.error
+							rawError: maskText(first.error)
 						};
 					}
 				}
@@ -16459,25 +16487,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				// Fallback to renderer requestService
 			}
 
-			const extraHeaders: Record<string, string> = {};
-			if (credentials && Array.isArray(credentials)) {
-				for (const c of credentials) {
-					if (!c.key || !c.value) { continue; }
-					const lowerKey = c.key.toLowerCase().trim();
-					if (lowerKey === 'cookie') {
-						extraHeaders['Cookie'] = c.value;
-					} else if (lowerKey === 'li_at') {
-						extraHeaders['Cookie'] = (extraHeaders['Cookie'] ? extraHeaders['Cookie'] + '; ' : '') + `li_at=${c.value}`;
-					} else if (lowerKey === 'token' || lowerKey === 'bearer') {
-						extraHeaders['Authorization'] = `Bearer ${c.value}`;
-					} else if (lowerKey === 'authorization') {
-						extraHeaders['Authorization'] = c.value;
-					} else {
-						extraHeaders[c.key.trim()] = c.value;
-					}
-				}
-			}
-
+			// Credentials are not sent as headers: they are used only where the URL references them as {name}
 			const requestOptions = {
 				type: 'GET',
 				url: targetUrl,
@@ -16487,8 +16497,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					'Accept-Language': 'en-US,en;q=0.9',
 					'Sec-Fetch-Dest': 'document',
 					'Sec-Fetch-Mode': 'navigate',
-					'Sec-Fetch-Site': 'none',
-					...extraHeaders
+					'Sec-Fetch-Site': 'none'
 				},
 				timeout: 20000,
 				callSite: 'customModuleSchemaEditor'
@@ -16498,16 +16507,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			const text = await asText(context);
 			html = text || '';
 		} catch (err) {
-			const rawErr = (err as Error | undefined)?.message || String(err);
+			const rawErr = maskText((err as Error | undefined)?.message || String(err));
 			return {
-				title: targetUrl,
-				content: `Failed to fetch URL (${targetUrl}): ${rawErr}`,
+				title: shownUrl,
+				content: `Failed to fetch URL (${shownUrl}): ${rawErr}`,
 				rawError: rawErr
 			};
 		}
 
 		if (!html) {
-			return { title: targetUrl, content: `Empty response received from ${targetUrl}`, rawError: 'Empty response body' };
+			return { title: shownUrl, content: `Empty response received from ${shownUrl}`, rawError: 'Empty response body' };
 		}
 
 		// Detect true authentication walls (redirects to login, 401, 403, or authwall pages)
@@ -16517,7 +16526,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		if (isAuthPage) {
 			return {
-				title: targetUrl,
+				title: shownUrl,
 				content: html,
 				isAuthRequired: true,
 				rawError: `HTTP ${statusCode}: Authentication or Session Verification Required`
@@ -16525,7 +16534,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		}
 
 		try {
-			let title = targetUrl;
+			let title = shownUrl;
 			const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
 			if (titleMatch && titleMatch[1]) {
 				title = titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
@@ -16537,11 +16546,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				? cleanedText.slice(0, maxChars) + '\n\n... [Content truncated for display and AI context]'
 				: cleanedText;
 
-			const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
+			const formatted = `# ${title}\nURL: ${shownUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
 			return { title, content: formatted };
 		} catch (parseErr) {
 			const cleaned = this._cleanHtmlToText(html);
-			return { title: targetUrl, content: cleaned };
+			return { title: shownUrl, content: cleaned };
 		}
 	}
 
@@ -16896,10 +16905,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			field.defaultUrl = url;
 		}
 
-		let finalUrl = this._interpolateSchemaReferences(url, field, allFields, await this._getHydratedWorkflowRuntimeContext());
+		// {name} of a credential -> its encoded value; only the masked URL is shown or stored
+		const runtimeCtx = await this._getHydratedWorkflowRuntimeContext();
+		const resolved = resolveBrowserCredentialUrl(url, field.credentials, t => this._interpolateSchemaReferences(t, field, allFields, runtimeCtx));
+		let finalUrl = resolved.url;
+		let shownUrl = resolved.maskedUrl;
 		if (!/^https?:\/\//i.test(finalUrl)) {
 			finalUrl = 'https://' + finalUrl;
+			shownUrl = 'https://' + shownUrl;
 		}
+		const mask = (text: string) => maskSecrets(text, resolved.secrets);
 
 		if (openTab) {
 			this._syncDraft();
@@ -16923,7 +16938,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		statusEl.style.color = '#38bdf8';
 
 		try {
-			const result = await this._fetchUrlContent(finalUrl, field.credentials);
+			const result = await this._fetchUrlContent(finalUrl, mask);
 			if (result.isAuthRequired) {
 				throw new Error(result.rawError || 'Authentication Required');
 			}
@@ -16939,14 +16954,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			statusEl.style.color = '#34d399';
 			// Suppress notificationService.info toast to prevent webview "Paused due to Notification" overlay
 		} catch (err) {
-			const rawErr = (err as Error | undefined)?.message || String(err);
+			const rawErr = mask((err as Error | undefined)?.message || String(err));
 			const isAuthOrCors = /auth|401|403|login|session|verification/i.test(rawErr);
 			const timestamp = new Date().toLocaleString();
 			if (isAuthOrCors) {
 				statusEl.textContent = 'Auth Required / Protected Page (Raw Error Logged)';
 				statusEl.style.color = '#fbbf24';
 				const formattedNotice = `[AUTH REQUIRED / PROTECTED PAGE]
-Target URL: ${finalUrl}
+Target URL: ${shownUrl}
 Timestamp: ${timestamp}
 Status: Authentication Required / Access Restricted
 
@@ -16955,13 +16970,13 @@ ${rawErr}
 
 --- [AUTOMATION & TROUBLESHOOTING GUIDANCE] ---
 1. Why this happened:
-   The destination endpoint (${finalUrl}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
+   The destination endpoint (${shownUrl}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
 
 2. Interactive Login:
    Click the "Open in Tab" or "+ New Tab" button directly above this card to open a browser tab beside and log in.
 
-3. Automated AI Agent usage:
-   In the "Authentication Credentials (Key-Value Pairs)" section above, configure your login credentials (username/email & password or session token). AI agents will use these credentials when automating tasks on this ticket.`;
+3. Credentials in the URL:
+   If the site accepts a token or key in the URL, add it under "Credentials" above and reference it in the URL as {name}.`;
 
 				contentEl.textContent = formattedNotice;
 				field.defaultContent = formattedNotice;
@@ -16971,7 +16986,7 @@ ${rawErr}
 				statusEl.textContent = `Fetch failed: ${rawErr.slice(0, 30)}`;
 				statusEl.style.color = '#f87171';
 				const formattedErr = `[HTTP / NETWORK FETCH ERROR]
-Target URL: ${finalUrl}
+Target URL: ${shownUrl}
 Timestamp: ${timestamp}
 
 --- [RAW SERVER & NETWORK ERROR] ---
