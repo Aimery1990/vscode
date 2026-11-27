@@ -140,7 +140,7 @@ export class CreateTicketTool implements IToolImpl {
 					},
 					ticket_type: {
 						type: 'string',
-						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\'). Freestyle tickets cannot be created by tools (only manually in the UI).'
+						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\'). Freestyle tickets cannot be created by tools (only manually in the UI). \'sub_workflow\' is reserved too: sub-workflows are created only by encapsulating nodes on a workflow canvas.'
 					},
 					title: {
 						type: 'string',

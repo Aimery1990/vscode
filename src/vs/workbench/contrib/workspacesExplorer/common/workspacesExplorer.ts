@@ -82,6 +82,11 @@ export interface ICreateResourceOptions {
 	 * Without it, creating a Freestyle ticket is refused.
 	 */
 	allowFreestyle?: boolean;
+	/**
+	 * Set only by Sub-Workflow encapsulation (and its one-time migration): Sub-Workflow tickets (type `sub_workflow`)
+	 * may only be created there. Without it, creating a Sub-Workflow ticket is refused.
+	 */
+	allowSubWorkflow?: boolean;
 }
 
 export type CanonicalStatusCategory = 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed';

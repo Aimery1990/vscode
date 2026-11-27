@@ -1046,10 +1046,11 @@ export class TicketDataEngine {
 	 * 2. anyagent_create_ticket
 	 */
 	public async createTicket(options: ICreateTicketToolOptions) {
-		// Freestyle tickets can only be created manually in the UI (create dialog), never by AI tools
-		const freestyleError = getProgrammaticTicketTypeError(options.ticket_type);
-		if (freestyleError) {
-			throw new Error(freestyleError);
+		// Freestyle tickets can only be created manually in the UI (create dialog) and Sub-Workflow tickets only by
+		// encapsulating workflow nodes; never by AI tools
+		const reservedTypeError = getProgrammaticTicketTypeError(options.ticket_type);
+		if (reservedTypeError) {
+			throw new Error(reservedTypeError);
 		}
 		const wsUri = await this.findWorkspaceUri(options.workspace_id);
 		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }

@@ -23,7 +23,7 @@ import {
 	getDefaultCustomModuleColor
 } from '../../entityPersistence/common/entityPersistence.js';
 import { parseTemplateYaml } from '../common/templateYaml.js';
-import { getReservedFreestyleNameMessage, getReservedTemplateNameError, isReservedFreestyleName, isReservedFreestyleTemplate } from '../common/freestyleTicket.js';
+import { getReservedTemplateNameError, getReservedTypeNameMessage, isReservedTemplate, isReservedTicketTypeName } from '../common/freestyleTicket.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
@@ -442,7 +442,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 	private async _findReservedTemplateNameError(modules: ICustomModule[], targetUri: URI | undefined): Promise<string | undefined> {
 		const globalDir = this.getGlobalEntityTypeDir();
 		for (const m of modules) {
-			if (!isReservedFreestyleTemplate(m)) {
+			if (!isReservedTemplate(m)) {
 				continue;
 			}
 			const filename = `${m.id}.yaml`;
@@ -850,9 +850,9 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 			if (found) {
 				targetModuleName = found.name;
 			} else {
-				if (isReservedFreestyleName(targetModuleId)) {
+				if (isReservedTicketTypeName(targetModuleId)) {
 					// Opening the designer on an unknown id would create that template
-					this.notificationService.error(getReservedFreestyleNameMessage(targetModuleId));
+					this.notificationService.error(getReservedTypeNameMessage(targetModuleId));
 					return;
 				}
 				targetModuleName = targetModuleId;
@@ -865,7 +865,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 				validateInput: async value => {
 					const trimmed = value.trim();
 					const candidateId = trimmed.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-					return isReservedFreestyleTemplate({ id: candidateId, name: trimmed }) ? getReservedFreestyleNameMessage(trimmed) : undefined;
+					return isReservedTemplate({ id: candidateId, name: trimmed }) ? getReservedTypeNameMessage(trimmed) : undefined;
 				}
 			});
 			if (!enteredName || !enteredName.trim()) {
@@ -873,8 +873,8 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 			}
 			targetModuleName = enteredName.trim();
 			targetModuleId = targetModuleName.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-			if (isReservedFreestyleTemplate({ id: targetModuleId, name: targetModuleName })) {
-				this.notificationService.error(getReservedFreestyleNameMessage(targetModuleName));
+			if (isReservedTemplate({ id: targetModuleId, name: targetModuleName })) {
+				this.notificationService.error(getReservedTypeNameMessage(targetModuleName));
 				return;
 			}
 
