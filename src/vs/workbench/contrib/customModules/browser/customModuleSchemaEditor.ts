@@ -46,6 +46,9 @@ import { IMediaFileFacts } from '../../voiceModels/common/subtitleConfig.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
 import { isReservedTemplate } from '../common/freestyleTicket.js';
+import { checkTemplateCallCycle, renderSubWorkflowPickerRow, resolveSubWorkflowContract } from './subWorkflowTemplateCard.js';
+import { IWorkflowExecutionService } from '../../workflowsManager/common/workflowExecutionService.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField } from '../common/componentPalette.js';
 import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
 
@@ -144,6 +147,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 	private _activeModule?: ICustomModule;
 	private _isToolboxCompact: boolean = false;
 	private _workspaceUri?: URI;
+	/** Last call-cycle error shown for this template (CI-38), so auto-save does not repeat it on every edit. */
+	private _lastReportedCycleError: string | undefined;
 	private _isSelfPersisting: boolean = false;
 	private _renderCleanupFns: Array<() => void> = [];
 	private _inputDraftSub?: { dispose(): void };
@@ -507,6 +512,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				currentModules.push(moduleToSave);
 			}
 			await this.customModulesService.saveCustomModules(currentModules, wsUri);
+			// Recursion protection (CI-38): the template is saved (auto-save keeps every edit) but marked invalid: the
+			// error names the call cycle and a ticket run of this template refuses to start until it is fixed
+			const cycleError = await this._instantiationService.invokeFunction(accessor => checkTemplateCallCycle(accessor.get(IWorkflowExecutionService), moduleToSave, wsUri));
+			if (cycleError && cycleError !== this._lastReportedCycleError) {
+				this.notificationService.error(`Template '${moduleToSave.name}' is invalid: ${cycleError}`);
+			}
+			this._lastReportedCycleError = cycleError;
 		} catch (e) {
 			console.warn('[CustomModuleSchemaEditor] Failed to auto-persist schema module:', e);
 		} finally {
@@ -6949,6 +6961,23 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					append(subTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
 					append(subTitle, $('span', {}, `Sub-Workflow: ${field.subWorkflowName || field.subWorkflowId || '(unlinked)'}`));
+					// Template designer (CI-38): pick the sub_workflow ticket on the card; outputs below stay read-only
+					const isTemplateCard = !(this.input instanceof CustomModuleSchemaEditorInput && this.input.isFlowchartNodeMode);
+					if (isTemplateCard && this._activeModule) {
+						const activeModule = this._activeModule;
+						this._instantiationService.invokeFunction(accessor => renderSubWorkflowPickerRow(subBox, field, {
+							executionService: accessor.get(IWorkflowExecutionService),
+							quickInputService: accessor.get(IQuickInputService),
+							notificationService: this.notificationService,
+							template: { id: activeModule.id, name: activeModule.name, fields: activeModule.fields || [], workspaceUri: this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined) },
+							register: d => this._renderCleanupFns.push(() => d.dispose()),
+							onDidChangeField: () => {
+								this._syncDraft();
+								renderCanvas();
+								void this._persistCurrentModule();
+							}
+						}));
+					}
 
 					const refreshSubBtn = append(subHeader, $('button', {
 						type: 'button',
@@ -6964,7 +6993,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							this.notificationService.warn('This Sub-Workflow card is not linked to a Sub-Workflow ID.');
 							return;
 						}
-						const refreshProvider = (this.input instanceof CustomModuleSchemaEditorInput) ? this.input.subWorkflowRefreshProvider : undefined;
+						const refreshProvider = ((this.input instanceof CustomModuleSchemaEditorInput) ? this.input.subWorkflowRefreshProvider : undefined)
+							?? (id => this._instantiationService.invokeFunction(accessor => resolveSubWorkflowContract(accessor.get(IWorkflowExecutionService), id)));
 						if (!refreshProvider) {
 							this.notificationService.warn('Open this node from its Workflow editor to refresh its Sub-Workflow definition.');
 							return;

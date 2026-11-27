@@ -268,7 +268,9 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 	constructor(
 		private readonly customModulesService: ICustomModulesService,
-		private readonly workspacesExplorerService: IWorkspacesExplorerService
+		private readonly workspacesExplorerService: IWorkspacesExplorerService,
+		/** Fills / validates Call Sub-Workflow cards and rejects call cycles before saving (CI-38); returns an error. */
+		private readonly prepareTemplate?: (module: ICustomModule, workspaceUri: URI | undefined) => Promise<string | undefined>
 	) { }
 
 	getToolData(): IToolData {
@@ -733,6 +735,11 @@ export class GenerateCustomModuleTool implements IToolImpl {
 			}
 			if (!replaced) {
 				updatedModules.push(newModule);
+			}
+
+			const prepareError = this.prepareTemplate ? await this.prepareTemplate(newModule, workspaceUri) : undefined;
+			if (prepareError) {
+				return toolError(prepareError);
 			}
 
 			await this.customModulesService.saveCustomModules(updatedModules, workspaceUri);

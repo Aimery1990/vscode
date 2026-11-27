@@ -58,8 +58,9 @@ suite('componentRegistry', () => {
 			assert.ok(getComponentSpec(item.compType)!.usableIn.includes('node'), item.compType);
 			assert.ok(item.label && item.desc && item.accent, item.compType);
 		}
-		// Only workflow-node components are missing from the template toolbox on purpose
-		assert.ok(!TEMPLATE_PALETTE_ORDER.includes('sub_workflow'));
+		// Call Sub-Workflow is offered in templates too (CI-38); in nodes it comes from the Sub-Workflow Library
+		assert.ok(TEMPLATE_PALETTE_ORDER.includes('sub_workflow'));
+		assert.ok(!NODE_PALETTE_ORDER.includes('sub_workflow'));
 	});
 
 	test('the AI config allowlist is exactly the config-role props of each spec', () => {
@@ -75,7 +76,7 @@ suite('componentRegistry', () => {
 		assert.deepStrictEqual(getSecretPropNames().sort(), ['httpApiKeyValue', 'httpAuthPassword', 'httpAuthToken', 'sshPassword']);
 	});
 
-	test('no hidden or legacy types are exposed to the AI; node-only types stay out of templates', () => {
+	test('no hidden or legacy types are exposed to the AI; Call Sub-Workflow is usable in templates', () => {
 		const hidden = getAllComponentSpecs().filter(s => s.ai === 'hidden').map(s => s.type);
 		const aiTypes = new Set<string>(getAiTemplateComponentTypes());
 		for (const type of hidden) {
@@ -86,9 +87,12 @@ suite('componentRegistry', () => {
 			assert.ok(!aiTypes.has(legacy));
 			assert.ok(!buildPrimitivesCatalog().some(e => e.type === legacy));
 		}
-		assert.ok(!aiTypes.has('sub_workflow'));
+		// Call Sub-Workflow is usable in templates and the AI may configure it (CI-38)
+		assert.ok(aiTypes.has('sub_workflow'));
+		assert.deepStrictEqual(getAiConfigProps('sub_workflow').map(p => p.name).filter(n => !COMMON_COMPONENT_PROPS.some(c => c.name === n)), ['subWorkflowId', 'subWorkflowInputs']);
 		assert.deepStrictEqual(buildAiBasePrimitives().map(p => p.type), [...aiTypes]);
-		assert.ok(buildPrimitivesCatalog().some(e => e.type === 'sub_workflow' && e.usableIn?.[0] === 'node'));
+		// usableIn is only listed for restricted types: sub_workflow is no longer node-only
+		assert.ok(buildPrimitivesCatalog().some(e => e.type === 'sub_workflow' && e.usableIn === undefined));
 	});
 
 	test('the help guide renders for every type and includes its outputs', () => {

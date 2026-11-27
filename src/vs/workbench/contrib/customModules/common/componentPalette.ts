@@ -224,6 +224,11 @@ export function createComponentField(item: IComponentPaletteItem, fields: readon
 		case 'display':
 			field.wfDisplayValue = '';
 			break;
+		case 'sub_workflow':
+			// The sub-workflow is picked on the card; its input / output definitions are filled from the ticket
+			field.subWorkflowId = '';
+			field.subWorkflowInputs = {};
+			break;
 	}
 	return field;
 }

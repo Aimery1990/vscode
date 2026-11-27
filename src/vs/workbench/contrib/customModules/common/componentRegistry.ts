@@ -1663,42 +1663,47 @@ export const COMPONENT_SPECS = {
 		displayName: 'Call Sub-Workflow',
 		icon: Codicon.layers,
 		category: 'composite',
-		usableIn: ['node'],
+		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
-		purpose: 'Calls a reusable sub-workflow inside a node and returns its outputs.',
-		description: 'Calls a reusable sub-workflow (a sub_workflow ticket) inside a node: passes inputs in, runs it, and hands its outputs to the next steps. Works in the workflow it was encapsulated from and in any other workflow.',
-		runtime: 'Config: subWorkflowId* (the sub-workflow TICKET ID, e.g. FINDJ-0042: find it with GET_TICKETS(ticket_type="sub_workflow"), read its inputs / outputs with GET_TICKET(id)), subWorkflowInputs {inputName: expression or {var}}. Runs the sub-workflow with those inputs; the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. Creating a new sub-workflow is a separate action, not done by this component: encapsulate selected nodes on a workflow canvas, or CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {...}}).',
+		purpose: 'Calls a reusable sub-workflow (a sub_workflow ticket) and returns its outputs.',
+		description: 'Calls a reusable sub-workflow (a sub_workflow ticket) from a ticket template or a workflow node: passes inputs in, runs it, and hands its outputs to the next steps. Settings: subWorkflowId (required, the sub-workflow TICKET ID: find it with GET_TICKETS(ticket_type="sub_workflow")), subWorkflowInputs {inputName: value or {var}}. Outputs are not configured here: they are the sub-workflow\'s own outputs. Recursion is never allowed (a sub-workflow must not call itself, directly or through other sub-workflows / tickets) and calls nest at most 5 levels deep.',
+		runtime: 'Config: subWorkflowId* (the sub-workflow TICKET ID, e.g. FINDJ-0042: find it with GET_TICKETS(ticket_type="sub_workflow"), read its inputs / outputs with GET_TICKET(id)), subWorkflowInputs {inputName: expression or {var}}. Inputs not bound use the sub-workflow defaults. Runs the sub-workflow with those inputs (the same execution path in a ticket run and in a node); the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. A failed sub-workflow fails the step. Recursion (the same sub-workflow or workflow twice on the call chain) or nesting deeper than 5 levels stops the whole run with an error naming the chain; saving or starting a run that contains such a cycle is reported up front. Creating a new sub-workflow is a separate action, not done by this component: encapsulate selected nodes on a workflow canvas, or CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {...}}).',
 		props: [
-			{ name: 'subWorkflowId', kind: 'string', role: 'editor', required: true, description: 'The Sub-Workflow ticket ID (e.g. FINDJ-0042), or the legacy subwf_... id of a migrated Sub-Workflow.' },
-			{ name: 'subWorkflowInputs', kind: 'object', role: 'editor', description: 'Input bindings {inputName: expression or {var}}.' },
+			{ name: 'subWorkflowId', kind: 'string', required: true, description: 'The Sub-Workflow ticket ID (e.g. FINDJ-0042; find it with GET_TICKETS(ticket_type="sub_workflow")), or the legacy subwf_... id of a migrated Sub-Workflow.' },
+			{ name: 'subWorkflowInputs', kind: 'object', description: 'Input bindings {inputName: value or {var}}, by the sub-workflow input names; unbound inputs use their defaults.' },
 			{ name: 'subWorkflowName', kind: 'string', role: 'state', description: 'Name of the linked sub-workflow (filled from the ticket).' },
 			{ name: 'subWorkflowSourceUri', kind: 'string', role: 'state', description: 'Workflow the sub-workflow was saved from (written, never read).' },
 			{ name: 'subWorkflowInputDefs', kind: 'objectArray', role: 'state', description: 'Input definitions copied from the sub-workflow ticket.' },
-			{ name: 'subWorkflowOutputDefs', kind: 'objectArray', role: 'state', description: 'Output definitions copied from the sub-workflow ticket.' }
+			{ name: 'subWorkflowOutputDefs', kind: 'objectArray', role: 'state', description: 'Output definitions copied from the sub-workflow ticket (shown read-only on the card).' }
 		],
 		outputs: [
-			{ name: '{var}', type: 'any | object', when: 'both', description: 'sub-workflow outputs: the raw value with one output item, else a dictionary keyed by output name' }
+			{ name: '{var}', type: 'any | object', when: 'both', description: 'sub-workflow outputs: the raw value with one output item, else a dictionary keyed by output name' },
+			{ name: '{Label}', type: 'any | object', when: 'both', description: 'same value under the label' }
 		],
 		example: { id: 'call_sub', label: 'Call Sub-Workflow', type: 'sub_workflow', subWorkflowId: 'FINDJ-0042', subWorkflowInputs: { query: '{keyword}' } },
 		notes: [
-			'Workflow nodes only; it is added from the Sub-Workflow Library, not from the Node Components palette.',
+			'In a template: pick the sub-workflow on the card (the picker lists sub_workflow tickets). In a workflow node: add it from the Sub-Workflow Library, not from the Node Components palette.',
 			'Every sub-workflow is a ticket of type sub_workflow with its own ticket ID; its definition is .agents/sub_workflow.json in the ticket folder.',
+			'No recursion: a template or workflow whose calls form a cycle (e.g. A -> B -> A) is reported when saved and refuses to run; at run time the call chain is checked and nesting is limited to 5 levels.',
 			'To create one from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; node ids must be unique and links must connect given nodes; without a definition it starts empty.'
 		],
 		help: builtinHelp('Call Sub-Workflow',
-			'Calls a reusable sub-workflow inside a node: passes inputs in, runs it, and hands its outputs to the next steps. Every sub-workflow is a ticket of type sub_workflow with its own ticket ID, so it can be called from the workflow it came from and from any other workflow.',
+			'Calls a reusable sub-workflow from a ticket or a workflow node: passes inputs in, runs it, and hands its outputs to the next steps. Every sub-workflow is a ticket of type sub_workflow with its own ticket ID, so it can be called from the workflow it came from, from any other workflow and from ticket templates.',
 			[
-				{ name: 'Sub-Workflow', desc: 'Required. The sub-workflow ticket ID (e.g. FINDJ-0042). In the editor: pick it from the Sub-Workflow Library ("+" button or drag onto a node). For AI / code: find it with GET_TICKETS(ticket_type="sub_workflow") (each result has a short inputs / outputs summary), read the full contract with GET_TICKET(id), then put the ticket ID into this step.' },
-				{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs, by input name; each can be an expression or a {variable}.' }
+				{ name: 'Sub-Workflow', desc: 'Required. The sub-workflow ticket ID (e.g. FINDJ-0042). In a template: pick it on the card (lists sub_workflow tickets, name + ID). In a workflow: pick it from the Sub-Workflow Library ("+" button or drag onto a node). For AI / code: find it with GET_TICKETS(ticket_type="sub_workflow") (each result has a short inputs / outputs summary), read the full contract with GET_TICKET(id), then put the ticket ID into this step.' },
+				{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs, by input name; each can be a value or a {variable}.' },
+				{ name: 'Outputs', desc: 'Read-only: the sub-workflow\'s own outputs.' }
 			],
 			[
 				{ step: '1. Resolve', detail: 'Finds the sub_workflow ticket by its ID and reads its definition (.agents/sub_workflow.json in the ticket folder). Steps saved before sub-workflows became tickets keep their old subwf_... id, which still resolves.' },
-				{ step: '2. Run', detail: 'Runs the sub-workflow with the given Inputs. When the source workflow is available, its current canvas nodes are used (the source canvas is the source of truth).' },
-				{ step: '3. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name.' }
+				{ step: '2. Check the call chain', detail: 'Stops the whole run if this sub-workflow (or workflow) is already running higher up the chain (recursion) or if calls would nest more than 5 levels; the error names the chain, e.g. A -> B -> A.' },
+				{ step: '3. Run', detail: 'Runs the sub-workflow with the given Inputs. When the source workflow is available, its current canvas nodes are used (the source canvas is the source of truth).' },
+				{ step: '4. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name. A failed sub-workflow marks the step Failed.' }
 			],
 			'Later steps read the result from the output variable.',
 			['{call_sub_workflow_result}'],
-			['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes), or create a sub_workflow ticket from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; without a definition it starts empty. This component only calls existing ones.'])
+			['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes), or create a sub_workflow ticket from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; without a definition it starts empty. This component only calls existing ones.', 'Recursion is never allowed: saving a template or workflow whose calls form a cycle shows an error naming the chain, and such a run refuses to start.']),
+		templatePalette: { defaultName: 'Call Sub-Workflow' }
 	}
 } as const satisfies { readonly [T in CustomFieldType]: IComponentSpec & { readonly type: T } };
 
@@ -1708,7 +1713,7 @@ export type ComponentType = keyof typeof COMPONENT_SPECS;
 /** Order of the template designer / Freestyle toolbox ("Base Primitives"). Every entry needs `templatePalette`. */
 export const TEMPLATE_PALETTE_ORDER: readonly ComponentType[] = [
 	'parameters', 'prompt', 'tts', 'media_player', 'voice_note', 'browser', 'git', 'python', 'http_request', 'table', 'output',
-	'create_tickets', 'run_tickets', 'get_outputs', 'display',
+	'create_tickets', 'run_tickets', 'get_outputs', 'display', 'sub_workflow',
 	'text', 'textarea', 'number', 'select', 'multiselect', 'switch', 'date', 'time', 'datetime', 'date_range', 'time_range', 'datetime_range',
 	'dynamic_list', 'attachment', 'button_group'
 ];
