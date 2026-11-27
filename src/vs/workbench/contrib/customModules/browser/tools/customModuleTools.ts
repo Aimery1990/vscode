@@ -422,7 +422,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'create_tickets',
 		label: 'Create Tickets',
-		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}}. Output: a ticket handle usable by Run Tickets / Get Outputs as {var}.',
+		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}}. Output: a ticket handle usable by Run Tickets / Get Outputs as {var}. The reserved types "freestyle" and "sub_workflow" cannot be created here (a sub-workflow is created only by encapsulating nodes on a workflow canvas).',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'new_run', label: 'New Run', type: 'create_tickets', wfTicketType: 'training_run', wfTicketTitle: 'Run {run_no}', wfTicketParams: { lr: '{lr}' } }
@@ -446,7 +446,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'get_ticket',
 		label: 'Get Ticket',
-		description: 'Reads one ticket (or one of its fields). Settings: wfTicketTarget (id / name / path / {var}, required), wfTicketField (optional).',
+		description: 'Reads one ticket (or one of its fields). Settings: wfTicketTarget (id / name / path / {var}, required), wfTicketField (optional). For a sub_workflow ticket the result has subWorkflow: its full calling contract (inputs with defaults, outputs, source workflow).',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'parent', label: 'Parent', type: 'get_ticket', wfTicketTarget: 'JOB-0001' }
@@ -454,7 +454,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'get_tickets',
 		label: 'Get Tickets',
-		description: 'Searches several tickets (AND of filters; give at least one). Settings: wfTicketType, wfTicketStatus, wfTicketTitle (substring), wfTicketPath (folder), wfTicketField (return one field per ticket). Output: a list.',
+		description: 'Searches several tickets (AND of filters; give at least one). Settings: wfTicketType, wfTicketStatus, wfTicketTitle (substring), wfTicketPath (folder), wfTicketField (return one field per ticket). Output: a list. To discover reusable sub-workflows use wfTicketType "sub_workflow" (each item has subWorkflow {name, inputs, outputs, sourceWorkflow}); call one from a workflow node with a Call Sub-Workflow step whose subWorkflowId is that ticket ID.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'done_runs', label: 'Done Runs', type: 'get_tickets', wfTicketType: 'training_run', wfTicketStatus: 'Done' }

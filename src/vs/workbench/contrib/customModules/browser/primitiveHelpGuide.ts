@@ -828,18 +828,19 @@ PRIMITIVE_GUIDES['display'] = builtinGuide('display', 'Display', Codicon.eye,
 	['Remove or disable Display steps you no longer need.']);
 
 PRIMITIVE_GUIDES['sub_workflow'] = builtinGuide('sub_workflow', 'Call Sub-Workflow', Codicon.layers,
-	'Calls a reusable sub-workflow from the Sub-Workflow Library inside a node: passes inputs in, runs it, and hands its outputs to the next steps.',
+	'Calls a reusable sub-workflow inside a node: passes inputs in, runs it, and hands its outputs to the next steps. Every sub-workflow is a ticket of type sub_workflow with its own ticket ID, so it can be called from the workflow it came from and from any other workflow.',
 	[
-		{ name: 'Sub-Workflow', desc: 'Required. Chosen from the Sub-Workflow Library ("+" button or drag onto a node).' },
-		{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs; each can be an expression or a {variable}.' }
+		{ name: 'Sub-Workflow', desc: 'Required. The sub-workflow ticket ID (e.g. FINDJ-0042). In the editor: pick it from the Sub-Workflow Library ("+" button or drag onto a node). For AI / code: find it with GET_TICKETS(ticket_type="sub_workflow") (each result has a short inputs / outputs summary), read the full contract with GET_TICKET(id), then put the ticket ID into this step.' },
+		{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs, by input name; each can be an expression or a {variable}.' }
 	],
 	[
-		{ step: '1. Run', detail: 'Runs the sub-workflow with the given Inputs.' },
-		{ step: '2. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name.' }
+		{ step: '1. Resolve', detail: 'Finds the sub_workflow ticket by its ID and reads its definition (.agents/sub_workflow.json in the ticket folder). Steps saved before sub-workflows became tickets keep their old subwf_... id, which still resolves.' },
+		{ step: '2. Run', detail: 'Runs the sub-workflow with the given Inputs. When the source workflow is available, its current canvas nodes are used (the source canvas is the source of truth).' },
+		{ step: '3. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name.' }
 	],
 	'Later steps read the result from the output variable.',
 	['{call_sub_workflow_result}'],
-	['To create a new sub-workflow, select nodes in a workflow and save them to the library; this component only calls existing ones.']);
+	['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes); this creates the sub_workflow ticket inside that workflow. CREATE_TICKETS, Python and AI tools cannot create sub_workflow tickets; this component only calls existing ones.']);
 
 /**
  * Returns guide documentation for any primitive type or fallback generic info.
