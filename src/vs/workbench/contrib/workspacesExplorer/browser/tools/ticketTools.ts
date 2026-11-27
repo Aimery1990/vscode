@@ -6,7 +6,7 @@ import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { localize } from '../../../../../nls.js';
 import { CountTokensCallback, IPreparedToolInvocation, IToolData, IToolImpl, IToolInvocation, IToolInvocationPreparationContext, IToolResult, ToolDataSource, ToolProgress } from '../../../chat/common/tools/languageModelToolsService.js';
-import { ICreateTicketToolOptions, IDeleteTicketToolOptions, IManageLinksToolOptions, IOperateTicketTableToolOptions, IQueryWorkspaceTreeToolOptions, IUpdateTicketToolOptions, TicketDataEngine } from './ticketDataEngine.js';
+import { ICreateTicketToolOptions, IDeleteTicketToolOptions, IGetTicketHistoryToolOptions, IManageLinksToolOptions, IOperateTicketTableToolOptions, IQueryWorkspaceTreeToolOptions, IUpdateTicketToolOptions, TicketDataEngine } from './ticketDataEngine.js';
 
 export const GetTicketDataToolId = 'anyagent_get_ticket_data';
 export const CreateTicketToolId = 'anyagent_create_ticket';
@@ -15,6 +15,7 @@ export const UpdateTicketToolId = 'anyagent_update_ticket';
 export const ManageLinksToolId = 'anyagent_manage_links';
 export const QueryWorkspaceTreeToolId = 'anyagent_query_workspace_tree';
 export const OperateTicketTableToolId = 'anyagent_operate_ticket_table';
+export const GetTicketHistoryToolId = 'anyagent_get_ticket_history';
 
 function toolResult(data: unknown, message?: string): IToolResult {
 	return {
@@ -57,7 +58,7 @@ export class GetTicketDataTool implements IToolImpl {
 			toolReferenceName: 'getTicketData',
 			displayName: localize('ticket.tool.get.displayName', "Get Ticket Data"),
 			userDescription: localize('ticket.tool.get.userDescription', "Get ticket field values and schema metadata"),
-			modelDescription: 'Retrieve actual values, field types, allowed scopes, and dynamically discovered direct children sub-tickets of a ticket. If field_path is omitted, returns the entire ticket values (including its labels) alongside its children list, complete YAML type schema definition, workspace status mapping, and the workspace label definitions (workspace_labels).',
+			modelDescription: 'Retrieve actual values, field types, allowed scopes, and dynamically discovered direct children sub-tickets of a ticket. If field_path is omitted, returns the entire ticket values (including its labels) alongside its children list, complete YAML type schema definition, workspace status mapping, and the workspace label definitions (workspace_labels). Values only show the current state: to learn what changed, when and by whom (User / AI Agent / Workflow), call anyagent_get_ticket_history (getTicketHistory).',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.search,
@@ -711,6 +712,84 @@ export class OperateTicketTableTool implements IToolImpl {
 		try {
 			const res = await this.ticketEngine.operateTicketTable(invocation.parameters as IOperateTicketTableToolOptions);
 			return toolResult(res, res.summary || `Table '${res.table_field}' operation '${res.operation}' completed.`);
+		} catch (err) {
+			return toolError(errorText(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// 8. anyagent_get_ticket_history (CI-50)
+// -------------------------------------------------------------
+export class GetTicketHistoryTool implements IToolImpl {
+
+	constructor(
+		private readonly ticketEngine: TicketDataEngine
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: GetTicketHistoryToolId,
+			toolReferenceName: 'getTicketHistory',
+			displayName: localize('ticket.tool.history.displayName', "Get Ticket History"),
+			userDescription: localize('ticket.tool.history.userDescription', "Read the recorded field changes of a ticket"),
+			modelDescription: 'Read the field change history of a ticket (newest first). Every change of a ticket field (Title, Description, Status, Priority, Labels, Current AI Agent, Link To, Ticket Prompt, template / Freestyle field values) is recorded automatically with time, actor (User / AI Agent / Workflow, plus name when known), field id + label and old -> new value. Use it to find out what a human or a workflow changed since you last worked on the ticket. Small values are returned inline; large texts come with stats, a truncated line diff and the stored versions (oldPath / newPath); pass field + include_full_text: true to get full old / new texts.',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.history,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_id: {
+						type: 'string',
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
+					},
+					ticket_id: {
+						type: 'string',
+						description: 'The target ticket ID (e.g. \'FNDJ1-0001\') or relative path (e.g. \'/FNDJ1-0006/FNDJ1-0001\').'
+					},
+					parent_path: {
+						type: 'string',
+						description: 'Optional parent path to disambiguate sub-tickets with identical or relative IDs.'
+					},
+					since: {
+						type: 'string',
+						description: 'Optional: only changes at or after this time (ISO date or date time, e.g. \'2026-11-27\' or \'2026-11-27T10:00:00\').'
+					},
+					field: {
+						type: 'string',
+						description: 'Optional: only changes of this field, by id (\'status\', \'description\', \'custom:Notes\') or label (\'Status\', \'Notes\').'
+					},
+					limit: {
+						type: 'number',
+						description: 'Optional: maximum number of change records (default 50, max 500).'
+					},
+					include_full_text: {
+						type: 'boolean',
+						description: 'Optional (requires field): also return the full old / new texts of large values.'
+					}
+				},
+				required: ['workspace_id', 'ticket_id']
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const ticketId = context.parameters?.ticket_id || '';
+		return {
+			invocationMessage: localize('ticket.tool.history.invoking', "Reading change history of {0}...", ticketId),
+			pastTenseMessage: localize('ticket.tool.history.done', "Read change history of {0}", ticketId)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const params = invocation.parameters as IGetTicketHistoryToolOptions;
+			if (!params?.workspace_id || !params?.ticket_id) {
+				return toolError('\'workspace_id\' and \'ticket_id\' are required.');
+			}
+			const res = await this.ticketEngine.getTicketHistory(params);
+			return toolResult(res, `Read ${res.returned} change record(s) of ticket ${res.ticket_id}`);
 		} catch (err) {
 			return toolError(errorText(err));
 		}

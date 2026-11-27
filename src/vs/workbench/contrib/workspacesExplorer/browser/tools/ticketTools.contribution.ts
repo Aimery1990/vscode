@@ -7,7 +7,7 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../common/contributions.js';
 import { ILanguageModelToolsService } from '../../../chat/common/tools/languageModelToolsService.js';
 import { TicketDataEngine } from './ticketDataEngine.js';
-import { CreateTicketTool, DeleteTicketTool, GetTicketDataTool, ManageLinksTool, OperateTicketTableTool, QueryWorkspaceTreeTool, UpdateTicketTool } from './ticketTools.js';
+import { CreateTicketTool, DeleteTicketTool, GetTicketDataTool, GetTicketHistoryTool, ManageLinksTool, OperateTicketTableTool, QueryWorkspaceTreeTool, UpdateTicketTool } from './ticketTools.js';
 
 export class TicketToolsContribution extends Disposable implements IWorkbenchContribution {
 
@@ -28,6 +28,7 @@ export class TicketToolsContribution extends Disposable implements IWorkbenchCon
 		const linkTool = new ManageLinksTool(engine);
 		const queryTreeTool = new QueryWorkspaceTreeTool(engine);
 		const operateTableTool = new OperateTicketTableTool(engine);
+		const historyTool = new GetTicketHistoryTool(engine);
 
 		this._register(toolsService.registerTool(getTool.getToolData(), getTool));
 		this._register(toolsService.registerTool(createTool.getToolData(), createTool));
@@ -36,6 +37,7 @@ export class TicketToolsContribution extends Disposable implements IWorkbenchCon
 		this._register(toolsService.registerTool(linkTool.getToolData(), linkTool));
 		this._register(toolsService.registerTool(queryTreeTool.getToolData(), queryTreeTool));
 		this._register(toolsService.registerTool(operateTableTool.getToolData(), operateTableTool));
+		this._register(toolsService.registerTool(historyTool.getToolData(), historyTool));
 	}
 }
 

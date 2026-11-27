@@ -17,6 +17,8 @@ import { isSubWorkflowTicketType } from '../../../customModules/common/subWorkfl
 import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
+import { readTicketFieldVersion, writeTicketFile } from '../ticketChangeRecorder.js';
+import { ITicketChangeRecord, parseTicketChangeRecords, ticketChangeRecordMatchesField } from '../../common/ticketChangeLog.js';
 import { IPathService } from '../../../../services/path/common/pathService.js';
 import { coerceTicketLabelsInput, hasTicketLabel, isDefinedLabel, ITicketLabelDefinition } from '../../common/ticketLabels.js';
 import { readTicketLabels, setTicketLabelsLine } from '../../common/workspaceLifecycle.js';
@@ -109,6 +111,26 @@ export interface IManageLinksToolOptions {
 	action: 'add_links' | 'remove_links' | 'set_links';
 	target_ticket_ids: string[];
 	worklog_record: IWorklogRecord;
+}
+
+export interface IGetTicketHistoryToolOptions {
+	workspace_id: string;
+	ticket_id: string;
+	parent_path?: string;
+	/** Only changes at or after this time (ISO date / date time). */
+	since?: string;
+	/** Only changes of this field (id such as `status` / `custom:Notes`, or label such as `Status` / `Notes`). */
+	field?: string;
+	/** Maximum number of change records (newest first). Default 50, max 500. */
+	limit?: number;
+	/** Also return the full old / new texts of large values (read from the field versions; requires `field`). */
+	include_full_text?: boolean;
+}
+
+export interface ITicketHistoryChange extends ITicketChangeRecord {
+	log_file: string;
+	old_full_text?: string;
+	new_full_text?: string;
 }
 
 export interface IQueryWorkspaceTreeToolOptions {
@@ -1113,7 +1135,7 @@ export class TicketDataEngine {
 		const removedStatusName = wsStatuses.removedStatus || 'Removed';
 
 		// 1. Mark target ticket as Removed
-		await this.workspacesExplorerService.setEntityStatus(paths.folderUri, removedStatusName);
+		await this.workspacesExplorerService.setEntityStatus(paths.folderUri, removedStatusName, 'AI Agent');
 		await this.workspacesExplorerService.removeSnapshot(paths.folderUri);
 
 		// 2. Cascade delete all sub-tickets recursively
@@ -1171,7 +1193,7 @@ export class TicketDataEngine {
 		for (const child of children) {
 			if (child.uri && child.type !== 'file' && child.type !== 'folder') {
 				try {
-					await this.workspacesExplorerService.setEntityStatus(child.uri, removedStatus);
+					await this.workspacesExplorerService.setEntityStatus(child.uri, removedStatus, 'AI Agent');
 					await this.workspacesExplorerService.removeSnapshot(child.uri);
 					if (child.name) { collectedIds.push(child.name); }
 				} catch { }
@@ -1284,7 +1306,7 @@ export class TicketDataEngine {
 					ticketContent = ticketContent.replace(/^-\s*\*\*Status\*\*:\s*.*$/m, () => `- **Status**: ${rawVal}`);
 					ticketModified = true;
 					// Synchronize through explorer service as well
-					await this.workspacesExplorerService.setEntityStatus(paths.folderUri, rawVal as string);
+					await this.workspacesExplorerService.setEntityStatus(paths.folderUri, rawVal as string, 'AI Agent');
 				}
 			}
 			// 4. Priority
@@ -1406,13 +1428,13 @@ export class TicketDataEngine {
 
 		// Save files
 		if (ticketModified) {
-			await this.fileService.writeFile(paths.ticketMdUri, VSBuffer.fromString(ticketContent));
+			await writeTicketFile(this.fileService, paths.ticketMdUri, ticketContent, 'AI Agent');
 		}
 		if (readmeModified) {
-			await this.fileService.writeFile(paths.readmeMdUri, VSBuffer.fromString(readmeContent));
+			await writeTicketFile(this.fileService, paths.readmeMdUri, readmeContent, 'AI Agent');
 		}
 		if (instructionModified) {
-			await this.fileService.writeFile(paths.instructionMdUri, VSBuffer.fromString(instructionContent));
+			await writeTicketFile(this.fileService, paths.instructionMdUri, instructionContent, 'AI Agent');
 		}
 
 		// Sync .agents/entity_snapshot.json if present (e.g. Workflows or snapshots)
@@ -1505,7 +1527,7 @@ export class TicketDataEngine {
 
 			const finalLinkToStr = newLinkToList.length > 0 ? newLinkToList.join(', ') : 'None';
 			srcTicketContent = srcTicketContent.replace(/^-\s*\*\*Link To\*\*:\s*.*$/m, `- **Link To**: ${finalLinkToStr}`);
-			await this.fileService.writeFile(srcPaths.ticketMdUri, VSBuffer.fromString(srcTicketContent));
+			await writeTicketFile(this.fileService, srcPaths.ticketMdUri, srcTicketContent, 'AI Agent');
 		}
 
 		// Update Linked By on targets
@@ -1530,7 +1552,7 @@ export class TicketDataEngine {
 
 			const finalLinkedByStr = newLinkedByList.length > 0 ? newLinkedByList.join(', ') : 'None';
 			targetTicketContent = targetTicketContent.replace(/^-\s*\*\*Linked By\*\*:\s*.*$/m, `- **Linked By**: ${finalLinkedByStr}`);
-			await this.fileService.writeFile(targetPaths.ticketMdUri, VSBuffer.fromString(targetTicketContent));
+			await writeTicketFile(this.fileService, targetPaths.ticketMdUri, targetTicketContent, 'AI Agent');
 		}
 
 		// Synchronize worklog to all involved tickets
@@ -1546,6 +1568,75 @@ export class TicketDataEngine {
 			sources: options.source_ticket_ids,
 			targets: options.target_ticket_ids,
 			synchronized_tickets_count: involvedTicketPaths.length
+		};
+	}
+
+	/**
+	 * anyagent_get_ticket_history: the field change records (CI-50) of a ticket, newest first, parsed from its work log.
+	 */
+	public async getTicketHistory(options: IGetTicketHistoryToolOptions) {
+		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
+		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
+		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
+		if (!paths) { throw new Error(`Ticket '${options.ticket_id}' not found.`); }
+
+		const limit = Math.max(1, Math.min(500, Math.floor(Number(options.limit) || 50)));
+		let sinceMs: number | undefined;
+		if (options.since) {
+			sinceMs = Date.parse(options.since);
+			if (isNaN(sinceMs)) {
+				throw new Error(`Invalid 'since' value '${options.since}': use an ISO date or date time (e.g. 2026-11-27 or 2026-11-27T10:00:00).`);
+			}
+		}
+		const includeFullText = options.include_full_text === true && !!options.field;
+
+		const storage = new TicketWorklogStorage(this.fileService);
+		const metas = await storage.listWorklogMetas(paths.folderUri);
+		const changes: ITicketHistoryChange[] = [];
+		let scannedEntries = 0;
+		for (const meta of metas) {
+			if (changes.length >= limit) {
+				break;
+			}
+			const entry = await storage.readWorklogEntry(paths.folderUri, meta);
+			const records = parseTicketChangeRecords(entry.fullContent);
+			if (records.length === 0) {
+				continue;
+			}
+			scannedEntries++;
+			// newest first inside an entry too
+			const sorted = [...records].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+			for (const r of sorted) {
+				if (changes.length >= limit) {
+					break;
+				}
+				if (sinceMs !== undefined && (Date.parse(r.at) || 0) < sinceMs) {
+					continue;
+				}
+				if (options.field && !ticketChangeRecordMatchesField(r, options.field)) {
+					continue;
+				}
+				const change: ITicketHistoryChange = { ...r, log_file: meta.partFiles[0] };
+				if (includeFullText) {
+					if (r.oldPath) {
+						change.old_full_text = await readTicketFieldVersion(this.fileService, paths.folderUri, r.oldPath);
+					}
+					if (r.newPath) {
+						change.new_full_text = await readTicketFieldVersion(this.fileService, paths.folderUri, r.newPath);
+					}
+				}
+				changes.push(change);
+			}
+		}
+
+		return {
+			ticket_id: paths.ticketId,
+			workspace_id: paths.workspaceId,
+			returned: changes.length,
+			limit,
+			change_entries_scanned: scannedEntries,
+			changes,
+			notes: 'Newest first. kind: inline = full old/new values; diff = large text (stats + truncated line diff); blob = large text from / to empty (preview); list = dynamic list / table item changes; binary = media (type, size, sha1 only). oldHash / newHash are the SHA-256 of the full texts, stored (gzip) at oldPath / newPath = .agents/fields/<field_key>.versions/<YYYYMMDD-HHMMSS>_<sha12>.txt.gz relative to the ticket folder; pass field + include_full_text: true to get them.'
 		};
 	}
 
@@ -1885,7 +1976,7 @@ export class TicketDataEngine {
 
 			const finalStr = list.length > 0 ? list.join(', ') : 'None';
 			content = content.replace(/^-\s*\*\*Linked By\*\*:\s*.*$/m, `- **Linked By**: ${finalStr}`);
-			await this.fileService.writeFile(p.ticketMdUri, VSBuffer.fromString(content));
+			await writeTicketFile(this.fileService, p.ticketMdUri, content, 'AI Agent');
 		}
 	}
 
@@ -1907,7 +1998,7 @@ export class TicketDataEngine {
 
 			const finalStr = list.length > 0 ? list.join(', ') : 'None';
 			content = content.replace(/^-\s*\*\*Link To\*\*:\s*.*$/m, `- **Link To**: ${finalStr}`);
-			await this.fileService.writeFile(p.ticketMdUri, VSBuffer.fromString(content));
+			await writeTicketFile(this.fileService, p.ticketMdUri, content, 'AI Agent');
 		}
 	}
 
@@ -2232,7 +2323,7 @@ export class TicketDataEngine {
 		};
 
 		ticketContent = this._applyCustomUpdate(ticketContent, canonicalKey, updatedTablePayload);
-		await this.fileService.writeFile(paths.ticketMdUri, VSBuffer.fromString(ticketContent));
+		await writeTicketFile(this.fileService, paths.ticketMdUri, ticketContent, 'AI Agent');
 
 		if (options.worklog_record) {
 			await this.appendWorklog(paths.worklogMdUri, options.worklog_record);

@@ -16,6 +16,8 @@ import { FREESTYLE_TYPE_DEFINITION, FREESTYLE_TYPE_PROMPT } from '../../customMo
 import { SUB_WORKFLOW_TYPE_DEFINITION, SUB_WORKFLOW_TYPE_PROMPT } from '../../customModules/common/subWorkflowType.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 import { normalizeTicketLabels } from '../../workspacesExplorer/common/ticketLabels.js';
+import { TicketChangeActorInput } from '../../workspacesExplorer/common/ticketChangeLog.js';
+import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
 export const SYSTEM_CONFIG_DIR_NAME = '.agents';
@@ -191,7 +193,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		return configDir;
 	}
 
-	async writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder = false): Promise<URI> {
+	async writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder = false, actor?: TicketChangeActorInput): Promise<URI> {
 		const folderName = snapshot.entityName.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const type = snapshot.entityType;
 		const entityFolderUri = isNewFolder ? URI.joinPath(targetFolderUri, folderName) : targetFolderUri;
@@ -410,7 +412,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			}
 			mainMdContent += '\n';
 		}
-		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
+		await writeTicketFile(this.fileService, mainMdUri, mainMdContent, actor);
 
 		let customPromptFromYaml: string | undefined;
 		try {
@@ -483,7 +485,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		instructionContent += `  - [README.md](${readmeRel})\n`;
 		instructionContent += `  - [ticket.md](${ticketRel})\n`;
 		instructionContent += `  - [worklog.md](${worklogRel})\n`;
-		await this.fileService.writeFile(instructionUri, VSBuffer.fromString(instructionContent));
+		await writeTicketFile(this.fileService, instructionUri, instructionContent, actor);
 
 		// 3. README.md
 		let readmeContent = `# ${snapshot.entityName}\n\n`;
@@ -498,7 +500,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		readmeContent += `  - [README.md](${readmeRel})\n`;
 		readmeContent += `  - [ticket.md](${ticketRel})\n`;
 		readmeContent += `  - [worklog.md](${worklogRel})\n`;
-		await this.fileService.writeFile(readmeUri, VSBuffer.fromString(readmeContent));
+		await writeTicketFile(this.fileService, readmeUri, readmeContent, actor);
 
 		// 4. worklog.md
 		if (!await this.fileService.exists(workLogUri)) {

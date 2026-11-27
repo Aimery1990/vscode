@@ -24,6 +24,8 @@ import { buildPrimitivesCatalog } from '../../customModules/common/componentRegi
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
+import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
+import { ITicketChangeActor } from '../../workspacesExplorer/common/ticketChangeLog.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
@@ -954,7 +956,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				customMetadata: customMetadata
 			};
 
-			await this.entityPersistenceService.writeEntity4MDFiles(snapshot, parentFolderUri, true);
+			await this.entityPersistenceService.writeEntity4MDFiles(snapshot, parentFolderUri, true, 'Workflow');
 
 			this.logService.info(`[TicketWorkflowRuntime] Created ticket '${ticketCode}' (${title}) at ${ticketFolderUri.fsPath}`);
 
@@ -3240,7 +3242,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 
 			// Save updated ticket metadata and append worklog entry
-			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus);
+			// Field changes of this run are recorded in the ticket's work log as the Workflow (CI-50)
+			const callerWorkflow = options.callChain?.frames.find(f => f.kind === 'workflow' || f.kind === 'sub_workflow');
+			const runActor: ITicketChangeActor = { kind: 'Workflow', name: callerWorkflow?.label || 'Ticket Run' };
+			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor);
 
 			const totalDuration = Date.now() - startTime;
 			this.logService.info(`[TicketWorkflowRuntime] Finished running ticket '${ticketResult.ticketId}' in ${totalDuration}ms (status: ${executionStatus})`);
@@ -6152,7 +6157,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return fields;
 	}
 
-	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed'): Promise<void> {
+	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed', actor: ITicketChangeActor = { kind: 'Workflow' }): Promise<void> {
 		try {
 			// Ensure Output field is populated in customMetadata even if schema didn't explicitly run an output step
 			if (finalOutput !== undefined && customMetadata['Output'] === undefined && customMetadata['output'] === undefined) {
@@ -6253,7 +6258,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						if (!replacedSelfDefined && selfDefinedLines.length > 0) {
 							updatedMd = updatedMd.trimEnd() + `\n\n### Self Defined Data (If any)\n- **Self Defined Data Value**:\n${selfDefinedLines.join('\n')}\n`;
 						}
-						await this.fileService.writeFile(tMdUri, VSBuffer.fromString(updatedMd));
+						await writeTicketFile(this.fileService, tMdUri, updatedMd, actor);
 					}
 				} catch (mdErr) {
 					this.logService.warn(`[TicketWorkflowRuntime] Failed to update ${tMdUri.fsPath}:`, mdErr);

@@ -14,6 +14,8 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
+import { TicketChangeActorInput } from '../common/ticketChangeLog.js';
+import { writeTicketFile } from './ticketChangeRecorder.js';
 import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, ensureFreestyleSchema, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
@@ -1193,7 +1195,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return meta.status;
 	}
 
-	public async setEntityStatus(entityUri: URI, newStatus: string): Promise<void> {
+	public async setEntityStatus(entityUri: URI, newStatus: string, actor?: TicketChangeActorInput): Promise<void> {
 		this._invalidateCacheForUri(entityUri);
 		const configDir = URI.joinPath(entityUri, '.agents');
 		const ticketUri = URI.joinPath(configDir, 'ticket.md');
@@ -1216,7 +1218,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				} else {
 					updated = text + `\n- **Status**: ${newStatus}\n`;
 				}
-				await this.fileService.writeFile(targetUri, VSBuffer.fromString(updated));
+				await writeTicketFile(this.fileService, targetUri, updated, actor);
 				this._invalidateCacheForUri(entityUri);
 			} catch (err) {
 				console.error('Failed to update status in ticket.md:', err);
@@ -1237,7 +1239,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return undefined;
 	}
 
-	public async setEntityLabels(entityUri: URI, labels: string[]): Promise<void> {
+	public async setEntityLabels(entityUri: URI, labels: string[], actor?: TicketChangeActorInput): Promise<void> {
 		const ticketUri = await this._resolveTicketMdUri(entityUri);
 		if (!ticketUri) {
 			throw new Error(`No ticket.md found in '${entityUri.fsPath}'.`);
@@ -1245,7 +1247,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const text = (await this.fileService.readFile(ticketUri)).value.toString();
 		const updated = setTicketLabelsLine(text, labels);
 		if (updated !== text) {
-			await this.fileService.writeFile(ticketUri, VSBuffer.fromString(updated));
+			await writeTicketFile(this.fileService, ticketUri, updated, actor);
 		}
 		this._invalidateCacheForUri(entityUri);
 		this._onDidChangeWorkspaces.fire();
@@ -1297,7 +1299,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return usage;
 	}
 
-	public async updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate): Promise<{ migratedTickets: number }> {
+	public async updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate, actor?: TicketChangeActorInput): Promise<{ migratedTickets: number }> {
 		const rootUri = await this.findWorkspaceRootUri(workspaceUri);
 		const rootTicketUri = await this._resolveTicketMdUri(rootUri);
 		if (!rootTicketUri) {
@@ -1317,7 +1319,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (update.labels) {
 			text = upsertWorkspaceMetadata(text, TICKET_LABELS_METADATA_KEY, serializeLabelDefinitions(update.labels));
 		}
-		await this.fileService.writeFile(rootTicketUri, VSBuffer.fromString(text));
+		await writeTicketFile(this.fileService, rootTicketUri, text, actor);
 
 		let migratedTickets = 0;
 		const statusMigration = update.statusMigration || {};
@@ -1336,7 +1338,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						next = setTicketLabelsLine(next, renamedLabels);
 					}
 					if (next !== original) {
-						await this.fileService.writeFile(ticketUri, VSBuffer.fromString(next));
+						await writeTicketFile(this.fileService, ticketUri, next, actor);
 						this._invalidateCacheForUri(folderUri);
 						migratedTickets++;
 					}

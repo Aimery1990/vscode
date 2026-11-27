@@ -7,6 +7,7 @@ import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { TicketChangeActorInput } from '../../workspacesExplorer/common/ticketChangeLog.js';
 
 export type EntityType = 'workspace' | 'job' | 'project' | 'task' | 'workflow' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file' | string;
 
@@ -1206,7 +1207,8 @@ export interface IEntityPersistenceService {
 	getAllSnapshots(): IBaseEntitySnapshot[];
 	removeSnapshot(uri: URI | string): Promise<void>;
 
-	writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder?: boolean): Promise<URI>;
+	/** Writes the ticket's MD files; field changes of existing files are recorded in its work log as `actor` (default User, CI-50). */
+	writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder?: boolean, actor?: TicketChangeActorInput): Promise<URI>;
 }
 
 /**

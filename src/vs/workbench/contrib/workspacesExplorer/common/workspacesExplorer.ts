@@ -2,6 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+import { TicketChangeActorInput } from './ticketChangeLog.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -195,16 +196,17 @@ export interface IWorkspacesExplorerService {
 	scanWorkspaceChildrenPaginated(workspaceUri: URI, includeRemoved?: boolean, limit?: number): Promise<IWorkspaceChildrenPage>;
 	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
-	setEntityStatus(entityUri: URI, status: string): Promise<void>;
-	/** Writes a ticket's labels (`- **Labels**:` line of its ticket.md). */
-	setEntityLabels(entityUri: URI, labels: string[]): Promise<void>;
+	/** Writes a ticket's status; the change is recorded in its work log as `actor` (default User, CI-50). */
+	setEntityStatus(entityUri: URI, status: string, actor?: TicketChangeActorInput): Promise<void>;
+	/** Writes a ticket's labels (`- **Labels**:` line of its ticket.md); recorded in its work log as `actor` (default User). */
+	setEntityLabels(entityUri: URI, labels: string[], actor?: TicketChangeActorInput): Promise<void>;
 	/** Number of tickets (including the workspace root ticket) per status in the workspace containing `targetUri`. */
 	getWorkspaceStatusUsage(targetUri: URI): Promise<{ [status: string]: number }>;
 	/**
 	 * Saves the lifecycle / labels in the workspace root ticket.md (Profile Data and Self Defined Data Value), applies
 	 * the status migration and label renames to the workspace's tickets, and refreshes caches and views.
 	 */
-	updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate): Promise<{ migratedTickets: number }>;
+	updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate, actor?: TicketChangeActorInput): Promise<{ migratedTickets: number }>;
 	getWorkspaceStatuses(targetUri: URI): Promise<IWorkspaceStatusesInfo>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;

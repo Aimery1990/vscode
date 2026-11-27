@@ -65,6 +65,7 @@ import {
 	isWorkflowRecord,
 	hasWorkflowProperty
 } from '../common/workflowExecutionModel.js';
+import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
 
 /** A component step of a node pipeline, plus runtime-only bookkeeping the engine writes onto it. */
 type IWorkflowStepComponent = ICustomField & {
@@ -2184,7 +2185,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			const content = (await this.fileService.readFile(ticketMdUri)).value.toString();
 			const updated = applySubWorkflowMetadataToTicketMd(content, meta);
 			if (updated !== content) {
-				await this.fileService.writeFile(ticketMdUri, VSBuffer.fromString(updated));
+				// Derived from the definition the user saved in the canvas: recorded as a User change (CI-50)
+				await writeTicketFile(this.fileService, ticketMdUri, updated, 'User');
 			}
 		}
 		this._lastWrittenSubWorkflowMeta.set(def.id, metaKey);

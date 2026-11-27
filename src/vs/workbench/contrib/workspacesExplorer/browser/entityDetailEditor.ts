@@ -35,6 +35,7 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
 import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
+import { writeTicketFile } from './ticketChangeRecorder.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -1513,7 +1514,7 @@ export class EntityDetailEditor extends EditorPane {
 		const write = async () => {
 			try {
 				const content = await this._safeReadFile(targetUri);
-				await this._fileService.writeFile(targetUri, VSBuffer.fromString(this._updateTicketMdContent(content, {}, values)));
+				await writeTicketFile(this._fileService, targetUri, this._updateTicketMdContent(content, {}, values), 'User');
 			} finally {
 				this._activeSaveCount = Math.max(0, this._activeSaveCount - 1);
 			}
@@ -7271,14 +7272,14 @@ export class EntityDetailEditor extends EditorPane {
 
 			if (finalTitle !== undefined || newDesc !== undefined) {
 				const updatedReadme = tempInstance._updateReadmeContent(readmeContent, finalTitle, newDesc);
-				await fileService.writeFile(readmeUri, VSBuffer.fromString(updatedReadme));
+				await writeTicketFile(fileService, readmeUri, updatedReadme, 'User');
 			}
 			const updatedTicketMd = tempInstance._updateTicketMdContent(ticketContent, metadataUpdates, overwrittenCustom);
-			await fileService.writeFile(ticketUri, VSBuffer.fromString(updatedTicketMd));
+			await writeTicketFile(fileService, ticketUri, updatedTicketMd, 'User');
 
 			if (metadataUpdates['Ticket Prompt'] !== undefined || metadataUpdates['Ticket Type Prompt'] !== undefined || metadataUpdates['Instruction Notes'] !== undefined) {
 				const updatedInst = tempInstance._updateInstructionContent(instructionContent, metadataUpdates);
-				await fileService.writeFile(instructionUri, VSBuffer.fromString(updatedInst));
+				await writeTicketFile(fileService, instructionUri, updatedInst, 'User');
 			}
 
 			notificationService.info(`Pasted ticket JSON content into "${newTitle || existingParsed.title || entityName}".`);
@@ -7551,7 +7552,7 @@ export class EntityDetailEditor extends EditorPane {
 						existingLinkedBy.push(sourceTicketId);
 						const updatedLinkedBy = existingLinkedBy.join(', ');
 						const newContent = this._updateTicketMdContent(content, { 'Linked By': updatedLinkedBy });
-						await this._fileService.writeFile(targetUri, VSBuffer.fromString(newContent));
+						await writeTicketFile(this._fileService, targetUri, newContent, 'User');
 					}
 				} catch (err) {
 					console.error(`Failed to sync Linked By to target ${targetId}:`, err);
@@ -7570,7 +7571,7 @@ export class EntityDetailEditor extends EditorPane {
 					const filtered = existingLinkedBy.filter(id => id !== sourceTicketId);
 					const updatedLinkedBy = filtered.length > 0 ? filtered.join(', ') : 'None';
 					const newContent = this._updateTicketMdContent(content, { 'Linked By': updatedLinkedBy });
-					await this._fileService.writeFile(targetUri, VSBuffer.fromString(newContent));
+					await writeTicketFile(this._fileService, targetUri, newContent, 'User');
 				} catch (err) {
 					console.error(`Failed to remove Linked By from target ${targetId}:`, err);
 				}
@@ -8055,7 +8056,7 @@ export class EntityDetailEditor extends EditorPane {
 						}
 						const content = await this._safeReadFile(this._readmeUri);
 						const updated = this._updateReadmeContent(content, e.title, e.description);
-						await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+						await writeTicketFile(this._fileService, this._readmeUri, updated, 'User');
 					}
 					if (this._ticketFileUri) {
 						if (!(await this._fileService.exists(this._ticketFileUri))) {
@@ -8071,12 +8072,12 @@ export class EntityDetailEditor extends EditorPane {
 						if (e.description) { updates['Description'] = e.description; }
 						if (e.metadata) { Object.assign(updates, e.metadata); }
 						const updated = this._updateTicketMdContent(content, updates, e.customMetadata);
-						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+						await writeTicketFile(this._fileService, this._ticketFileUri, updated, 'User');
 					}
 					if (this._instructionUri && e.metadata && (e.metadata['Ticket Prompt'] !== undefined || e.metadata['Ticket Type Prompt'] !== undefined || e.metadata['System Prompt'] !== undefined || e.metadata['Instruction Notes'] !== undefined)) {
 						const instContent = await this._safeReadFile(this._instructionUri);
 						const updatedInst = this._updateInstructionContent(instContent, e.metadata);
-						await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updatedInst));
+						await writeTicketFile(this._fileService, this._instructionUri, updatedInst, 'User');
 					}
 					if (this._entityType === 'agent' && this._agentsManagerService) {
 						const agents = await this._agentsManagerService.getAgents();
@@ -8124,17 +8125,17 @@ export class EntityDetailEditor extends EditorPane {
 					if (this._ticketFileUri) {
 						const content = await this._safeReadFile(this._ticketFileUri);
 						const updated = this._updateTicketMdContent(content, e.metadata, e.customMetadata);
-						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+						await writeTicketFile(this._fileService, this._ticketFileUri, updated, 'User');
 					}
 					if (e.metadata && (e.metadata['Title'] || e.metadata['Description']) && this._readmeUri) {
 						const content = await this._safeReadFile(this._readmeUri);
 						const updated = this._updateReadmeContent(content, e.metadata['Title'], e.metadata['Description']);
-						await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+						await writeTicketFile(this._fileService, this._readmeUri, updated, 'User');
 					}
 					if (this._instructionUri && e.metadata && (e.metadata['Ticket Prompt'] !== undefined || e.metadata['Ticket Type Prompt'] !== undefined || e.metadata['System Prompt'] !== undefined || e.metadata['Instruction Notes'] !== undefined)) {
 						const instContent = await this._safeReadFile(this._instructionUri);
 						const updatedInst = this._updateInstructionContent(instContent, e.metadata);
-						await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updatedInst));
+						await writeTicketFile(this._fileService, this._instructionUri, updatedInst, 'User');
 					}
 					if (this._entityType === 'agent' && this._agentsManagerService) {
 						const agents = await this._agentsManagerService.getAgents();
@@ -9316,7 +9317,7 @@ ${rawErr}
 					const latestCustom = this._lastParsedData?.customMetadata || updatedCustom;
 					const content = await this._safeReadFile(targetUri);
 					const updated = this._updateTicketMdContent(content, {}, latestCustom);
-					await this._fileService.writeFile(targetUri, VSBuffer.fromString(updated));
+					await writeTicketFile(this._fileService, targetUri, updated, 'User');
 					this._suppressAutoReloadUntil = Date.now() + 5000;
 				} catch (err) {
 					console.error(`Failed to persist custom field '${fieldKey}':`, err);
@@ -12323,7 +12324,7 @@ ${rawErr}
 				this._suppressAutoReloadUntil = Date.now() + 2500;
 				const content = await this._safeReadFile(this._ticketFileUri);
 				const updated = this._updateTicketMdContent(content, {}, updatedCustom);
-				await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+				await writeTicketFile(this._fileService, this._ticketFileUri, updated, 'User');
 			} catch (err) {
 				console.error('Failed to persist TTS metadata quietly:', err);
 			}
@@ -12371,7 +12372,7 @@ ${rawErr}
 				this._suppressAutoReloadUntil = Date.now() + 2500;
 				const content = await this._safeReadFile(this._ticketFileUri);
 				const updated = this._updateTicketMdContent(content, {}, updatedCustom);
-				await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+				await writeTicketFile(this._fileService, this._ticketFileUri, updated, 'User');
 			} catch (err) {
 				console.error('Failed to persist Media Player metadata quietly:', err);
 			}
@@ -13389,7 +13390,7 @@ ${rawErr}
 				this._suppressAutoReloadUntil = Date.now() + 2500;
 				const content = await this._safeReadFile(this._ticketFileUri);
 				const updated = this._updateTicketMdContent(content, {}, updatedCustom);
-				await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+				await writeTicketFile(this._fileService, this._ticketFileUri, updated, 'User');
 			} catch (err) {
 				console.error('Failed to persist table metadata quietly:', err);
 			}

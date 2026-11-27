@@ -3199,6 +3199,7 @@ When the user gives you a request or when structured context is provided (such a
 
 AVAILABLE ANYAGENT TOOLS:
 - anyagent_get_ticket_data: Query current ticket values, metadata, field types, allowed workspace statuses, and dynamic list of direct children sub-tickets under it.
+- anyagent_get_ticket_history: Read the automatically recorded field change history of a ticket (who changed which field when, old -> new). Use it to learn what the user or a workflow changed since you last worked on the ticket.
 - anyagent_query_workspace_tree: Explore and search the hierarchical ticket/job tree of a workspace on-demand with optional parent ticket filter and keyword query.
 - anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
 - anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
@@ -3808,6 +3809,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 	private getAnthropicTools(): IAnthropicTool[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
+			'anyagent_get_ticket_history',
 			'anyagent_query_workspace_tree',
 			'anyagent_create_ticket',
 			'anyagent_delete_ticket',
@@ -3835,6 +3837,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 	private getOpenAITools(): IOpenAITool[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
+			'anyagent_get_ticket_history',
 			'anyagent_query_workspace_tree',
 			'anyagent_create_ticket',
 			'anyagent_delete_ticket',
@@ -3865,6 +3868,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 	private getGeminiTools(): IGeminiToolGroup[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
+			'anyagent_get_ticket_history',
 			'anyagent_query_workspace_tree',
 			'anyagent_create_ticket',
 			'anyagent_delete_ticket',
