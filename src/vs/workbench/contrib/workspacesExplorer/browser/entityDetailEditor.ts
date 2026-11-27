@@ -35,6 +35,7 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
 import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
+import { buildPriorityOptions, getPriorityColor, groupStatusOptions, ITemplateStatusLike, resolveEffectiveStatusOptions } from '../common/ticketStatusPicker.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
 import { checkTicketAttachments, readTicketAttachmentManifest, withTicketAttachmentChange } from './ticketAttachmentIntegrity.js';
 import { attachmentTamperTooltip, IAttachmentManifest } from '../common/ticketAttachmentIntegrity.js';
@@ -933,6 +934,8 @@ export class EntityDetailEditor extends EditorPane {
 	private _workLogUri: URI | undefined;
 	private _lastParsedData: IParsedTicketData | undefined;
 	private _labelsPicker: HTMLElement | undefined;
+	/** The open Status / Priority dropdown (UI-18) and how to close it. */
+	private _attributePicker: { readonly anchor: HTMLElement; readonly close: (restoreFocus: boolean) => void } | undefined;
 	private _lastCustomModule: ITicketTemplateModule | null | undefined;
 	private _workspaceStatuses: IWorkspaceStatusesInfo = {
 		statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
@@ -1290,6 +1293,7 @@ export class EntityDetailEditor extends EditorPane {
 	override dispose(): void {
 		this._disposeMediaCleanupFns();
 		this._closeComponentSettingsDialog();
+		this._attributePicker?.close(false);
 		if (this._container) {
 			clearNode(this._container);
 			this._container = undefined;
@@ -5105,6 +5109,183 @@ export class EntityDetailEditor extends EditorPane {
 		doc.body.appendChild(picker);
 		doc.addEventListener('mousedown', onOutside, true);
 		doc.addEventListener('keydown', onKey, true);
+	}
+
+	/**
+	 * Ticket page sidebar: the Status badge, clickable to pick a status of the ticket's effective lifecycle (template
+	 * statuses, else the workspace lifecycle), grouped by category (UI-18). Agents / workspaces / preview: plain badge.
+	 */
+	private _buildStatusBadge(status: string, colors: { text: string; bg: string; border: string }, templateStatuses: readonly ITemplateStatusLike[] | undefined, editable: boolean): HTMLElement {
+		const badge = $('span#status-view-val', { style: `display: inline-flex; align-items: center; gap: 4px; font-size: 0.88em; font-weight: 700; color: ${colors.text}; background: ${colors.bg}; border: 1px solid ${colors.border}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;` },
+			$('span', undefined, status)
+		);
+		if (!editable) {
+			return badge;
+		}
+		badge.style.cursor = 'pointer';
+		badge.title = 'Click to change status';
+		badge.tabIndex = 0;
+		badge.setAttribute('role', 'button');
+		badge.setAttribute('aria-haspopup', 'menu');
+		badge.setAttribute('aria-label', `Status: ${status}. Click to change status`);
+		append(badge, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown), { style: 'font-size: 11px; opacity: 0.75; pointer-events: none;' }));
+		const open = () => {
+			const lifecycle = resolveEffectiveStatusOptions(templateStatuses, this._workspaceStatuses);
+			const groups = groupStatusOptions(lifecycle.options, status, this._workspaceStatuses.getCategory(status));
+			this._showAttributePicker(badge, lifecycle.source === 'template' ? 'Status (template lifecycle)' : 'Status', groups.map(g => ({
+				header: g.category,
+				headerColor: g.color,
+				items: g.items.map(i => ({ value: i.status, color: g.color, isCurrent: i.isCurrent, title: i.isOutsideLifecycle ? `${i.status} (not in this ticket's lifecycle)` : `${i.status} (${i.category})` }))
+			})), async value => {
+				if (this._entityUri && value !== status) {
+					await this._workspacesExplorerService.setEntityStatus(this._entityUri, value, 'User');
+				}
+			}, 'status');
+		};
+		this._wirePickerTrigger(badge, open);
+		return badge;
+	}
+
+	/** Ticket page sidebar: the Priority value, clickable to pick one of the priority levels (UI-18). */
+	private _buildPriorityValue(priority: string, editable: boolean): HTMLElement {
+		const color = getPriorityColor(priority);
+		const value = $('div', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 0; border-radius: 4px;' },
+			$('span', { style: `display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${color}; box-shadow: 0 0 6px ${color}80;` }),
+			$('span.meta-view-val', { style: `font-size: 0.9em; font-weight: 700; color: ${color};` }, priority)
+		);
+		if (!editable) {
+			return value;
+		}
+		value.style.cursor = 'pointer';
+		value.title = 'Click to change priority';
+		value.tabIndex = 0;
+		value.setAttribute('role', 'button');
+		value.setAttribute('aria-haspopup', 'menu');
+		value.setAttribute('aria-label', `Priority: ${priority}. Click to change priority`);
+		append(value, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown), { style: `font-size: 11px; opacity: 0.75; color: ${color}; pointer-events: none;` }));
+		const open = () => {
+			this._showAttributePicker(value, 'Priority', [{
+				items: buildPriorityOptions(priority).map(p => ({ value: p.level, color: p.color, isCurrent: p.isCurrent, title: p.isOutsideLevels ? `${p.level} (not a standard priority level)` : p.level }))
+			}], async level => {
+				if (this._entityUri && level !== priority) {
+					await this._workspacesExplorerService.setEntityPriority(this._entityUri, level, 'User');
+				}
+			}, 'priority');
+		};
+		this._wirePickerTrigger(value, open);
+		return value;
+	}
+
+	private _wirePickerTrigger(trigger: HTMLElement, open: () => void): void {
+		trigger.onclick = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			open();
+		};
+		trigger.onkeydown = (e) => {
+			if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+				e.preventDefault();
+				e.stopPropagation();
+				open();
+			}
+		};
+	}
+
+	/**
+	 * A small single-choice dropdown under `anchor` (UI-18; same look as the labels picker). Picking an item saves it
+	 * via `save`, closes and reloads the page. Keyboard: Up / Down / Home / End move, Enter / Space pick, Escape / Tab close.
+	 */
+	private _showAttributePicker(
+		anchor: HTMLElement,
+		title: string,
+		groups: readonly { header?: string; headerColor?: string; items: readonly { value: string; color: string; isCurrent: boolean; title: string }[] }[],
+		save: (value: string) => Promise<void>,
+		fieldName: string
+	): void {
+		const doc = mainWindow.document;
+		const previous = this._attributePicker;
+		previous?.close(false);
+		if (previous?.anchor === anchor) {
+			// A second click on the same badge closes its dropdown
+			return;
+		}
+		this._labelsPicker?.remove();
+		const rect = anchor.getBoundingClientRect();
+		const width = 220;
+		const left = Math.max(8, Math.min(Math.round(rect.left), mainWindow.innerWidth - width - 8));
+		const picker = $('div.ticket-attribute-picker', { role: 'menu', 'aria-label': title, style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${left}px; width: ${width}px; max-height: 360px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); color: var(--vscode-editor-foreground); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.6); z-index: 10000; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px;` });
+		const items: HTMLElement[] = [];
+		const close = (restoreFocus: boolean) => {
+			doc.removeEventListener('mousedown', onOutside, true);
+			doc.removeEventListener('keydown', onKey, true);
+			picker.remove();
+			if (this._attributePicker?.close === close) {
+				this._attributePicker = undefined;
+			}
+			if (restoreFocus && anchor.isConnected) {
+				anchor.focus();
+			}
+		};
+		const pick = async (value: string) => {
+			close(false);
+			try {
+				await save(value);
+				await this._resolvePathsAndLoadData();
+			} catch (err) {
+				this._notificationService.error(`Failed to save ${fieldName}: ${(err as Error | undefined)?.message || err}`);
+			}
+		};
+		const onOutside = (e: MouseEvent) => {
+			if (!picker.contains(e.target as Node) && !anchor.contains(e.target as Node)) {
+				close(false);
+			}
+		};
+		const onKey = (e: KeyboardEvent) => {
+			const idx = items.indexOf(doc.activeElement as HTMLElement);
+			if (e.key === 'Escape' || e.key === 'Tab') {
+				e.preventDefault();
+				e.stopPropagation();
+				close(e.key === 'Escape');
+			} else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+				e.preventDefault();
+				e.stopPropagation();
+				const next = idx === -1 ? 0 : (idx + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+				items[next]?.focus();
+			} else if (e.key === 'Home' || e.key === 'End') {
+				e.preventDefault();
+				e.stopPropagation();
+				items[e.key === 'Home' ? 0 : items.length - 1]?.focus();
+			} else if ((e.key === 'Enter' || e.key === ' ') && idx !== -1) {
+				e.preventDefault();
+				e.stopPropagation();
+				items[idx].click();
+			}
+		};
+		append(picker, $('div', { style: 'font-size: 10.5px; opacity: 0.6; padding: 2px 6px 4px; text-transform: uppercase; letter-spacing: 0.04em;' }, title));
+		for (const group of groups) {
+			if (group.header) {
+				append(picker, $('div', { style: `font-size: 10px; font-weight: 700; color: ${group.headerColor || 'inherit'}; padding: 5px 6px 2px; text-transform: uppercase; letter-spacing: 0.04em;` }, group.header));
+			}
+			for (const option of group.items) {
+				const item = append(picker, $('div', { role: 'menuitemradio', 'aria-checked': option.isCurrent ? 'true' : 'false', tabindex: '-1', title: option.title, style: `display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer; outline-offset: -1px;${option.isCurrent ? ' background: rgba(255,255,255,0.06);' : ''}` },
+					$('span' + ThemeIcon.asCSSSelector(Codicon.check), { style: `font-size: 12px; width: 14px; visibility: ${option.isCurrent ? 'visible' : 'hidden'};` }),
+					$('span', { style: `width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: ${option.color};` }),
+					$('span', { style: `flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;${option.isCurrent ? ' font-weight: 700;' : ''}` }, option.value)
+				));
+				item.onmouseenter = () => item.focus();
+				item.onclick = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					pick(option.value);
+				};
+				items.push(item);
+			}
+		}
+		doc.body.appendChild(picker);
+		this._attributePicker = { anchor, close };
+		doc.addEventListener('mousedown', onOutside, true);
+		doc.addEventListener('keydown', onKey, true);
+		(items.find(i => i.getAttribute('aria-checked') === 'true') ?? items[0])?.focus();
 	}
 
 	private _parseAllEntityData(
@@ -19897,16 +20078,6 @@ ${interpolatedPrompt}`;
 			colorSetting = this._getTypeColorInfo(data.ticketType || 'task');
 		}
 
-		// 3. Priority badge
-		const pColors: { [key: string]: string } = {
-			'very high': '#f43f5e',
-			'high': '#fb923c',
-			'medium': '#38bdf8',
-			'low': '#34d399',
-			'very low': '#2dd4bf'
-		};
-		const pColor = pColors[(data.priority || 'medium').toLowerCase()] || '#94a3b8';
-
 		// 5. Timeline HTML
 		let workLogContent: HTMLElement;
 		const logsList = workLog.split(/\r?\n##\s+/);
@@ -22732,6 +22903,8 @@ ${interpolatedPrompt}`;
 		const typePromptDisplay = (data.typePrompt && data.typePrompt !== 'None') ? data.typePrompt : '';
 
 		const isAgent = (data.ticketType || '').toLowerCase() === 'agent';
+		/** Status / Priority can be picked by hand on tickets (UI-18); agents and workspaces keep the read-only values. */
+		const canEditStatusPriority = !isAgent && !this._isPreviewMode && !!this._entityUri && (data.ticketType || '').toLowerCase() !== 'workspace';
 		const isFreestyleTicket = !!freestyleSchema;
 		const freestyleDescriptionField = freestyleSchema?.fields?.find(f => isDescriptionComponent(f));
 		/** The Description card of a Freestyle ticket gets a structure toolbar too (it can be removed). */
@@ -23096,9 +23269,7 @@ ${interpolatedPrompt}`;
 							))
 						),
 						$('div', { style: 'padding: 2px 0;' },
-							$('span#status-view-val', { style: `display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;` },
-								status
-							)
+							this._buildStatusBadge(status, { text: statusColor, bg: statusBg, border: statusBorder }, customModule?.statuses, canEditStatusPriority)
 						),
 						part('statusLifecyclePopover', $('div#status-lifecycle-popover.status-lifecycle-popover', { style: 'display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;' },
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px;' },
@@ -23218,9 +23389,8 @@ ${interpolatedPrompt}`;
 								)
 							))
 						),
-						$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 0;' },
-							$('span', { style: `display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;` }),
-							$('span.meta-view-val', { style: `font-size: 0.9em; font-weight: 700; color: ${pColor};` }, data.priority)
+						$('div', { style: 'display: flex; align-items: center; padding: 2px 0;' },
+							this._buildPriorityValue(data.priority, canEditStatusPriority)
 						)
 					),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildLabelsSidebarRow(data)] : []),

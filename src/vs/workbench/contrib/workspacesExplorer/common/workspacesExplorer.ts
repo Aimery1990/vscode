@@ -199,6 +199,8 @@ export interface IWorkspacesExplorerService {
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
 	/** Writes a ticket's status; the change is recorded in its work log as `actor` (default User, CI-50). */
 	setEntityStatus(entityUri: URI, status: string, actor?: TicketChangeActorInput): Promise<void>;
+	/** Writes a ticket's priority (`- **Priority**:` line of its ticket.md); recorded in its work log as `actor` (default User, UI-18). */
+	setEntityPriority(entityUri: URI, priority: string, actor?: TicketChangeActorInput): Promise<void>;
 	/** Writes a ticket's labels (`- **Labels**:` line of its ticket.md); recorded in its work log as `actor` (default User). */
 	setEntityLabels(entityUri: URI, labels: string[], actor?: TicketChangeActorInput): Promise<void>;
 	/** Number of tickets (including the workspace root ticket) per status in the workspace containing `targetUri`. */

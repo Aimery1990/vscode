@@ -17,6 +17,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { TicketChangeActorInput } from '../common/ticketChangeLog.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
+import { setTicketPriorityLine } from '../common/ticketStatusPicker.js';
 import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, ensureFreestyleSchema, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
@@ -1450,6 +1451,20 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 		const text = (await this.fileService.readFile(ticketUri)).value.toString();
 		const updated = setTicketLabelsLine(text, labels);
+		if (updated !== text) {
+			await writeTicketFile(this.fileService, ticketUri, updated, actor);
+		}
+		this._invalidateCacheForUri(entityUri);
+		this._onDidChangeWorkspaces.fire();
+	}
+
+	public async setEntityPriority(entityUri: URI, priority: string, actor?: TicketChangeActorInput): Promise<void> {
+		const ticketUri = await this._resolveTicketMdUri(entityUri);
+		if (!ticketUri) {
+			throw new Error(`No ticket.md found in '${entityUri.fsPath}'.`);
+		}
+		const text = (await this.fileService.readFile(ticketUri)).value.toString();
+		const updated = setTicketPriorityLine(text, priority);
 		if (updated !== text) {
 			await writeTicketFile(this.fileService, ticketUri, updated, actor);
 		}

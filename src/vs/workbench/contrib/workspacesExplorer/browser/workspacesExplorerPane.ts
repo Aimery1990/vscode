@@ -54,7 +54,8 @@ import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/commo
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
-import { createDefaultCategoryMap, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
+import { createDefaultCategoryMap, readTicketStatus, readTopLevelMetadata, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
+import { buildPriorityOptions, DEFAULT_TICKET_PRIORITY, findStatusOption, findTemplateForType, groupStatusOptions, resolveEffectiveStatusOptions } from '../common/ticketStatusPicker.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
@@ -644,6 +645,118 @@ export class MainWorkspaceViewPane extends ViewPane {
 		icon.style.opacity = active ? '1' : '0.7';
 		icon.style.color = active ? '#38bdf8' : '';
 		icon.title = describeStatusFilter(this._hiddenStatusCategories);
+	}
+
+	/** Ticket rows have a status / priority; files, folders, agents (runtime status) and workspaces do not (UI-18). */
+	private static _hasStatusSemantics(item: IWorkspaceChildItem): boolean {
+		const type = (item.type || '').toLowerCase();
+		return type !== 'file' && type !== 'folder' && type !== 'agent' && type !== 'workspace';
+	}
+
+	private async _readTicketMd(entityUri: URI): Promise<string | undefined> {
+		for (const uri of [URI.joinPath(entityUri, '.agents', 'ticket.md'), URI.joinPath(entityUri, 'ticket.md')]) {
+			try {
+				return (await this.fileService.readFile(uri, { length: 16384 })).value.toString();
+			} catch {
+				// try the next location
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * "Set Status" / "Set Priority" submenus of a ticket row (UI-18). They apply to every selected ticket (files,
+	 * folders, agents skipped); statuses come from the right-clicked ticket's effective lifecycle and a ticket whose
+	 * lifecycle lacks the picked status is left unchanged. Writes are recorded by CI-50 with actor User.
+	 */
+	private async _createSetStatusPriorityMenus(child: IWorkspaceChildItem, selectedChildren: readonly IWorkspaceChildItem[]): Promise<IAction[]> {
+		if (!MainWorkspaceViewPane._hasStatusSemantics(child)) {
+			return [];
+		}
+		const targets = (selectedChildren.length > 1 ? selectedChildren : [child]).filter(c => MainWorkspaceViewPane._hasStatusSemantics(c));
+		if (targets.length === 0) {
+			return [];
+		}
+		const templates = await this._getCustomModules(child.uri);
+		const lifecycleOf = async (item: IWorkspaceChildItem) => resolveEffectiveStatusOptions(findTemplateForType(templates, item.type)?.statuses, await this.workspacesExplorerService.getWorkspaceStatuses(item.uri));
+		const current = await Promise.all(targets.map(async item => {
+			const text = await this._readTicketMd(item.uri);
+			return {
+				item,
+				status: (text !== undefined ? readTicketStatus(text) : undefined) ?? item.status,
+				priority: (text !== undefined ? readTopLevelMetadata(text, 'Priority') : undefined) || DEFAULT_TICKET_PRIORITY
+			};
+		}));
+		const allHave = (field: 'status' | 'priority', value: string) => current.every(c => (c[field] ?? '').trim().toLowerCase() === value.toLowerCase());
+		const suffix = targets.length > 1 ? ` (${targets.length} Tickets)` : '';
+
+		const runForAll = async (label: string, apply: (item: IWorkspaceChildItem) => Promise<boolean>) => {
+			let changed = 0;
+			let skipped = 0;
+			let failed = 0;
+			for (const item of targets) {
+				try {
+					if (await apply(item)) {
+						changed++;
+					} else {
+						skipped++;
+					}
+				} catch (err) {
+					failed++;
+					console.error(`[WorkspacesExplorer] Failed to set ${label} of '${item.name}':`, err);
+				}
+			}
+			if (failed > 0) {
+				this.notificationService.error(`Failed to set ${label} of ${failed} ticket(s).`);
+			}
+			if (skipped > 0) {
+				this.notificationService.info(`Set ${label} of ${changed} ticket(s); ${skipped} skipped (value not in their lifecycle).`);
+			}
+			await this.renderContent();
+		};
+
+		const ownLifecycle = await lifecycleOf(child);
+		const ownCurrent = current.find(c => c.item === child)?.status;
+		const groups = groupStatusOptions(ownLifecycle.options, targets.length === 1 ? ownCurrent : undefined);
+		const statusActions: IAction[] = [];
+		for (const group of groups) {
+			if (statusActions.length > 0) {
+				statusActions.push(new Separator());
+			}
+			for (const option of group.items) {
+				statusActions.push(toAction({
+					id: `set_status_${option.status}`,
+					label: option.isOutsideLifecycle ? `${option.status} (not in lifecycle)` : option.status,
+					tooltip: `${option.status} (${option.category})`,
+					checked: allHave('status', option.status),
+					enabled: !option.isOutsideLifecycle,
+					run: () => runForAll('status', async item => {
+						const match = findStatusOption((await lifecycleOf(item)).options, option.status);
+						if (!match) {
+							return false;
+						}
+						await this.workspacesExplorerService.setEntityStatus(item.uri, match.status, 'User');
+						return true;
+					})
+				}));
+			}
+		}
+
+		const priorityActions = buildPriorityOptions(targets.length === 1 ? current[0]?.priority : undefined).map(p => toAction({
+			id: `set_priority_${p.level}`,
+			label: p.isOutsideLevels ? `${p.level} (non-standard)` : p.level,
+			checked: allHave('priority', p.level),
+			enabled: !p.isOutsideLevels,
+			run: () => runForAll('priority', async item => {
+				await this.workspacesExplorerService.setEntityPriority(item.uri, p.level, 'User');
+				return true;
+			})
+		}));
+
+		return [
+			new SubmenuAction('set_status', `Set Status${suffix}`, statusActions),
+			new SubmenuAction('set_priority', `Set Priority${suffix}`, priorityActions)
+		];
 	}
 
 	/** "Child Count" submenu of the row / workspace context menus (UI-17); the choice applies to the whole tree. */
@@ -1741,6 +1854,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 					})
 				);
 
+				const statusPriorityMenus = await this._createSetStatusPriorityMenus(child, selectedChildren);
+				if (statusPriorityMenus.length > 0) {
+					childActions.push(new Separator(), ...statusPriorityMenus);
+				}
 				childActions.push(new Separator(), this._createChildCountMenu());
 
 				this.contextMenuService.showContextMenu({
