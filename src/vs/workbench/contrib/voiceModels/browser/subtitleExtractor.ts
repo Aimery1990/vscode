@@ -7,6 +7,7 @@ import { CancellationError } from '../../../../base/common/errors.js';
 import { IResolvedTimedModel, ITimedTranscribeOptions, IVoiceModelService } from '../common/voiceModel.js';
 import { distributeSentences, getTimedTranscriptionPlan, ISubtitleSegment, ITimeRange, normalizeSegments, offsetSegments, snapSegmentsToSpeech } from '../common/subtitles.js';
 import { ASR_SAMPLE_RATE, detectSpeechRegions, encodeWav16, mixToMono, planChunks, planUtterances, resampleLinear, sliceSamples } from '../common/wavAudio.js';
+import { mediaDurationLimitMessage } from '../common/subtitleConfig.js';
 
 /**
  * Subtitle extraction pipeline (CI-45), all in the renderer:
@@ -26,6 +27,8 @@ export interface ISubtitleExtractionProgress {
 export interface ISubtitleExtractionOptions extends ITimedTranscribeOptions {
 	/** Reject audio longer than this (seconds); 0 / undefined = no limit. */
 	readonly maxDurationSeconds?: number;
+	/** File name used in messages. */
+	readonly mediaName?: string;
 }
 
 export interface ISubtitleExtractionResult {
@@ -34,7 +37,12 @@ export interface ISubtitleExtractionResult {
 	readonly model: IResolvedTimedModel;
 }
 
-/** Decodes any media Chromium can play (MP3, AAC in MP4/M4A, WAV, OGG, ...) to 16 kHz mono samples. */
+/**
+ * Decodes any media Chromium can play (MP3, AAC in MP4/M4A, WAV, OGG, ...) to 16 kHz mono samples.
+ * `decodeAudioData` needs the whole file in memory and takes ownership of (detaches) `data`. Decoding runs off the
+ * main thread (a 25 min MP4 decodes in about 2 s without blocking the UI), but Chromium decodes at the file's own
+ * rate before resampling, so the peak memory grows with the duration (see `DECODE_PEAK_MB_PER_SECOND`).
+ */
 export async function decodeAudioTo16kMono(data: ArrayBuffer): Promise<Float32Array> {
 	// decodeAudioData resamples to the context rate, so a 16 kHz offline context does the resampling for us.
 	const ctx = new OfflineAudioContext(1, 1, ASR_SAMPLE_RATE);
@@ -48,6 +56,7 @@ export async function decodeAudioTo16kMono(data: ArrayBuffer): Promise<Float32Ar
 	for (let c = 0; c < buffer.numberOfChannels; c++) {
 		channels.push(buffer.getChannelData(c));
 	}
+	// Mono at 16 kHz is 3.7 MB per minute; the multi-channel buffer is released when this returns
 	return resampleLinear(mixToMono(channels), buffer.sampleRate, ASR_SAMPLE_RATE);
 }
 
@@ -65,7 +74,7 @@ function shiftRanges(ranges: readonly ITimeRange[], window: ITimeRange): ITimeRa
 
 export async function extractSubtitles(
 	voiceModelService: IVoiceModelService,
-	media: Blob,
+	media: Blob | ArrayBuffer,
 	options: ISubtitleExtractionOptions,
 	onProgress: (p: ISubtitleExtractionProgress) => void,
 	token: CancellationToken
@@ -76,15 +85,15 @@ export async function extractSubtitles(
 	}
 	const plan = getTimedTranscriptionPlan(model.provider, model.modelId);
 
-	onProgress({ phase: 'decoding', message: 'Extracting the audio track...' });
-	const pcm = await decodeAudioTo16kMono(await media.arrayBuffer());
+	onProgress({ phase: 'decoding', message: 'Extracting the audio track (long files take a few seconds)...' });
+	const pcm = await decodeAudioTo16kMono(media instanceof ArrayBuffer ? media : await media.arrayBuffer());
 	throwIfCancelled(token);
 	const duration = pcm.length / ASR_SAMPLE_RATE;
 	if (duration <= 0) {
 		throw new Error('The file has no audio.');
 	}
 	if (options.maxDurationSeconds && options.maxDurationSeconds > 0 && duration > options.maxDurationSeconds + 0.5) {
-		throw new Error(`The audio is ${Math.ceil(duration / 60)} min long; the limit set for this component is ${Math.round(options.maxDurationSeconds / 60)} min.`);
+		throw new Error(mediaDurationLimitMessage(options.mediaName || 'The audio', duration, Math.round(options.maxDurationSeconds / 60)));
 	}
 
 	onProgress({ phase: 'analyzing', message: 'Detecting speech...' });

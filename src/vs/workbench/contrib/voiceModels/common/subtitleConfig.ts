@@ -146,3 +146,102 @@ export function pickMediaSubtitlesState(value: Record<string, unknown> | undefin
 	}
 	return out;
 }
+
+// --- current file facts and limits ---------------------------------------------------------------
+
+/** One "MB" of the size limit (binary megabyte, as the limit has always been checked). */
+export const MEDIA_BYTES_PER_MB = 1024 * 1024;
+
+/** What is known about the loaded media file (either may be unknown). */
+export interface IMediaFileFacts {
+	readonly sizeBytes?: number;
+	readonly durationSec?: number;
+}
+
+export interface IMediaLimitCheck {
+	readonly sizeExceeded: boolean;
+	readonly durationExceeded: boolean;
+}
+
+function known(n: number | undefined): n is number {
+	return typeof n === 'number' && Number.isFinite(n) && n > 0;
+}
+
+/** File size in the unit of the limit: `201.4 MB`, `0.3 MB`, `512 KB` below 0.1 MB, `1.22 GB` from 1 GB on. */
+export function formatMediaSize(bytes: number): string {
+	if (!Number.isFinite(bytes) || bytes < 0) {
+		return '0 MB';
+	}
+	const mb = bytes / MEDIA_BYTES_PER_MB;
+	if (mb >= 1024) {
+		return `${(mb / 1024).toFixed(2)} GB`;
+	}
+	if (mb > 0 && mb < 0.1) {
+		return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+	}
+	return `${mb.toFixed(1)} MB`;
+}
+
+/** Media duration as a clock: `25:06`, `1:02:03` (whole seconds). */
+export function formatMediaDuration(seconds: number): string {
+	const total = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
+	const h = Math.floor(total / 3600);
+	const m = Math.floor((total % 3600) / 60);
+	const s = total % 60;
+	const ss = s < 10 ? `0${s}` : String(s);
+	if (h > 0) {
+		return `${h}:${m < 10 ? `0${m}` : m}:${ss}`;
+	}
+	return `${m}:${ss}`;
+}
+
+/** `201.4 MB, 25:06` / `201.4 MB` / `25:06`; empty when nothing is known. */
+export function describeMediaFacts(facts: IMediaFileFacts | undefined): string {
+	const parts: string[] = [];
+	const size = facts?.sizeBytes;
+	const duration = facts?.durationSec;
+	if (known(size)) {
+		parts.push(formatMediaSize(size));
+	}
+	if (known(duration)) {
+		parts.push(formatMediaDuration(duration));
+	}
+	return parts.join(', ');
+}
+
+/** Whether the file is over the size limit (MB) or the duration limit (minutes, 0 = no limit). Unknown facts never exceed. */
+export function checkMediaLimits(limits: Pick<IMediaSubtitlesConfig, 'maxUploadMb' | 'maxDurationMin'>, facts: IMediaFileFacts | undefined): IMediaLimitCheck {
+	const maxBytes = Math.max(0, limits.maxUploadMb) * MEDIA_BYTES_PER_MB;
+	const size = facts?.sizeBytes;
+	const duration = facts?.durationSec;
+	return {
+		sizeExceeded: known(size) && maxBytes > 0 && size > maxBytes,
+		// Half a second of tolerance: container and decoded durations differ slightly
+		durationExceeded: known(duration) && limits.maxDurationMin > 0 && duration > limits.maxDurationMin * 60 + 0.5
+	};
+}
+
+/** Refusal message of the extraction when the file is over the size limit (states both sizes). */
+export function mediaSizeLimitMessage(name: string, sizeBytes: number, maxUploadMb: number): string {
+	return `"${name}" is ${formatMediaSize(sizeBytes)}, over the ${maxUploadMb} MB limit for subtitle extraction. Raise "Max file size (MB)" in the component settings (gear) or use a smaller file.`;
+}
+
+/** Refusal message of the extraction when the media is longer than the duration limit (states both durations). */
+export function mediaDurationLimitMessage(name: string, durationSec: number, maxDurationMin: number): string {
+	return `"${name}" is ${formatMediaDuration(durationSec)} long, over the ${maxDurationMin} min (${formatMediaDuration(maxDurationMin * 60)}) limit for subtitle extraction. Raise "Max duration (min)" in the component settings (gear), or set it to 0 for no limit.`;
+}
+
+/**
+ * Peak renderer memory of Chromium's `decodeAudioData`, which decodes the whole file at its own sample rate.
+ * Measured in Electron 42 (CI-45): 48 kHz stereo AAC (MP4 / M4A) about 2.3 MB per second of audio (3.4 GB for
+ * 25 min), 44.1 kHz stereo MP3 about 1 MB/s, 16 kHz mono AAC about 0.25 MB/s. The worst case is used.
+ */
+export const DECODE_PEAK_MB_PER_SECOND = 2.3;
+
+/** Above this duration the extraction asks before decoding (about 6 GB peak for 48 kHz stereo). */
+export const LARGE_DECODE_WARN_SECONDS = 45 * 60;
+
+/** Worst-case peak memory (MB) to decode `durationSec` of audio in the renderer. */
+export function estimateDecodePeakMb(durationSec: number): number {
+	return Number.isFinite(durationSec) && durationSec > 0 ? Math.ceil(durationSec * DECODE_PEAK_MB_PER_SECOND) : 0;
+}

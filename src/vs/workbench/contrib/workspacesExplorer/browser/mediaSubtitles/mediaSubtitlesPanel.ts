@@ -4,18 +4,19 @@
 
 import { $, addDisposableListener, append, clearNode, getWindow, scheduleAtNextAnimationFrame } from '../../../../../base/browser/dom.js';
 import { RunOnceScheduler } from '../../../../../base/common/async.js';
-import { CancellationTokenSource } from '../../../../../base/common/cancellation.js';
+import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { CancellationError, isCancellationError } from '../../../../../base/common/errors.js';
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
+import { listenStream } from '../../../../../base/common/stream.js';
 import { IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IVoiceModelService } from '../../../voiceModels/common/voiceModel.js';
 import { extractSubtitles } from '../../../voiceModels/browser/subtitleExtractor.js';
 import { findLastStartedSegment, findSegmentAt, formatClock, ISubtitleDocument, ISubtitleSegment, parseSubtitleDocument, toSrt, toVtt } from '../../../voiceModels/common/subtitles.js';
 import { buildDictationUnits, DictationUnitKind, diffWords, findUnitAt, IDictationAnswer, IDictationUnit, IWordDiffOp, MIN_DICTATION_SECONDS } from '../../../voiceModels/common/dictation.js';
-import { IMediaSubtitlesConfig, IMediaSubtitlesState, SubtitleDisplayMode } from '../../../voiceModels/common/subtitleConfig.js';
+import { checkMediaLimits, describeMediaFacts, estimateDecodePeakMb, formatMediaDuration, formatMediaSize, LARGE_DECODE_WARN_SECONDS, IMediaSubtitlesConfig, IMediaSubtitlesState, MEDIA_BYTES_PER_MB, mediaDurationLimitMessage, mediaSizeLimitMessage, SubtitleDisplayMode } from '../../../voiceModels/common/subtitleConfig.js';
 
 /** What the media player card provides to the subtitle panel. */
 export interface IMediaSubtitlesHost {
@@ -336,24 +337,45 @@ export class MediaSubtitlesPanel extends Disposable {
 				return;
 			}
 		}
+		const playerDuration = this.knownMediaDuration();
+		if (playerDuration && playerDuration > LARGE_DECODE_WARN_SECONDS && !checkMediaLimits(this.config, { durationSec: playerDuration }).durationExceeded) {
+			const peakGb = (estimateDecodePeakMb(playerDuration) / 1024).toFixed(1);
+			const { confirmed } = await this.dialogService.confirm({
+				type: 'warning',
+				message: `Extract subtitles from ${formatMediaDuration(playerDuration)} of audio?`,
+				detail: `The audio track is decoded in the app, which for a long file temporarily needs up to about ${peakGb} GB of memory (48 kHz stereo; less for mono or lower quality audio). If the computer runs low on memory the window can become slow or close. A shorter part, or the audio exported as a mono 16 kHz M4A / MP3, needs much less.`,
+				primaryButton: 'Extract'
+			});
+			if (!confirmed) {
+				return;
+			}
+		}
 
 		const cts = new CancellationTokenSource();
 		this.running = cts;
 		this.syncControls();
 		this.setProgress(0, 'Reading the media file...');
 		try {
-			const maxBytes = Math.max(1, this.config.maxUploadMb) * 1024 * 1024;
-			const blob = await this.readMedia(src, maxBytes);
+			// The player already knows the duration: refuse too long media before reading and decoding it
+			if (playerDuration && checkMediaLimits(this.config, { durationSec: playerDuration }).durationExceeded) {
+				throw new Error(mediaDurationLimitMessage(src.name, playerDuration, this.config.maxDurationMin));
+			}
+			const { data, size } = await this.readMedia(src, cts.token);
 			if (cts.token.isCancellationRequested) {
 				throw new CancellationError();
 			}
-			const result = await extractSubtitles(this.voiceModelService, blob, {
+			this.setProgress(5, `Extracting the audio track of ${describeMediaFacts({ sizeBytes: size, durationSec: playerDuration })} (long files take a few seconds)...`);
+			const result = await extractSubtitles(this.voiceModelService, data, {
 				provider: this.config.provider || undefined,
 				modelId: this.config.model || undefined,
 				language: this.config.language || undefined,
-				maxDurationSeconds: this.config.maxDurationMin > 0 ? this.config.maxDurationMin * 60 : undefined
+				maxDurationSeconds: this.config.maxDurationMin > 0 ? this.config.maxDurationMin * 60 : undefined,
+				mediaName: src.name
 			}, p => {
-				const pct = p.phase === 'decoding' ? 5 : p.phase === 'analyzing' ? 10 : p.phase === 'done' ? 100 : 10 + 90 * ((p.current ?? 1) - 1) / Math.max(1, p.total ?? 1);
+				if (p.phase === 'decoding') {
+					return;
+				}
+				const pct = p.phase === 'analyzing' ? 10 : p.phase === 'done' ? 100 : 10 + 90 * ((p.current ?? 1) - 1) / Math.max(1, p.total ?? 1);
 				this.setProgress(pct, p.message);
 			}, cts.token);
 			if (result.segments.length === 0) {
@@ -362,7 +384,7 @@ export class MediaSubtitlesPanel extends Disposable {
 			const doc: ISubtitleDocument = {
 				version: 1,
 				mediaName: src.name,
-				mediaSize: blob.size,
+				mediaSize: size,
 				duration: Math.round(result.duration * 1000) / 1000,
 				provider: result.model.provider,
 				model: result.model.modelId,
@@ -395,29 +417,71 @@ export class MediaSubtitlesPanel extends Disposable {
 		this.progressText.textContent = message;
 	}
 
-	/** Reads the media bytes, rejecting files over the configured size before decoding. */
-	private async readMedia(src: { name: string; path?: string; blobUrl?: string }, maxBytes: number): Promise<Blob> {
-		const limitText = `${Math.round(maxBytes / 1024 / 1024)} MB`;
+	/** Duration of the loaded media according to the player, if known. */
+	private knownMediaDuration(): number | undefined {
+		const d = this.host.getActiveMedia().duration;
+		return Number.isFinite(d) && d > 0 ? d : undefined;
+	}
+
+	/**
+	 * Reads the media bytes into one buffer (handed to the decoder without another copy). The size comes from the
+	 * file's stat, so a file over the limit is refused before anything is read; reading shows progress.
+	 */
+	private async readMedia(src: { name: string; path?: string; blobUrl?: string }, token: CancellationToken): Promise<{ data: ArrayBuffer; size: number }> {
+		const maxMb = Math.max(1, this.config.maxUploadMb);
 		if (src.path) {
 			const uri = src.path.startsWith('file://') ? URI.parse(src.path) : URI.file(src.path);
 			if (await this.fileService.exists(uri)) {
 				const stat = await this.fileService.stat(uri);
-				if (stat.size > maxBytes) {
-					throw new Error(`"${src.name}" is ${(stat.size / 1024 / 1024).toFixed(0)} MB; the limit for subtitle extraction is ${limitText} (change it in the component settings).`);
+				if (stat.size > maxMb * MEDIA_BYTES_PER_MB) {
+					throw new Error(mediaSizeLimitMessage(src.name, stat.size, maxMb));
 				}
-				const content = await this.fileService.readFile(uri);
-				const bytes = content.value.buffer;
-				return new Blob([bytes.slice(0).buffer as ArrayBuffer]);
+				return { data: await this.readFileWithProgress(uri, stat.size, token), size: stat.size };
 			}
 		}
 		if (src.blobUrl) {
 			const blob = await (await fetch(src.blobUrl)).blob();
-			if (blob.size > maxBytes) {
-				throw new Error(`"${src.name}" is ${(blob.size / 1024 / 1024).toFixed(0)} MB; the limit for subtitle extraction is ${limitText} (change it in the component settings).`);
+			if (blob.size > maxMb * MEDIA_BYTES_PER_MB) {
+				throw new Error(mediaSizeLimitMessage(src.name, blob.size, maxMb));
 			}
-			return blob;
+			return { data: await blob.arrayBuffer(), size: blob.size };
 		}
 		throw new Error(`Cannot read "${src.name}". Select the file again.`);
+	}
+
+	private async readFileWithProgress(uri: URI, size: number, token: CancellationToken): Promise<ArrayBuffer> {
+		const target = new Uint8Array(size);
+		const total = formatMediaSize(size);
+		let offset = 0;
+		let shownPercent = -1;
+		const stream = await this.fileService.readFileStream(uri, undefined, token);
+		const cancelled = new DisposableStore();
+		try {
+			await new Promise<void>((resolve, reject) => {
+				cancelled.add(token.onCancellationRequested(() => reject(new CancellationError())));
+				listenStream(stream.value, {
+					onData: chunk => {
+						if (offset + chunk.byteLength > target.byteLength) {
+							reject(new Error(`"${uri.path.split('/').pop()}" changed while it was being read. Try again.`));
+							return;
+						}
+						target.set(chunk.buffer, offset);
+						offset += chunk.byteLength;
+						const percent = size > 0 ? Math.floor(offset * 100 / size) : 100;
+						if (percent !== shownPercent) {
+							shownPercent = percent;
+							// Reading is the first 5 % of the bar
+							this.setProgress(percent * 0.05, `Reading the media file: ${formatMediaSize(offset)} of ${total}...`);
+						}
+					},
+					onError: reject,
+					onEnd: () => resolve()
+				}, token);
+			});
+		} finally {
+			cancelled.dispose();
+		}
+		return offset === size ? target.buffer : target.slice(0, offset).buffer;
 	}
 
 	private subtitlesFileName(): string {
