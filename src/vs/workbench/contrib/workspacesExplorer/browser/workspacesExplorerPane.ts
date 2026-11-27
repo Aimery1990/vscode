@@ -56,6 +56,7 @@ import { clashesWithBuiltInTicketType } from '../../customModules/common/templat
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 import { createDefaultCategoryMap, readTicketStatus, readTopLevelMetadata, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
 import { buildPriorityOptions, DEFAULT_TICKET_PRIORITY, findStatusOption, findTemplateForType, groupStatusOptions, resolveEffectiveStatusOptions } from '../common/ticketStatusPicker.js';
+import { describeRestoreDecision } from '../common/ticketRestore.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
@@ -615,6 +616,40 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}
 		this.selectedItemIds.clear();
 		this.notificationService.info(`Marked ${updatedCount} ticket(s) as Removed.`);
+		await this.renderContent();
+	}
+
+	/**
+	 * Restores removed tickets (UI-19): each one gets back the status it had before its removal (from its CI-50 change
+	 * log, else the lifecycle's initial status), recorded with actor User. Agents are also set back to idle.
+	 */
+	private async _restoreTickets(items: readonly IWorkspaceChildItem[]): Promise<void> {
+		const templates = items.length > 0 ? await this._getCustomModules(items[0].uri) : [];
+		const messages: string[] = [];
+		let failed = 0;
+		for (const item of items) {
+			try {
+				const result = await this.workspacesExplorerService.restoreEntity(item.uri, 'User', findTemplateForType(templates, item.type)?.statuses);
+				if (item.type === 'agent' && this.agentsManagerService) {
+					const agentsList = await this.agentsManagerService.getAgents();
+					const matchingAgent = agentsList.find(a => a.folderPath === item.uri.fsPath);
+					if (matchingAgent) {
+						await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'idle' });
+					}
+				}
+				const name = item.title || item.name;
+				messages.push(result.changed ? `${describeRestoreDecision(result, name)}.` : `'${name}' is not removed (${result.status || 'no status'}); left unchanged.`);
+			} catch (err) {
+				failed++;
+				this.notificationService.error(`Failed to restore '${item.name}': ${err}`);
+			}
+		}
+		if (messages.length === 1) {
+			this.notificationService.info(messages[0]);
+		} else if (messages.length > 1) {
+			this.notificationService.info(`${messages.length} ticket(s) processed${failed > 0 ? `, ${failed} failed` : ''}: ${messages.join(' ')}`);
+		}
+		this.selectedItemIds.clear();
 		await this.renderContent();
 	}
 
@@ -1798,25 +1833,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 					);
 				}
 
-				if (isRemoved) {
+				const isRemovedTicket = (item: IWorkspaceChildItem) => item.type !== 'file' && item.type !== 'folder' && !!item.status && (
+					wsLifecycle.getCategory(item.status) === 'Removed' || ['removed', 'canceled', 'cancelled'].includes(item.status.toLowerCase())
+				);
+				if (isRemoved || isRemovedTicket(child)) {
+					const restoreTargets = selectedChildren.length > 1 ? selectedChildren.filter(isRemovedTicket) : [child];
+					const restoreLabel = restoreTargets.length > 1 ? `Restore Selected (${restoreTargets.length} Tickets)` : 'Restore Ticket (Reactivate to Active)';
 					childActions.push(
-						new Action('restore_child_to_ws', 'Restore Ticket (Reactivate to Active)', ThemeIcon.asClassName(Codicon.history), true, async () => {
-							try {
-								const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(child.uri);
-								const initialStatus = wsStatuses.statuses[0] || 'Todo';
-								await this.workspacesExplorerService.setEntityStatus(child.uri, initialStatus);
-								if (child.type === 'agent' && this.agentsManagerService) {
-									const agentsList = await this.agentsManagerService.getAgents();
-									const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
-									if (matchingAgent) {
-										await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'idle' });
-									}
-								}
-								this.notificationService.info(`Restored '${child.name}' to active workspace (${initialStatus}).`);
-								this.renderContent();
-							} catch (err) {
-								this.notificationService.error(`Failed to restore '${child.name}': ${err}`);
-							}
+						new Action('restore_child_to_ws', restoreLabel, ThemeIcon.asClassName(Codicon.history), true, async () => {
+							await this._restoreTickets(restoreTargets.length > 0 ? restoreTargets : [child]);
 						})
 					);
 				} else if (child.type !== 'file' && child.type !== 'folder') {

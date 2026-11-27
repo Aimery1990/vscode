@@ -3,6 +3,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { TicketChangeActorInput } from './ticketChangeLog.js';
+import { ITicketRestoreResult } from './ticketRestore.js';
+import { ITemplateStatusLike } from './ticketStatusPicker.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -199,6 +201,14 @@ export interface IWorkspacesExplorerService {
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
 	/** Writes a ticket's status; the change is recorded in its work log as `actor` (default User, CI-50). */
 	setEntityStatus(entityUri: URI, status: string, actor?: TicketChangeActorInput): Promise<void>;
+	/**
+	 * Restores a removed ticket (UI-19) to the status it had right before it was (last) moved to a Removed category
+	 * status, read from its field change log (CI-50); falls back to the lifecycle's initial status when there is no such
+	 * record, the previous status was a removed status or it is no longer in the ticket's effective lifecycle
+	 * (`templateStatuses` when the ticket's template defines any, else the workspace lifecycle). The write is recorded
+	 * as `actor` (default User). A ticket that is not removed is left unchanged (`changed: false`).
+	 */
+	restoreEntity(entityUri: URI, actor?: TicketChangeActorInput, templateStatuses?: readonly ITemplateStatusLike[]): Promise<ITicketRestoreResult>;
 	/** Writes a ticket's priority (`- **Priority**:` line of its ticket.md); recorded in its work log as `actor` (default User, UI-18). */
 	setEntityPriority(entityUri: URI, priority: string, actor?: TicketChangeActorInput): Promise<void>;
 	/** Writes a ticket's labels (`- **Labels**:` line of its ticket.md); recorded in its work log as `actor` (default User). */

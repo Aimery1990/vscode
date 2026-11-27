@@ -15,9 +15,11 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
-import { TicketChangeActorInput } from '../common/ticketChangeLog.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
-import { setTicketPriorityLine } from '../common/ticketStatusPicker.js';
+import { findStatusOption, ITemplateStatusLike, resolveEffectiveStatusOptions, setTicketPriorityLine } from '../common/ticketStatusPicker.js';
+import { ITicketRestoreResult, resolveRestoreStatus } from '../common/ticketRestore.js';
+import { ITicketChangeRecord, parseTicketChangeRecords, TICKET_CHANGE_RECORDS_HEADING, TicketChangeActorInput } from '../common/ticketChangeLog.js';
+import { TicketWorklogStorage } from './ticketWorklogStorage.js';
 import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, ensureFreestyleSchema, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
@@ -1442,6 +1444,57 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return rootTicketUri;
 		}
 		return undefined;
+	}
+
+	public async restoreEntity(entityUri: URI, actor?: TicketChangeActorInput, templateStatuses?: readonly ITemplateStatusLike[]): Promise<ITicketRestoreResult> {
+		const ticketUri = await this._resolveTicketMdUri(entityUri);
+		if (!ticketUri) {
+			throw new Error(`No ticket.md found in '${entityUri.fsPath}'.`);
+		}
+		const current = readTicketStatus((await this.fileService.readFile(ticketUri)).value.toString());
+		const wsStatuses = await this.getWorkspaceStatuses(entityUri);
+		const lifecycle = resolveEffectiveStatusOptions(templateStatuses, wsStatuses);
+		const isRemoved = (status: string): boolean => {
+			const option = lifecycle.source === 'template' ? findStatusOption(lifecycle.options, status) : undefined;
+			return option ? option.category === 'Removed' : this._isRemovedStatus(status, wsStatuses);
+		};
+		if (!current || !isRemoved(current)) {
+			return { status: current ?? '', source: 'initial', changed: false, fromStatus: current };
+		}
+
+		const decision = resolveRestoreStatus(await this._readStatusChangeRecords(entityUri, isRemoved), {
+			options: lifecycle.options,
+			isRemoved,
+			fallbackInitialStatus: wsStatuses.initialStatus || wsStatuses.statuses[0] || 'Todo'
+		});
+		await this.setEntityStatus(entityUri, decision.status, actor);
+		return { ...decision, changed: true, fromStatus: current };
+	}
+
+	/**
+	 * The `status` change records (CI-50) of a ticket's work log, newest entries first. Entries never overlap in time
+	 * (a new entry ends coalescing), so reading stops after the first entry that holds a change from an active status
+	 * into a removed one.
+	 */
+	private async _readStatusChangeRecords(entityUri: URI, isRemoved: (status: string) => boolean): Promise<ITicketChangeRecord[]> {
+		const records: ITicketChangeRecord[] = [];
+		try {
+			const storage = new TicketWorklogStorage(this.fileService);
+			for (const meta of await storage.listWorklogMetas(entityUri)) {
+				const entry = await storage.readWorklogEntry(entityUri, meta);
+				if (!entry.fullContent.includes(TICKET_CHANGE_RECORDS_HEADING)) {
+					continue;
+				}
+				const statusRecords = parseTicketChangeRecords(entry.fullContent).filter(r => r.field === 'status');
+				records.push(...statusRecords);
+				if (statusRecords.some(r => typeof r.old === 'string' && typeof r.new === 'string' && r.old.trim() && isRemoved(r.new) && !isRemoved(r.old))) {
+					break;
+				}
+			}
+		} catch (err) {
+			console.error('[WorkspacesExplorer] Failed to read the status change log:', err);
+		}
+		return records;
 	}
 
 	public async setEntityLabels(entityUri: URI, labels: string[], actor?: TicketChangeActorInput): Promise<void> {
