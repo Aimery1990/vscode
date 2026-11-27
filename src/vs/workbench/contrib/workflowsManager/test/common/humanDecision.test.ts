@@ -6,8 +6,8 @@ import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { getComponentSpec } from '../../../customModules/common/componentRegistry.js';
 import {
-	BUTTON_GROUP_OUTPUT_FIELDS, IHumanDecision, PendingHumanDecisions, buildHumanDecision, describeDecisionPrompt, matchDecisionButton,
-	normalizeDecisionButtons, parseButtonGroupValue, publishButtonGroupOutputs, ticketKeyOf
+	BUTTON_GROUP_OUTPUT_FIELDS, DEFAULT_WAITING_PROMPT, IHumanDecision, PendingHumanDecisions, buildHumanDecision, describeDecisionPrompt, matchDecisionButton,
+	normalizeDecisionButtons, parseButtonGroupValue, publishButtonGroupOutputs, resolveWaitingPrompt, ticketKeyOf
 } from '../../common/humanDecision.js';
 
 const BUTTONS = normalizeDecisionButtons([
@@ -70,7 +70,8 @@ suite('humanDecision (CI-25)', () => {
 		const a = pending.add({ fieldId: 'review', fieldLabel: 'Review', buttons: BUTTONS, ticketUri: 'file:///ws/T-1/.agents/ticket.md', ticketId: 'T-1', workflowRunId: 'run1', workflowNodeId: 'n1' });
 		const b = pending.add({ fieldId: 'gate', fieldLabel: 'Gate', buttons: BUTTONS, workflowRunId: 'run2', workflowNodeId: 'n2' });
 		assert.strictEqual(changes, 2);
-		assert.match(a.entry.prompt, /Ticket T-1 is waiting for your decision: Review \(Approve \/ Reject \/ Later\)/);
+		assert.strictEqual(a.entry.prompt, 'Ticket T-1 - Review: Waiting for your decision (Approve / Reject / Later)');
+		assert.strictEqual(a.entry.waitingText, 'Waiting for your decision');
 
 		// Found from the ticket page (folder URI or ticket id) and from the workflow run
 		assert.strictEqual(pending.findForTicketField({ uri: 'file:///ws/T-1' }, { label: 'review' })?.id, a.entry.id);
@@ -96,8 +97,40 @@ suite('humanDecision (CI-25)', () => {
 		assert.strictEqual(pending.resolve(b.entry.id, 'Approve'), undefined);
 	});
 
+	test('waiting prompt: default, {variables}, empty after resolution', () => {
+		const vars: Record<string, string> = { version: '2.1', empty: '' };
+		const resolve = (text: string) => text.replace(/\{([^{}]+)\}/g, (m, k) => vars[k] ?? m);
+		assert.strictEqual(resolveWaitingPrompt(undefined), DEFAULT_WAITING_PROMPT);
+		assert.strictEqual(resolveWaitingPrompt('   '), 'Waiting for your decision');
+		assert.strictEqual(resolveWaitingPrompt('Approve the release of {version}?', resolve), 'Approve the release of 2.1?');
+		assert.strictEqual(resolveWaitingPrompt('{missing} ok?', resolve), '{missing} ok?');
+		assert.strictEqual(resolveWaitingPrompt('{empty}', resolve), DEFAULT_WAITING_PROMPT);
+		const pending = new PendingHumanDecisions();
+		const { entry } = pending.add({ fieldId: 'r', fieldLabel: 'Review', buttons: BUTTONS, waitingPrompt: resolveWaitingPrompt('Release {version}?', resolve) });
+		assert.strictEqual(entry.waitingText, 'Release 2.1?');
+		pending.cancel(entry.id);
+	});
+
+	test('stop this run: ends the run, then cancels the wait', async () => {
+		const calls: string[] = [];
+		const pending = new PendingHumanDecisions();
+		const a = pending.add({ fieldId: 'r', fieldLabel: 'Review', buttons: BUTTONS, workflowRunId: 'run1' }, Date.now(), () => calls.push('stop run1'));
+		pending.stopRun(a.entry.id);
+		assert.deepStrictEqual(calls, ['stop run1']);
+		assert.strictEqual(await a.promise, undefined);
+		assert.strictEqual(pending.get(a.entry.id), undefined);
+		// Without a run to stop (a ticket run on its own) the wait is still cancelled, which fails the step
+		const b = pending.add({ fieldId: 'r', fieldLabel: 'Review', buttons: BUTTONS });
+		pending.stopRun(b.entry.id);
+		assert.strictEqual(await b.promise, undefined);
+		// A failing stop callback still cancels the wait
+		const c = pending.add({ fieldId: 'r', fieldLabel: 'Review', buttons: BUTTONS }, Date.now(), () => { throw new Error('boom'); });
+		assert.throws(() => pending.stopRun(c.entry.id));
+		assert.strictEqual(await c.promise, undefined);
+	});
+
 	test('prompt text and ticket keys', () => {
-		assert.match(describeDecisionPrompt({ fieldId: 'g', fieldLabel: 'Gate', buttons: BUTTONS, workflowNodeLabel: 'Deploy' }), /^Workflow node 'Deploy' is waiting/);
+		assert.strictEqual(describeDecisionPrompt({ fieldId: 'g', fieldLabel: 'Gate', buttons: BUTTONS, workflowNodeLabel: 'Deploy', waitingPrompt: 'Ship v2?' }), `Workflow node 'Deploy' - Gate: Ship v2? (Approve / Reject / Later)`);
 		assert.strictEqual(ticketKeyOf('file:///ws/T-1/.agents/ticket.md'), ticketKeyOf('file:///ws/T-1/'));
 		assert.strictEqual(ticketKeyOf('file:///ws/T-1/ticket.md'), 'file:///ws/t-1');
 	});

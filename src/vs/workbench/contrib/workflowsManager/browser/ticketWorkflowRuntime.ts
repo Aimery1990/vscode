@@ -43,7 +43,7 @@ import { ILocalGitService } from '../../../../platform/git/common/localGitServic
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { env as processEnv } from '../../../../base/common/process.js';
-import { IHumanDecisionContext, IHumanDecisionService, normalizeDecisionButtons, publishButtonGroupOutputs } from '../common/humanDecision.js';
+import { IHumanDecisionContext, IHumanDecisionService, normalizeDecisionButtons, publishButtonGroupOutputs, resolveWaitingPrompt } from '../common/humanDecision.js';
 import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -2534,10 +2534,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								ticketTitle: ticketResult.title,
 								workflowRunId: options.humanDecisionContext?.workflowRunId,
 								workflowNodeId: options.humanDecisionContext?.workflowNodeId,
-								workflowNodeLabel: options.humanDecisionContext?.workflowNodeLabel
-							}, isCancelled);
+								workflowNodeLabel: options.humanDecisionContext?.workflowNodeLabel,
+								waitingPrompt: resolveWaitingPrompt(field.waitingPrompt, text => this._interpolateVariables(text, contextVariables))
+							}, isCancelled, this._stopRunAtGate(options.humanDecisionContext));
 							if (!decision) {
-								throw new Error(`Run stopped while '${fieldLabel}' was waiting for a decision.`);
+								throw new Error(`Stopped: the run was stopped while '${fieldLabel}' was waiting for a decision.`);
 							}
 							customMetadata[fieldLabel] = JSON.stringify(decision);
 							if (decision.targetStatus) {
@@ -3387,6 +3388,20 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 	}
 
+	/**
+	 * "Stop this run" at a Button Group gate (CI-25): stops the whole workflow run when the gate waits inside one; a
+	 * ticket run on its own ends because the cancelled wait fails the step (later steps do not run).
+	 */
+	private _stopRunAtGate(context: IHumanDecisionContext | undefined): (() => void) | undefined {
+		if (!context?.workflowRunId) {
+			return undefined;
+		}
+		const runId = context.workflowRunId;
+		return () => {
+			this._getWorkflowExecutionService()?.stopWorkflow(runId).catch(err => this.logService.warn('[TicketWorkflowRuntime] Could not stop the workflow run:', err));
+		};
+	}
+
 	/** Pending human decisions of Button Group gates (CI-25), resolved lazily. */
 	private _getHumanDecisionService(): IHumanDecisionService | undefined {
 		try {
@@ -4045,10 +4060,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						buttons,
 						workflowRunId: humanDecisionContext?.workflowRunId,
 						workflowNodeId: humanDecisionContext?.workflowNodeId,
-						workflowNodeLabel: humanDecisionContext?.workflowNodeLabel
-					}, () => this._cancelEpoch !== startEpoch);
+						workflowNodeLabel: humanDecisionContext?.workflowNodeLabel,
+						waitingPrompt: resolveWaitingPrompt(field.waitingPrompt, text => this._interpolateVariables(text, contextVariables))
+					}, () => this._cancelEpoch !== startEpoch, this._stopRunAtGate(humanDecisionContext));
 					if (!decision) {
-						throw new Error(`Run stopped while '${fieldLabel}' was waiting for a decision.`);
+						throw new Error(`Stopped: the run was stopped while '${fieldLabel}' was waiting for a decision.`);
 					}
 					stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision);
 					stepDetails = { ...decision };

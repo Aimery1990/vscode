@@ -16616,10 +16616,27 @@ ${rawErr}
 			card.classList.toggle('human-decision-waiting', !!pending);
 			card.style.boxShadow = pending ? '0 0 0 2px #fbbf24' : '';
 			let banner = this._decisionBanners.get(card);
+			if (pending && banner?.isConnected && banner.getAttribute('data-decision-id') !== pending.id) {
+				banner.remove();
+				banner = undefined;
+			}
 			if (pending && !banner?.isConnected) {
-				banner = $('div.human-decision-banner', { style: 'display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; padding: 5px 10px; border-radius: 5px; font-size: 12px; font-weight: 600; background: rgba(251, 191, 36, 0.14); color: #fbbf24;' },
+				const stopBtn = $<HTMLButtonElement>('button.human-decision-stop', {
+					type: 'button',
+					title: 'Stop this run: ends the whole run without choosing a button (the step is marked Failed)',
+					'aria-label': 'Stop this run',
+					style: 'margin-left: auto; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 11.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.12); color: #f87171; cursor: pointer;'
+				}, $('span.codicon.codicon-debug-stop', { style: 'font-size: 12px;' }), 'Stop this run');
+				const decisionId = pending.id;
+				stopBtn.onclick = e => {
+					e.preventDefault();
+					e.stopPropagation();
+					this._humanDecisionService.stopRun(decisionId);
+				};
+				banner = $('div.human-decision-banner', { 'data-decision-id': decisionId, style: 'display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; padding: 5px 10px; border-radius: 5px; font-size: 12px; font-weight: 600; background: rgba(251, 191, 36, 0.14); color: #fbbf24;' },
 					$('span.codicon.codicon-bell', { style: 'font-size: 13px;' }),
-					'Waiting for your decision: click one of the buttons to continue the run.'
+					$('span', { title: 'Click one of the buttons below to continue the run' }, pending.waitingText),
+					stopBtn
 				);
 				const title = partsOf(card).sectionTitle;
 				card.insertBefore(banner, title?.nextSibling ?? card.firstChild);

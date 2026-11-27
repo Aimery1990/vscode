@@ -65,6 +65,8 @@ export interface IWorkflowHumanPrompt {
 	schema?: Record<string, 'string' | 'number' | 'boolean' | 'options'>;
 	/** Set when a Button Group gate waits (CI-25): `options` are its button labels; resume with one of them. */
 	decisionId?: string;
+	/** Short waiting text (the Button Group's Waiting Prompt). */
+	waitingText?: string;
 	ticketId?: string;
 	ticketUri?: string;
 }

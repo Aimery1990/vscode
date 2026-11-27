@@ -661,6 +661,8 @@ export interface ICustomField {
 	itemFields?: ICustomField[];
 	componentRef?: string;
 	buttons?: IActionButton[];
+	/** Button Group (CI-25): text shown while a run waits for a click; supports {variables}. */
+	waitingPrompt?: string;
 	unit?: string;
 	precision?: number;
 	min?: number;

@@ -45,13 +45,30 @@ export interface IHumanDecisionRequest {
 	readonly workflowRunId?: string;
 	readonly workflowNodeId?: string;
 	readonly workflowNodeLabel?: string;
+	/** The component's Waiting Prompt, already resolved (default {@link DEFAULT_WAITING_PROMPT}). */
+	readonly waitingPrompt?: string;
 }
 
 export interface IPendingHumanDecision extends IHumanDecisionRequest {
 	readonly id: string;
 	readonly createdAt: number;
-	/** Text shown to the person. */
+	/** Full notification text: where it waits, the waiting prompt and the buttons. */
 	readonly prompt: string;
+	/** Short text shown on the card and the canvas node (the Waiting Prompt). */
+	readonly waitingText: string;
+}
+
+/** Default Waiting Prompt of a Button Group (CI-25). */
+export const DEFAULT_WAITING_PROMPT = 'Waiting for your decision';
+
+/** The Waiting Prompt to show: the configured text with {variables} resolved, or the default when empty. */
+export function resolveWaitingPrompt(raw: string | undefined, resolve: (text: string) => string = text => text): string {
+	const text = String(raw ?? '').trim();
+	if (!text) {
+		return DEFAULT_WAITING_PROMPT;
+	}
+	const resolved = resolve(text).trim();
+	return resolved || DEFAULT_WAITING_PROMPT;
 }
 
 /** Where a workflow run waits for a decision (passed down to ticket runs and node components). */
@@ -74,9 +91,11 @@ export interface IHumanDecisionService {
 	/**
 	 * Waits for a person's choice. Resolves undefined when the wait is cancelled (Stop) or `isCancelled` turns true.
 	 */
-	request(request: IHumanDecisionRequest, isCancelled?: () => boolean): Promise<IHumanDecision | undefined>;
+	request(request: IHumanDecisionRequest, isCancelled?: () => boolean, stopRun?: () => void): Promise<IHumanDecision | undefined>;
 	/** Resolves a pending decision with a button (id, label or an input object, see matchDecisionButton). */
 	resolve(id: string, input: unknown, by?: string): IHumanDecision | undefined;
+	/** "Stop this run": ends the whole run that waits (its own Stop), then cancels the wait. */
+	stopRun(id: string): void;
 	cancel(id: string): void;
 	cancelForWorkflowRun(runId: string): void;
 	cancelAll(): void;
@@ -206,7 +225,7 @@ export function describeDecisionPrompt(request: IHumanDecisionRequest): string {
 	const where = request.ticketId || request.ticketTitle
 		? `Ticket ${request.ticketId || request.ticketTitle}`
 		: (request.workflowNodeLabel ? `Workflow node '${request.workflowNodeLabel}'` : 'A run');
-	return `${where} is waiting for your decision: ${request.fieldLabel} (${request.buttons.map(b => b.label).join(' / ')})`;
+	return `${where} - ${request.fieldLabel}: ${resolveWaitingPrompt(request.waitingPrompt)} (${request.buttons.map(b => b.label).join(' / ')})`;
 }
 
 /** Normalized path of a ticket (its folder), so a folder URI and a ticket.md URI of the same ticket compare equal. */
@@ -219,7 +238,7 @@ export function ticketKeyOf(uri: string | undefined): string {
 
 /** In-memory registry of pending decisions (the service delegates to it; testable without services). */
 export class PendingHumanDecisions {
-	private readonly _pending = new Map<string, { readonly entry: IPendingHumanDecision; readonly resolve: (decision: IHumanDecision | undefined) => void }>();
+	private readonly _pending = new Map<string, { readonly entry: IPendingHumanDecision; readonly resolve: (decision: IHumanDecision | undefined) => void; readonly stopRun?: () => void }>();
 	private _counter = 0;
 
 	constructor(private readonly _onChange: () => void = () => { }) { }
@@ -232,12 +251,18 @@ export class PendingHumanDecisions {
 		return this._pending.get(id)?.entry;
 	}
 
-	add(request: IHumanDecisionRequest, now = Date.now()): { readonly entry: IPendingHumanDecision; readonly promise: Promise<IHumanDecision | undefined> } {
+	add(request: IHumanDecisionRequest, now = Date.now(), stopRun?: () => void): { readonly entry: IPendingHumanDecision; readonly promise: Promise<IHumanDecision | undefined> } {
 		const id = `decision_${now}_${++this._counter}`;
-		const entry: IPendingHumanDecision = { ...request, id, createdAt: now, prompt: describeDecisionPrompt(request) };
+		const entry: IPendingHumanDecision = {
+			...request,
+			id,
+			createdAt: now,
+			prompt: describeDecisionPrompt(request),
+			waitingText: resolveWaitingPrompt(request.waitingPrompt)
+		};
 		let resolveFn: (decision: IHumanDecision | undefined) => void = () => { };
 		const promise = new Promise<IHumanDecision | undefined>(resolve => { resolveFn = resolve; });
-		this._pending.set(id, { entry, resolve: resolveFn });
+		this._pending.set(id, { entry, resolve: resolveFn, stopRun });
 		this._onChange();
 		return { entry, promise };
 	}
@@ -256,6 +281,19 @@ export class PendingHumanDecisions {
 		pending.resolve(decision);
 		this._onChange();
 		return decision;
+	}
+
+	/** Ends the waiting run (its stop callback, if any) and cancels the wait: the step fails as stopped. */
+	stopRun(id: string): void {
+		const pending = this._pending.get(id);
+		if (!pending) {
+			return;
+		}
+		try {
+			pending.stopRun?.();
+		} finally {
+			this.cancel(id);
+		}
 	}
 
 	cancel(id: string): void {

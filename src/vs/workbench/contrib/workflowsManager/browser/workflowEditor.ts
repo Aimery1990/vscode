@@ -11491,8 +11491,8 @@ export class WorkflowEditor extends EditorPane {
 						const decisionCard = append(nodeEl, $('.node-human-approval-card.node-human-decision-card', { style: 'display: flex; flex-direction: column; gap: 4px; cursor: default;' }));
 						decisionCard.title = humanPrompt.prompt;
 						decisionCard.onmousedown = (e) => e.stopPropagation();
-						append(decisionCard, $('span', undefined, '\u23F8 Waiting for your decision'));
-						const btnRow = append(decisionCard, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 4px;' }));
+						append(decisionCard, $('span', undefined, `\u23F8 ${humanPrompt.waitingText || 'Waiting for your decision'}`));
+						const btnRow = append(decisionCard, $('div', { style: 'display: flex; flex-wrap: wrap; align-items: center; gap: 4px;' }));
 						for (const option of humanPrompt.options) {
 							const optBtn = append(btnRow, $('button', { type: 'button', title: `Choose '${option}' and continue`, style: 'font-size: 10.5px; padding: 1px 8px; border-radius: 4px; border: 1px solid rgba(251, 191, 36, 0.6); background: rgba(251, 191, 36, 0.15); color: inherit; cursor: pointer;' }, option));
 							optBtn.onmousedown = (e) => e.stopPropagation();
@@ -11501,6 +11501,17 @@ export class WorkflowEditor extends EditorPane {
 								this._workflowExecutionService.resumeWorkflow(activeRun!.runId, { label: option, by: 'User' });
 							};
 						}
+						const stopBtn = append(btnRow, $('button', {
+							type: 'button',
+							title: 'Stop this run: ends the whole workflow run without choosing a button',
+							'aria-label': 'Stop this run',
+							style: 'display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.12); color: #f87171; cursor: pointer; margin-left: auto;'
+						}, $('span.codicon.codicon-debug-stop', { style: 'font-size: 11px;' }), 'Stop this run'));
+						stopBtn.onmousedown = (e) => e.stopPropagation();
+						stopBtn.onclick = (e) => {
+							e.stopPropagation();
+							this._workflowExecutionService.stopWorkflow(activeRun!.runId);
+						};
 					} else {
 						// Human Approval Interactive Card
 						const humanCard = append(nodeEl, $('.node-human-approval-card'));

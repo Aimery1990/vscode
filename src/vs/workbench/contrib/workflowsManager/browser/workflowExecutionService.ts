@@ -6661,6 +6661,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						prompt: pending.prompt,
 						options: pending.buttons.map(b => b.label),
 						decisionId: pending.id,
+						waitingText: pending.waitingText,
 						ticketId: pending.ticketId,
 						ticketUri: pending.ticketUri
 					};

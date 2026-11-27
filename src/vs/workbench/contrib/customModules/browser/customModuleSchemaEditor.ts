@@ -53,6 +53,7 @@ import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, cr
 import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
 import { GIT_CONFIG_KEYS, gitMainOutput, pickGitConfig } from '../common/gitComponent.js';
 import { renderGitConfigForm, renderGitResultView } from './gitComponentView.js';
+import { DEFAULT_WAITING_PROMPT } from '../../workflowsManager/common/humanDecision.js';
 
 
 /**
@@ -3080,6 +3081,22 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						};
 					};
 					renderButtonItems();
+
+					// Waiting Prompt (CI-25): shown on the ticket card, the canvas node and the notification while a run waits
+					const waitRow = append(fieldCard, $('div', { style: 'display: flex; flex-direction: column; gap: 4px; margin-top: 8px;' }));
+					append(waitRow, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Waiting Prompt'));
+					const waitInput = append(waitRow, $('input.monaco-inputbox', {
+						type: 'text',
+						title: 'Shown while a run waits for a click on one of these buttons. {variables} are resolved at run time.',
+						style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box;'
+					})) as HTMLInputElement;
+					waitInput.placeholder = DEFAULT_WAITING_PROMPT;
+					waitInput.value = field.waitingPrompt || '';
+					waitInput.oninput = () => {
+						field.waitingPrompt = waitInput.value;
+						this._syncDraft();
+					};
+					append(waitRow, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'A run that reaches these buttons waits until someone clicks one. Supports {variables}, e.g. Approve the release of {version}?'));
 				}
 
 				// Browser Primitive Configuration Box

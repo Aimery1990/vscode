@@ -1589,10 +1589,11 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Human decision gate: a run waits until a person clicks one of the buttons; the clicked button is the output.',
-		description: 'Row of buttons [{id, label, color?, targetStatus?}] that acts as a human approval gate. When a ticket run or a workflow run (also a ticket run inside a workflow node, or the component directly in a node) reaches it, the run PAUSES until a person clicks one of the buttons: on the ticket page (the card shows "Waiting for your decision"), on the workflow canvas (the node shows the buttons), from the notification, or via resumeWorkflow with { label: "<button>" }. The clicked button\'s label is the output; a button\'s targetStatus becomes the ticket status when the run ends successfully. Stop cancels the wait (the step fails). Clicking a button outside a run changes the status (targetStatus) and records the choice as the component value.',
+		description: 'Row of buttons [{id, label, color?, targetStatus?}] that acts as a human approval gate. When a ticket run or a workflow run (also a ticket run inside a workflow node, or the component directly in a node) reaches it, the run PAUSES until a person clicks one of the buttons: on the ticket page (the card shows "Waiting for your decision"), on the workflow canvas (the node shows the buttons), from the notification, or via resumeWorkflow with { label: "<button>" }. The clicked button\'s label is the output; a button\'s targetStatus becomes the ticket status when the run ends successfully. The ticket opens to the right of the workflow so the person sees what they approve; waitingPrompt (default "Waiting for your decision", {variables} allowed) is the text shown while waiting; "Stop this run" ends the whole run (the step fails as stopped). Clicking a button outside a run changes the status (targetStatus) and records the choice as the component value.',
 		runtime: 'Waits for a click (no timeout, never decided automatically). Publishes {Label} = clicked label and {Label.id} / {Label.label} / {Label.at} / {Label.by}; stores {buttonId, label, at, by, targetStatus} as the ticket value; the ticket status at the end of a successful run is the clicked button\'s targetStatus (instead of Completed). A stopped run cancels the wait and fails the step. Pending waits are kept in memory: reloading the window ends the waiting run.',
 		props: [
-			{ name: 'buttons', kind: 'objectArray', role: 'structured', required: true, description: 'Buttons [{id, label*, color?, targetStatus?}]. Without buttons the card shows Approve (-> Done) and Reject (-> Blocked).' }
+			{ name: 'buttons', kind: 'objectArray', role: 'structured', required: true, description: 'Buttons [{id, label*, color?, targetStatus?}]. Without buttons the card shows Approve (-> Done) and Reject (-> Blocked).' },
+			{ name: 'waitingPrompt', kind: 'string', default: 'Waiting for your decision', description: 'Waiting Prompt: text shown on the ticket card, the workflow node and the notification while a run waits. Supports {variables}.' }
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'label of the clicked button', example: '"Approve"' },
@@ -1610,7 +1611,8 @@ export const COMPONENT_SPECS = {
 			buttons: [
 				{ id: 'btn_approve', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
 				{ id: 'btn_reject', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
-			]
+			],
+			waitingPrompt: 'Approve the release of {version}?'
 		},
 		notes: [
 			'A run that reaches the buttons waits for a person: only add it where a human decision is wanted.',
@@ -1620,10 +1622,13 @@ export const COMPONENT_SPECS = {
 		help: {
 			badge: 'Human Approval Gate',
 			summary: 'Buttons such as Approve / Reject. A run that reaches them pauses until a person clicks one; the clicked button becomes the output and can set the ticket status.',
-			designerConfig: [{ name: 'Button Definitions', desc: 'Button label, color, and optional target status (set when the run ends after this choice, or immediately for a click outside a run).' }],
+			designerConfig: [
+				{ name: 'Button Definitions', desc: 'Button label, color, and optional target status (set when the run ends after this choice, or immediately for a click outside a run).' },
+				{ name: 'Waiting Prompt', desc: 'Text shown while a run waits (default "Waiting for your decision"); supports {variables}.' }
+			],
 			headline: 'How Runs Handle Action Buttons',
 			steps: [
-				{ step: '1. Pause', detail: 'The run stops at the buttons. The ticket card is highlighted "Waiting for your decision", the workflow node shows the buttons, and a notification offers to open the ticket.' },
+				{ step: '1. Pause', detail: 'The run stops at the buttons. The ticket opens to the right of the workflow (or is revealed where it is already open) with the card highlighted and the Waiting Prompt (default "Waiting for your decision"); the workflow node shows the prompt and the buttons; a notification can reveal the ticket again. "Stop this run" on the card or the node ends the whole run.' },
 				{ step: '2. Decide', detail: 'A person clicks a button (ticket page, canvas or notification); an agent can resume the workflow with the button label when told to. Stop ends the wait and the run.' },
 				{ step: '3. Publish', detail: '{Label} = clicked label; {Label.id}, {Label.label}, {Label.at}, {Label.by}. The choice is stored on the ticket.' },
 				{ step: '4. Status', detail: 'The button\'s target status becomes the ticket status when the run finishes successfully.' }

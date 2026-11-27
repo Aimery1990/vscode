@@ -196,5 +196,8 @@ suite('validateComponentConfig', () => {
 		assert.deepStrictEqual(required, ['required:wfTicketTarget']);
 		assert.deepStrictEqual(validateComponentConfig('get_tickets', {}), []);
 		assert.deepStrictEqual(validateComponentConfig('select', {}).map(e => e.prop), ['options']);
+		// Button Group gate (CI-25): the Waiting Prompt is an AI-writable text setting
+		assert.deepStrictEqual(codes('button_group', { waitingPrompt: 'Approve {version}?' }), []);
+		assert.deepStrictEqual(codes('button_group', { waitingPrompt: { text: 'x' } }), ['type:waitingPrompt']);
 	});
 });
