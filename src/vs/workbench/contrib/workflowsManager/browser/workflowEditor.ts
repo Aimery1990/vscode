@@ -30,6 +30,7 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { IEntityPersistenceService, ICustomModule, ICustomField, IOutputSpec, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList, normalizeLegacyFieldTypes } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { getNodeComponentPalette } from '../../customModules/common/componentRegistry.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
@@ -4745,31 +4746,8 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const varGrid = append(varSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
-		const nodeComponentPalette: {
-			compType: CustomFieldType;
-			label: string;
-			icon: ThemeIcon;
-			accent: string;
-			desc: string;
-		}[] = [
-				{ compType: 'parameters', label: localize('compInputs', 'Inputs'), icon: Codicon.symbolVariable, accent: '#c084fc', desc: 'Node Inputs component. Multiple Inputs components in the entry node are accumulated in order as Workflow Inputs.' },
-				{ compType: 'output', label: localize('compOutput', 'Output'), icon: Codicon.output, accent: '#34d399', desc: 'Node Output component. Multiple Output components in the final node are accumulated in order as Workflow Outputs.' },
-				{ compType: 'python', label: localize('compPythonCard', 'Python Card'), icon: Codicon.python, accent: '#38bdf8', desc: 'Full Python Script component card in side editor. Supports TICKET_CONTEXT, interpreter selection, test runner, and OUTPUT.' },
-				{ compType: 'create_tickets', label: localize('compCreateTickets', 'Create Tickets'), icon: Codicon.add, accent: '#c084fc', desc: 'CREATE_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores ticket handle in Component Title.' },
-				{ compType: 'run_tickets', label: localize('compRunTickets', 'Run Tickets'), icon: Codicon.playCircle, accent: '#a855f7', desc: 'RUN_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores run result in Component Title.' },
-				{ compType: 'get_outputs', label: localize('compGetOutputs', 'Get Outputs'), icon: Codicon.signOut, accent: '#818cf8', desc: 'GET_OUTPUTS built-in component. Reads OUTPUT dictionary from target ticket into Component Title variable.' },
-				{ compType: 'get_tickets', label: localize('compGetTickets', 'Get Tickets'), icon: Codicon.search, accent: '#60a5fa', desc: 'GET_TICKETS built-in component. Queries workspace tickets by Type, Status, or Title into Component Title variable.' },
-				{ compType: 'display', label: localize('compDisplay', 'Display'), icon: Codicon.eye, accent: '#f472b6', desc: 'DISPLAY built-in component. Renders variable or value to Live Output panel.' },
-				{ compType: 'prompt', label: localize('compPrompt', 'AI Prompt'), icon: Codicon.sparkle, accent: '#2dd4bf', desc: 'AI Prompt execution component. Supports {Component Title} and {workflow_var} interpolation.' },
-				{ compType: 'table', label: localize('compTable', 'Data Table'), icon: Codicon.table, accent: '#fb923c', desc: 'SQLite Data Table & SQL query component. Stores query rows in Component Title variable.' },
-				{ compType: 'browser', label: localize('compBrowser', 'Browser'), icon: Codicon.globe, accent: '#38bdf8', desc: 'Headless Browser & Scraper component. Stores extracted content in Component Title variable.' },
-				{ compType: 'tts', label: localize('compTts', 'Audio / TTS'), icon: Codicon.unmute, accent: '#f87171', desc: 'Text-to-Speech synthesis component.' },
-				{ compType: 'media_player', label: localize('compMediaPlayer', 'MP3 / MP4 Player'), icon: Codicon.deviceCameraVideo, accent: '#f59e0b', desc: 'Local MP3 / MP4 & multi-format Audio/Video Player component with 0.25x-2.0x speed control.' },
-				{ compType: 'voice_note', label: localize('compVoiceNote', 'Voice Note'), icon: Codicon.mic, accent: '#94a3b8', desc: 'Record voice memos with automatic Speech-to-Text transcription. Automatically adds a top-right speaker icon on the node to play all recorded clips sequentially.' },
-				{ compType: 'ssh', label: localize('compSsh', 'SSH Terminal'), icon: Codicon.terminal, accent: '#34d399', desc: 'SSH Remote Linux Terminal component (IP, Port, Account, Password, Quick Linux Commands & embedded terminal).' },
-				{ compType: 'http_request', label: localize('compHttpRequest', 'HTTP Request'), icon: Codicon.cloudUpload, accent: '#06b6d4', desc: 'Universal HTTP / REST API client. Supports GET, POST, PUT, PATCH, DELETE, Bearer/API-Key auth, params, headers, body, and structured JSON output.' },
-				{ compType: 'git', label: localize('compGit', 'Git Repo'), icon: Codicon.gitMerge, accent: '#a3e635', desc: 'Git repository operations component.' }
-			];
+		// Generated from the component registry (CI-30)
+		const nodeComponentPalette = getNodeComponentPalette();
 
 		for (const itemDef of nodeComponentPalette) {
 			const fnItem = append(varGrid, $(`.workflow-toolbar-item.function-toolbar-item.node-component-palette-item${this._isToolbarCompact ? '.compact-item' : ''}`));
