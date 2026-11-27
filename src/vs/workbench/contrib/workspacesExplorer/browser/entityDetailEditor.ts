@@ -57,6 +57,7 @@ import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeyb
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 import { parseMediaSubtitlesState, pickMediaSubtitlesState, resolveMediaSubtitlesConfig, IMediaSubtitleFieldProps } from '../../voiceModels/common/subtitleConfig.js';
 import { MediaSubtitlesPanel } from './mediaSubtitles/mediaSubtitlesPanel.js';
+import { IMediaSubtitleStore, readMediaSubtitleDocument, writeMediaSubtitleDocument } from '../../voiceModels/browser/mediaSubtitleJob.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
@@ -1691,6 +1692,11 @@ export class EntityDetailEditor extends EditorPane {
 			Object.assign(draftMediaField, ticketMedia);
 			input.embeddedTicketMedia = true;
 			this._mediaPlayerCardPausers.get(mediaCard)?.();
+			// Extract subtitles from the dialog (CI-46): saved into this ticket right away, as the card does
+			if (!this._isPreviewMode) {
+				input.embeddedTicketFolder = ticketUri;
+				input.embeddedSubtitleStore = this._mediaSubtitleStoreForCard(mediaCard, ticketUri);
+			}
 		}
 
 		const closeBtn = $<HTMLButtonElement>('button.component-toolbox-icon-btn', { type: 'button', title: 'Cancel (Escape)', 'aria-label': 'Cancel' },
@@ -1793,6 +1799,41 @@ export class EntityDetailEditor extends EditorPane {
 			close();
 			this._notificationService.error(`Failed to open the component configuration: ${err}`);
 		}
+	}
+
+	/**
+	 * Where the component settings dialog saves subtitles it extracts for a media player card (CI-46): through the
+	 * card's subtitle panel when it is shown (so it displays them at once), else into the ticket's subtitles file and
+	 * field value directly (subtitles just enabled in the dialog, not saved yet).
+	 */
+	private _mediaSubtitleStoreForCard(card: HTMLElement, ticketUri: URI): IMediaSubtitleStore {
+		const fieldKey = card.getAttribute('data-field-key') || '';
+		const ownerTicketFile = this._ticketFileUri?.toString();
+		const panel = () => this._mediaSubtitlePanels.get(card);
+		const storedState = () => parseMediaSubtitlesState(this._storedMediaPlayerValue(fieldKey));
+		return {
+			load: async () => panel()?.getDocument() ?? readMediaSubtitleDocument(this._fileService, ticketUri, storedState().subtitlesFile),
+			save: async doc => {
+				if (this._ticketFileUri?.toString() !== ownerTicketFile || this._entityUri?.toString() !== ticketUri.toString()) {
+					throw new Error('Another ticket is open now, so the subtitles were not saved.');
+				}
+				const livePanel = panel();
+				if (livePanel) {
+					await livePanel.storeExtracted(doc);
+					return;
+				}
+				const rel = await writeMediaSubtitleDocument(this._fileService, ticketUri, fieldKey, doc);
+				if (this._lastParsedData) {
+					this._lastParsedData.customMetadata = {
+						...(this._lastParsedData.customMetadata || {}),
+						[fieldKey]: JSON.stringify({ ...(this._storedMediaPlayerValue(fieldKey) ?? {}), subtitlesFile: rel })
+					};
+				}
+				await this._saveMediaPlayerDataFromCard(card, fieldKey);
+			},
+			answerCount: () => panel()?.answerCount() ?? Object.keys(storedState().dictation ?? {}).length,
+			isBusy: () => panel()?.isExtracting() ?? false
+		};
 	}
 
 	/** The rendered MP3 / MP4 Player card of the component named `label` (names compare like stored value keys). */
@@ -5652,6 +5693,13 @@ export class EntityDetailEditor extends EditorPane {
 						cardEl.classList.add('ticket-step-running');
 						cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 						this._updateCardStatusBadge(cardEl, 'running', `Running #${info.stepIndex}...`);
+					}
+				},
+				onStepMessage: (info) => {
+					// Long steps (subtitle extraction, CI-46): progress on the card's badge
+					const cardEl = this._findCardElementForStep(info.fieldId, info.fieldLabel, info.fieldType);
+					if (cardEl) {
+						this._updateCardStatusBadge(cardEl, 'running', info.message.length > 90 ? `${info.message.slice(0, 87)}...` : info.message, info.message);
 					}
 				},
 				onStepProgress: (stepRes, index, total) => {

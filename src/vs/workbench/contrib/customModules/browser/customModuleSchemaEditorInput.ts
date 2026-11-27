@@ -11,6 +11,7 @@ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js'
 import { localize } from '../../../../nls.js';
 import { Emitter } from '../../../../base/common/event.js';
 import { ICustomModule, ICustomField } from '../../entityPersistence/common/entityPersistence.js';
+import type { IMediaSubtitleStore } from '../../voiceModels/browser/mediaSubtitleJob.js';
 
 export const customModulesViewIcon = registerIcon(
 	'custom-modules-view-icon',
@@ -47,6 +48,13 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	 * the ticket's current media (not the structure's default), and the host applies a changed file to the ticket.
 	 */
 	public embeddedTicketMedia?: boolean;
+	/**
+	 * Embedded mode opened from a ticket (CI-46): where the Extract button of the `embeddedFieldId` media player's
+	 * subtitle settings saves its result (the ticket's subtitles file and field value), and the ticket folder that
+	 * relative media paths are resolved against. Undefined in the template designer: there is no ticket to save into.
+	 */
+	public embeddedSubtitleStore?: IMediaSubtitleStore;
+	public embeddedTicketFolder?: URI;
 
 	private readonly _onDidUpdateExternalDraft = this._register(new Emitter<string | undefined>());
 	public readonly onDidUpdateExternalDraft = this._onDidUpdateExternalDraft.event;

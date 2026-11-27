@@ -8454,10 +8454,25 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const subtitleVoiceModels = this._instantiationService.invokeFunction(accessor => {
 						try { return accessor.get(IVoiceModelService); } catch { return undefined; }
 					});
+					// Extract button (CI-46): results are saved only when the dialog was opened from a ticket
+					const subtitleServices = this._instantiationService.invokeFunction(accessor => ({ fileService: accessor.get(IFileService), dialogService: accessor.get(IDialogService) }));
+					const isTicketField = isEmbeddedFieldMode && (input.embeddedFieldId || '').toLowerCase() === (field.id || '').toLowerCase();
 					subtitleSettings.widget = this._register(renderMediaSubtitleSettings(mediaBox, field, subtitleVoiceModels, () => {
 						this._syncDraft();
 						this._persistCurrentModule().catch(() => { });
-					}, currentMediaFacts));
+					}, currentMediaFacts, {
+						...subtitleServices,
+						store: isTicketField ? input.embeddedSubtitleStore : undefined,
+						baseFolder: isTicketField ? input.embeddedTicketFolder : undefined,
+						getMediaSource: () => {
+							const path = currentLocalFileUri ? currentLocalFileUri.toString() : (currentBlobUrl ? undefined : field.mediaFilePath || undefined);
+							const name = field.mediaFileName || (field.mediaFilePath || '').split(/[\\/]/).pop() || '';
+							if (!name || (!path && !currentBlobUrl)) {
+								return undefined;
+							}
+							return { name, path, blobUrl: currentBlobUrl, durationSec: knownDurationSec > 0 ? knownDurationSec : undefined };
+						}
+					}));
 				}
 
 				if (field.type === 'output') {
