@@ -20,7 +20,8 @@ import { TicketWorklogStorage } from './ticketWorklogStorage.js';
  * Every writer of `.agents/ticket.md`, `README.md` or `instruction.md` goes through {@link writeTicketFiles} /
  * {@link writeTicketFile} with the actor (User / AI Agent / Workflow). It reads the persisted files, writes the new
  * contents, diffs the tracked fields and records the changes into the ticket's work log (one `Worklogs/*.log` entry,
- * coalesced for consecutive saves of the same actor). Full versions of large values are stored per field in
+ * coalesced for consecutive saves of the same actor, except that Status / Priority changes always get an entry of
+ * their own, UI-19). Full versions of large values are stored per field in
  * `.agents/fields/<field_key>.versions/` (see `common/ticketFieldStore.ts`).
  * CI-51: long values are written to `.agents/fields/<field_key>.txt` and referenced from the field (see
  * `ticketFieldFiles.ts`); the change log compares the resolved values, never the reference lines.
@@ -153,7 +154,7 @@ export async function recordTicketFieldChanges(fileService: IFileService, config
 	const ticketKey = URI.joinPath(configDir, 'Worklogs').toString();
 	const nowMs = now.getTime();
 
-	const target = ticketChangeCoalescer.mergeTarget(ticketKey, actor, nowMs);
+	const target = ticketChangeCoalescer.mergeTarget(ticketKey, actor, nowMs, changes);
 	if (target && await fileService.exists(URI.joinPath(configDir, 'Worklogs', target.filename))) {
 		TicketChangeCoalescer.merge(target, changes, nowMs);
 		if (target.fields.size === 0) {

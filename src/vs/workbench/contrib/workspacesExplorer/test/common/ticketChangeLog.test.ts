@@ -8,7 +8,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import {
 	computeTicketLineDiff, diffTicketFieldMaps, extractTicketFields, ITicketChangeRecord, normalizeTicketFieldValue, parseTicketChangeRecords,
 	planTicketFieldChange, renderTicketChangeEntry, replaceWorklogMdSummaryBlock, sanitizeTicketMedia, stripTicketUiState, summarizeTicketListChange,
-	TICKET_CHANGE_DIFF_MAX_LINES, TicketChangeCoalescer, ticketChangeRecordMatchesField, ticketFieldSourceOf,
+	TICKET_CHANGE_DIFF_MAX_LINES, TicketChangeCoalescer, hasDiscreteTicketFieldChange, ticketChangeRecordMatchesField, ticketFieldSourceOf,
 	ticketFieldValuesEqual, ticketTextStats, toTicketChangeActor
 } from '../../common/ticketChangeLog.js';
 import {
@@ -276,16 +276,16 @@ suite('ticketChangeLog', () => {
 		const c = new TicketChangeCoalescer(1000, 5000);
 		const user = { kind: 'User' as const };
 		assert.strictEqual(c.mergeTarget('t', user, 0), undefined);
-		c.start('t', { filename: 'f.log', timestamp: 'ts' }, user, [{ field: 'status', label: 'Status', source: 'ticket.md', oldValue: 'Todo', newValue: 'Doing' }], 0);
+		c.start('t', { filename: 'f.log', timestamp: 'ts' }, user, [{ field: 'title', label: 'Title', source: 'README.md', oldValue: 'A', newValue: 'B' }], 0);
 		const target = c.mergeTarget('t', user, 500)!;
 		assert.ok(target);
 		TicketChangeCoalescer.merge(target, [
-			{ field: 'status', label: 'Status', source: 'ticket.md', oldValue: 'Doing', newValue: 'Done' },
-			{ field: 'priority', label: 'Priority', source: 'ticket.md', oldValue: 'Low', newValue: 'High' }
+			{ field: 'title', label: 'Title', source: 'README.md', oldValue: 'B', newValue: 'C' },
+			{ field: 'custom:Notes', label: 'Notes', source: 'ticket.md', oldValue: 'x', newValue: 'y' }
 		], 500);
-		assert.deepStrictEqual([...target.fields.values()].map(f => [f.field, f.oldValue, f.newValue]), [['status', 'Todo', 'Done'], ['priority', 'Low', 'High']]);
-		TicketChangeCoalescer.merge(target, [{ field: 'priority', label: 'Priority', source: 'ticket.md', oldValue: 'High', newValue: 'Low' }], 900);
-		assert.deepStrictEqual([...target.fields.keys()], ['status']);
+		assert.deepStrictEqual([...target.fields.values()].map(f => [f.field, f.oldValue, f.newValue]), [['title', 'A', 'C'], ['custom:Notes', 'x', 'y']]);
+		TicketChangeCoalescer.merge(target, [{ field: 'custom:Notes', label: 'Notes', source: 'ticket.md', oldValue: 'y', newValue: 'x' }], 900);
+		assert.deepStrictEqual([...target.fields.keys()], ['title']);
 		assert.strictEqual(c.mergeTarget('t', { kind: 'AI Agent' }, 950), undefined, 'other actor');
 		c.start('t', { filename: 'g.log', timestamp: 'ts' }, user, [], 1000);
 		assert.strictEqual(c.mergeTarget('t', user, 2500), undefined, 'window expired');
@@ -298,6 +298,33 @@ suite('ticketChangeLog', () => {
 		c.start('t', { filename: 'i.log', timestamp: 'ts' }, user, [], 0);
 		c.invalidate('t');
 		assert.strictEqual(c.mergeTarget('t', user, 1), undefined);
+	});
+
+	test('coalescer: Status / Priority changes are discrete events, never coalesced (UI-19)', () => {
+		const c = new TicketChangeCoalescer(1000, 5000);
+		const user = { kind: 'User' as const };
+		const status = (oldValue: string, newValue: string) => ({ field: 'status', label: 'Status', source: 'ticket.md' as const, oldValue, newValue });
+		const title = { field: 'title', label: 'Title', source: 'README.md' as const, oldValue: 'A', newValue: 'B' };
+		assert.ok(hasDiscreteTicketFieldChange([status('Todo', 'Doing')]));
+		assert.ok(hasDiscreteTicketFieldChange([title, { ...title, field: 'priority' }]));
+		assert.ok(!hasDiscreteTicketFieldChange([title, { ...title, field: 'labels' }]));
+
+		// an entry with a status change is final
+		c.start('t', { filename: 'f.log', timestamp: 'ts' }, user, [status('Todo', 'Doing')], 0);
+		assert.strictEqual(c.mergeTarget('t', user, 100, [status('Doing', 'Removed')]), undefined);
+		assert.strictEqual(c.mergeTarget('t', user, 100, [title]), undefined);
+
+		// a status change never merges into a coalescing entry, and ends it
+		c.start('t', { filename: 'g.log', timestamp: 'ts' }, user, [title], 200);
+		assert.strictEqual(c.mergeTarget('t', user, 300, [status('Doing', 'Done')]), undefined);
+		assert.strictEqual(c.mergeTarget('t', user, 300, [title]), undefined);
+
+		// a status round trip in a merged entry is kept (defensive: mergeTarget never hands one out)
+		c.start('t', { filename: 'h.log', timestamp: 'ts' }, user, [title], 400);
+		const target = c.mergeTarget('t', user, 500, [title])!;
+		TicketChangeCoalescer.merge(target, [status('Todo', 'Done')], 500);
+		TicketChangeCoalescer.merge(target, [status('Done', 'Todo')], 600);
+		assert.deepStrictEqual([...target.fields.values()].map(f => [f.field, f.oldValue, f.newValue]), [['title', 'A', 'B'], ['status', 'Todo', 'Todo']]);
 	});
 
 	test('field store naming', () => {

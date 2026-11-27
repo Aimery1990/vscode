@@ -1119,9 +1119,21 @@ export interface ITicketChangeEntryState {
 }
 
 /**
+ * Fields whose every change is a discrete event (UI-19): a change set that touches one of them is never merged into an
+ * earlier entry and its entry is never merged into, so each Status / Priority change keeps its own record (e.g.
+ * In Progress → Removed is not hidden in a coalesced Todo → Removed, which restoring a ticket relies on).
+ */
+export const TICKET_CHANGE_DISCRETE_FIELDS: ReadonlySet<string> = new Set(['status', 'priority']);
+
+/** Whether a change set touches a {@link TICKET_CHANGE_DISCRETE_FIELDS discrete field} (it must not be coalesced). */
+export function hasDiscreteTicketFieldChange(changes: readonly { readonly field: string }[]): boolean {
+	return changes.some(c => TICKET_CHANGE_DISCRETE_FIELDS.has(c.field));
+}
+
+/**
  * In-memory state of the latest change entry per ticket, so consecutive saves of the same actor update one entry.
  * Any other entry written to the ticket's work log, a different actor, an expired window or an app restart starts a
- * new entry.
+ * new entry. So does a change set that touches a discrete field (Status, Priority): it gets an entry of its own.
  */
 export class TicketChangeCoalescer {
 	private readonly _entries = new Map<string, ITicketChangeEntryState>();
@@ -1131,10 +1143,14 @@ export class TicketChangeCoalescer {
 		private readonly maxAgeMs = TICKET_CHANGE_COALESCE_MAX_AGE_MS
 	) { }
 
-	/** The entry the next change set of `actor` at `now` can be merged into, if any. */
-	mergeTarget(ticketKey: string, actor: ITicketChangeActor, now: number): ITicketChangeEntryState | undefined {
+	/** The entry the next change set (`changes`) of `actor` at `now` can be merged into, if any. */
+	mergeTarget(ticketKey: string, actor: ITicketChangeActor, now: number, changes: readonly { readonly field: string }[] = []): ITicketChangeEntryState | undefined {
 		const e = this._entries.get(ticketKey);
 		if (!e) {
+			return undefined;
+		}
+		if (hasDiscreteTicketFieldChange(changes)) {
+			this._entries.delete(ticketKey);
 			return undefined;
 		}
 		if (!sameTicketChangeActor(e.actor, actor) || now - e.lastAt > this.windowMs || now - e.startedAt > this.maxAgeMs || now < e.lastAt) {
@@ -1150,11 +1166,16 @@ export class TicketChangeCoalescer {
 			fields.set(c.field, { field: c.field, label: c.label, source: c.source, oldValue: c.oldValue, newValue: c.newValue, at: now });
 		}
 		const state: ITicketChangeEntryState = { filename: entry.filename, timestamp: entry.timestamp, actor, startedAt: now, lastAt: now, fields };
-		this._entries.set(ticketKey, state);
+		if (hasDiscreteTicketFieldChange(changes)) {
+			// an entry holding a Status / Priority change is final: the next change set starts a new entry
+			this._entries.delete(ticketKey);
+		} else {
+			this._entries.set(ticketKey, state);
+		}
 		return state;
 	}
 
-	/** Merges changes into the entry: the first old value is kept, the latest new value wins, reverted fields drop out. */
+	/** Merges changes into the entry: the first old value is kept, the latest new value wins, reverted fields drop out (except discrete fields). */
 	static merge(state: ITicketChangeEntryState, changes: readonly ITicketFieldChange[], now: number): void {
 		for (const c of changes) {
 			const existing = state.fields.get(c.field);
@@ -1165,7 +1186,8 @@ export class TicketChangeCoalescer {
 			existing.newValue = c.newValue;
 			existing.label = c.label;
 			existing.at = now;
-			if (ticketFieldValuesEqual(c.field, existing.oldValue, existing.newValue)) {
+			// a discrete field round trip (never merged by mergeTarget anyway) is history, not a no-op
+			if (!TICKET_CHANGE_DISCRETE_FIELDS.has(c.field) && ticketFieldValuesEqual(c.field, existing.oldValue, existing.newValue)) {
 				state.fields.delete(c.field);
 			}
 		}

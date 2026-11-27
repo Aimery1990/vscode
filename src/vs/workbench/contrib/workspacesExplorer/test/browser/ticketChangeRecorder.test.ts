@@ -14,6 +14,7 @@ import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { parseTicketChangeRecords, ticketChangeCoalescer } from '../../common/ticketChangeLog.js';
 import { readTicketFieldVersion, writeTicketFile, writeTicketFiles } from '../../browser/ticketChangeRecorder.js';
 import { TicketWorklogStorage } from '../../browser/ticketWorklogStorage.js';
+import { ITicketRestoreLifecycle, resolveRestoreStatus } from '../../common/ticketRestore.js';
 
 const TICKET_MD = '# T-1\n\n## Overview\n\n- **Workspace ID**: WS-0000\n- **Ticket ID**: WS-0001\n\n### Self Defined Data (If any)\n- **Self Defined Data Value**:\n  - **Notes**: hello\n\n- **Status**: Todo\n- **Priority**: Medium\n';
 const README_MD = '# T-1\n\n- **Title**: First\n- **Description**: None\n- **Parent Path**: .\n';
@@ -73,24 +74,24 @@ suite('ticketChangeRecorder', () => {
 	});
 
 	test('consecutive saves of the same actor coalesce into one entry; another entry or actor starts a new one', async () => {
-		await writeTicketFile(fileService, ticketMd, TICKET_MD.replace('Todo', 'Doing'), 'User');
+		await writeTicketFile(fileService, readmeMd, README_MD.replace('First', 'Second'), 'User');
 		await writeTicketFiles(fileService, [
-			{ uri: ticketMd, content: TICKET_MD.replace('Todo', 'Done') },
-			{ uri: readmeMd, content: README_MD.replace('First', 'Second') }
+			{ uri: ticketMd, content: TICKET_MD.replace('hello', 'world') },
+			{ uri: readmeMd, content: README_MD.replace('First', 'Third') }
 		], 'User');
 		let files = await logFiles();
 		assert.strictEqual(files.length, 1);
 		let records = parseTicketChangeRecords(await readLog(files[0]));
-		assert.deepStrictEqual(records.map(r => [r.field, r.old, r.new]).sort(), [['status', 'Todo', 'Done'], ['title', 'First', 'Second']]);
+		assert.deepStrictEqual(records.map(r => [r.field, r.old, r.new]).sort(), [['custom:Notes', 'hello', 'world'], ['title', 'First', 'Third']]);
 
-		// reverting the title drops it from the entry
-		await writeTicketFile(fileService, readmeMd, README_MD, 'User');
+		// reverting the notes drops them from the entry
+		await writeTicketFile(fileService, ticketMd, TICKET_MD, 'User');
 		records = parseTicketChangeRecords(await readLog(files[0]));
-		assert.deepStrictEqual(records.map(r => r.field), ['status']);
+		assert.deepStrictEqual(records.map(r => r.field), ['title']);
 
 		// a narrative entry ends the coalescing
 		await new TicketWorklogStorage(fileService).saveWorklog(agents, { user_request: 'x', update_summary: 'narrative', update_by: 'AI Agent' }, { customDate: new Date(Date.now() + 2000) });
-		await writeTicketFile(fileService, ticketMd, TICKET_MD.replace('Medium', 'High'), 'User');
+		await writeTicketFile(fileService, readmeMd, README_MD.replace('First', 'Fourth'), 'User');
 		files = await logFiles();
 		assert.strictEqual(files.length, 3);
 
@@ -98,17 +99,48 @@ suite('ticketChangeRecorder', () => {
 		await writeTicketFile(fileService, ticketMd, TICKET_MD.replace('Medium', 'Low'), { kind: 'Workflow', name: 'Daily' });
 		files = await logFiles();
 		assert.strictEqual(files.length, 4);
-		const wf = files.map(async f => readLog(f));
-		const logs = await Promise.all(wf);
+		const logs = await Promise.all(files.map(async f => readLog(f)));
 		const workflowLog = logs.find(l => l.includes('update_by: Workflow'))!;
 		assert.ok(workflowLog.includes('actor_name: Daily'));
-		assert.deepStrictEqual(parseTicketChangeRecords(workflowLog).map(r => [r.field, r.old, r.new, r.actorName]), [['priority', 'High', 'Low', 'Daily']]);
+		assert.deepStrictEqual(parseTicketChangeRecords(workflowLog).map(r => [r.field, r.old, r.new, r.actorName]), [['priority', 'Medium', 'Low', 'Daily']]);
+	});
+
+	test('Status / Priority changes are never coalesced, so restore finds the status before removal (UI-19)', async () => {
+		const withStatus = (status: string) => TICKET_MD.replace('- **Status**: Todo', `- **Status**: ${status}`);
+		await writeTicketFile(fileService, ticketMd, withStatus('In Progress'), 'User');
+		await writeTicketFile(fileService, ticketMd, withStatus('Removed'), 'User');
+		let files = await logFiles();
+		assert.strictEqual(files.length, 2);
+		const all = async () => (await Promise.all((await logFiles()).map(async f => parseTicketChangeRecords(await readLog(f))))).flat();
+		assert.deepStrictEqual((await all()).map(r => [r.old, r.new]).sort(), [['In Progress', 'Removed'], ['Todo', 'In Progress']]);
+
+		const lifecycle: ITicketRestoreLifecycle = {
+			options: [{ status: 'Todo', category: 'Todo' }, { status: 'In Progress', category: 'In Progress' }, { status: 'Done', category: 'Done' }, { status: 'Removed', category: 'Removed' }],
+			isRemoved: s => s.toLowerCase() === 'removed',
+			fallbackInitialStatus: 'Todo'
+		};
+		const decision = resolveRestoreStatus(await all(), lifecycle);
+		assert.strictEqual(decision.status, 'In Progress');
+		assert.strictEqual(decision.source, 'history');
+
+		// a status round trip keeps both entries; a later title edit does not merge into a status entry
+		await writeTicketFile(fileService, ticketMd, withStatus('In Progress'), 'User');
+		await writeTicketFiles(fileService, [
+			{ uri: ticketMd, content: withStatus('Removed').replace('hello', 'world') },
+			{ uri: readmeMd, content: README_MD.replace('First', 'Second') }
+		], 'User');
+		await writeTicketFile(fileService, readmeMd, README_MD.replace('First', 'Third'), 'User');
+		files = await logFiles();
+		assert.strictEqual(files.length, 5);
+		const statusChanges = (await all()).filter(r => r.field === 'status').map(r => `${r.old}->${r.new}`).sort();
+		assert.deepStrictEqual(statusChanges, ['In Progress->Removed', 'In Progress->Removed', 'Removed->In Progress', 'Todo->In Progress']);
+		assert.strictEqual(resolveRestoreStatus(await all(), lifecycle).status, 'In Progress');
 	});
 
 	test('a change set fully reverted within the window removes the entry', async () => {
-		await writeTicketFile(fileService, ticketMd, TICKET_MD.replace('Todo', 'Done'), 'User');
+		await writeTicketFile(fileService, readmeMd, README_MD.replace('First', 'Second'), 'User');
 		assert.strictEqual((await logFiles()).length, 1);
-		await writeTicketFile(fileService, ticketMd, TICKET_MD, 'User');
+		await writeTicketFile(fileService, readmeMd, README_MD, 'User');
 		assert.deepStrictEqual(await logFiles(), []);
 		const worklogMd = (await fileService.readFile(URI.joinPath(agents, 'worklog.md'))).value.toString();
 		assert.ok(!worklogMd.includes('Log File'));
