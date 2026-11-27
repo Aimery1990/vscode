@@ -14,6 +14,32 @@ import { ICustomField, IEntityPersistenceService, generateSmartPythonVarName, no
 import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
 import { ITicketCreateOptions, ITicketGetResult, ITicketRunResult, ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
+import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
+import { Sequencer } from '../../../../base/common/async.js';
+import { IDisposable } from '../../../../base/common/lifecycle.js';
+import { SUB_WORKFLOW_TICKET_TYPE, isSubWorkflowTicketType } from '../../customModules/common/freestyleTicket.js';
+import {
+	SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY,
+	SUB_WORKFLOW_TICKET_INDEX_STORAGE_KEY,
+	applySubWorkflowMetadataToTicketMd,
+	buildSubWorkflowLookup,
+	buildSubWorkflowTicketDescription,
+	buildSubWorkflowTicketIndex,
+	buildSubWorkflowTicketMetadata,
+	getSubWorkflowDefinitionUri,
+	getSubWorkflowSourceFolder,
+	getUncoveredLegacySubWorkflows,
+	isLegacySubWorkflowId,
+	parseLegacySubWorkflowLibrary,
+	parseMigratedLegacyIds,
+	parseSubWorkflowDefinition,
+	parseSubWorkflowTicketIndex,
+	planSubWorkflowMigration,
+	serializeSubWorkflowDefinition,
+	stripHeavyMediaFromSubWorkflow,
+	toMigratedSubWorkflowDefinition
+} from '../common/subWorkflowTicket.js';
 import {
 	ISubWorkflowDefinition,
 	SUB_WORKFLOWS_STORAGE_KEY,
@@ -953,7 +979,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		};
 	}
 	private _subWorkflowsCache: ISubWorkflowDefinition[] | null = null;
+	/** By ticket ID and, for migrated Sub-Workflows, by legacy subwf_... id (see buildSubWorkflowLookup). */
 	private _subWorkflowByIdCache = new Map<string, ISubWorkflowDefinition>();
+	private _subWorkflowsReady: Promise<void> | undefined;
+	/** Serializes Sub-Workflow ticket loading, migration and creation (ticket numbering is not atomic). */
+	private readonly _subWorkflowTicketSequencer = new Sequencer();
+	private readonly _subWorkflowTicketWrites = new Map<string, Promise<void>>();
+	private readonly _lastWrittenSubWorkflowJson = new Map<string, string>();
+	private readonly _lastWrittenSubWorkflowMeta = new Map<string, string>();
+	private _subWorkflowDiscoveryTimer: ReturnType<typeof setTimeout> | undefined;
+	private _subWorkflowSnapshotListener: IDisposable | undefined;
 	private _subWorkflowsByNodeIdCache = new Map<string, ISubWorkflowDefinition[]>();
 
 	private readonly _runs = new Map<string, IWorkflowExecutionRun>();
@@ -999,7 +1034,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		@INotificationService private readonly notificationService: INotificationService,
 		@ITicketWorkflowRuntimeService private readonly ticketRuntimeService: ITicketWorkflowRuntimeService,
 		@ITerminalService private readonly terminalService: ITerminalService,
-		@IStorageService private readonly storageService: IStorageService
+		@IStorageService private readonly storageService: IStorageService,
+		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
+		@IPathService private readonly pathService: IPathService
 	) {
 		this._cleanupStaleKernelDirsOnStartup().catch(() => { });
 	}
@@ -1065,7 +1102,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	): Promise<IWorkflowExecutionRun> {
 		// Always refresh Sub-Workflow nodes/links from the live source workflow_flowchart.json if available,
 		// so any edits the user saved on the canvas (e.g. changing Output variable names) ALWAYS take effect immediately
-		// instead of running a stale snapshot from subWorkflows.library!
+		// instead of running a stale snapshot of the Sub-Workflow ticket definition
 		let liveNodes: IFlowchartNode[] = JSON.parse(JSON.stringify(subDef.nodes || []));
 		let liveLinks: IFlowchartLink[] = JSON.parse(JSON.stringify(subDef.links || []));
 		if (subDef.sourceWorkflowUri && Array.isArray(subDef.nodeIds) && subDef.nodeIds.length > 0) {
@@ -1086,7 +1123,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								sourceFlowchart.links.filter(l => l && subIdSet.has(l.from) && subIdSet.has(l.to))
 							));
 						}
-						// Keep subWorkflows.library in sync with the live source canvas
+						// Keep the Sub-Workflow ticket definition in sync with the live source canvas
 						this.saveSubWorkflow({
 							...subDef,
 							nodes: liveNodes,
@@ -1308,18 +1345,26 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return undefined;
 		}
 		this._ensureLatestSubWorkflowRunsLoaded();
-		return this._latestSubWorkflowRuns.get(subWorkflowId);
+		const direct = this._latestSubWorkflowRuns.get(subWorkflowId);
+		if (direct) {
+			return direct;
+		}
+		// A migrated Sub-Workflow: its runs may be stored under the ticket ID or under its legacy subwf_... id
+		const def = this.getSubWorkflowById(subWorkflowId);
+		if (!def) {
+			return undefined;
+		}
+		return this._latestSubWorkflowRuns.get(def.id) || (def.legacyId ? this._latestSubWorkflowRuns.get(def.legacyId) : undefined);
 	}
 
 	private _rebuildSubWorkflowIndexes(list: ISubWorkflowDefinition[]): void {
 		this._subWorkflowsCache = list;
-		this._subWorkflowByIdCache.clear();
+		this._subWorkflowByIdCache = buildSubWorkflowLookup(list);
 		this._subWorkflowsByNodeIdCache.clear();
 		for (const sw of list) {
 			if (!sw || !sw.id) {
 				continue;
 			}
-			this._subWorkflowByIdCache.set(sw.id, sw);
 			if (Array.isArray(sw.nodeIds)) {
 				for (const nid of sw.nodeIds) {
 					if (!nid) { continue; }
@@ -1334,32 +1379,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _stripHeavyMediaFromSubWorkflow(def: ISubWorkflowDefinition): { cleaned: ISubWorkflowDefinition; changed: boolean } {
-		let changed = false;
-		const cloned: ISubWorkflowDefinition = JSON.parse(JSON.stringify(def));
-		if (Array.isArray(cloned.nodes)) {
-			for (const n of cloned.nodes as IFlowchartNode[]) {
-				if (!Array.isArray(n?.pipeline)) { continue; }
-				for (const st of n.pipeline) {
-					const comp = st?.component;
-					if (!comp) { continue; }
-					// voice_note is commentary-only and skipped during execution; never duplicate multi-MB base64 audio in Sub-Workflow storage
-					if (Array.isArray(comp.voiceClips)) {
-						for (const clip of comp.voiceClips) {
-							if (clip && typeof clip.audioDataUrl === 'string' && clip.audioDataUrl.length > 0) {
-								Reflect.deleteProperty(clip, 'audioDataUrl');
-								changed = true;
-							}
-						}
-					}
-				}
-			}
-		}
-		return { cleaned: cloned, changed };
-	}
-
 	public getActiveSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined {
-		const activeRunId = this._activeSubWorkflowRunIds.get(subWorkflowId);
+		const runKey = this.getSubWorkflowById(subWorkflowId)?.id || subWorkflowId;
+		const activeRunId = this._activeSubWorkflowRunIds.get(runKey);
 		const live = activeRunId ? this._runs.get(activeRunId) : undefined;
 		return live || this.getLatestSubWorkflowRun(subWorkflowId);
 	}
@@ -1403,34 +1425,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (this._subWorkflowsCache !== null) {
 			return this._subWorkflowsCache;
 		}
-		try {
-			const raw = this.storageService.get(SUB_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE);
-			if (!raw) {
-				this._rebuildSubWorkflowIndexes([]);
-				return this._subWorkflowsCache!;
-			}
-			const parsed = JSON.parse(raw);
-			const list: ISubWorkflowDefinition[] = Array.isArray(parsed) ? parsed : [];
-			// One-time auto-slim: strip any previously stored multi-MB base64 voice audio from Sub-Workflow definitions
-			let anyCleaned = false;
-			const cleanedList = list.map(sw => {
-				const res = this._stripHeavyMediaFromSubWorkflow(sw);
-				if (res.changed) {
-					anyCleaned = true;
-				}
-				return res.cleaned;
-			});
-			this._rebuildSubWorkflowIndexes(cleanedList);
-			if (anyCleaned) {
-				try {
-					this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(cleanedList), StorageScope.PROFILE, StorageTarget.USER);
-				} catch { }
-			}
-			return this._subWorkflowsCache!;
-		} catch {
-			this._rebuildSubWorkflowIndexes([]);
-			return this._subWorkflowsCache!;
-		}
+		// Until the Sub-Workflow tickets are loaded, serve the legacy profile-storage library so nothing disappears
+		this._rebuildSubWorkflowIndexes(this._readLegacySubWorkflowLibrary());
+		this._ensureSubWorkflowTicketsLoading();
+		return this._subWorkflowsCache!;
 	}
 
 	public getSubWorkflowById(id: string): ISubWorkflowDefinition | undefined {
@@ -1443,29 +1441,406 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return this._subWorkflowByIdCache.get(id);
 	}
 
+	public whenSubWorkflowsReady(): Promise<void> {
+		return this._ensureSubWorkflowTicketsLoading();
+	}
+
+	public async resolveSubWorkflow(reference: string, contextUri?: string): Promise<ISubWorkflowDefinition | undefined> {
+		const ref = (reference || '').trim();
+		if (!ref) {
+			return undefined;
+		}
+		await this.whenSubWorkflowsReady();
+		const known = this.getSubWorkflowById(ref);
+		if (known || isLegacySubWorkflowId(ref)) {
+			return known;
+		}
+		// Not loaded yet (e.g. a Sub-Workflow ticket of another workspace): look the ticket up on disk by its ID
+		try {
+			const ticket = await this.ticketRuntimeService.getTicket(contextUri || '', ref);
+			if (!ticket.success || !ticket.entityUri || !isSubWorkflowTicketType(ticket.ticketType)) {
+				return undefined;
+			}
+			const def = await this._readSubWorkflowTicket(URI.parse(ticket.entityUri), ticket.ticketId || ref);
+			if (def) {
+				this._upsertSubWorkflowTicket(def);
+			}
+			return def;
+		} catch (err) {
+			this.logService.warn(`[WorkflowExecution] Could not look up Sub-Workflow ticket '${ref}':`, err);
+			return undefined;
+		}
+	}
+
+	public async createSubWorkflowTicket(draft: ISubWorkflowDefinition): Promise<ISubWorkflowDefinition> {
+		await this.whenSubWorkflowsReady();
+		const def = await this._subWorkflowTicketSequencer.queue(() => this._createSubWorkflowTicketNow(draft, false));
+		this._upsertSubWorkflowTicket(def);
+		return def;
+	}
+
 	public saveSubWorkflow(def: ISubWorkflowDefinition): void {
-		const { cleaned } = this._stripHeavyMediaFromSubWorkflow(def);
+		const { cleaned } = stripHeavyMediaFromSubWorkflow(def);
 		const list = [...this.getSubWorkflows()];
 		const idx = list.findIndex(s => s.id === cleaned.id);
 		if (idx >= 0) {
+			// Keep where the ticket lives even when the caller passes a copy without the runtime-only folder
+			cleaned.ticketFolderUri = cleaned.ticketFolderUri || list[idx].ticketFolderUri;
+			cleaned.legacyId = cleaned.legacyId || list[idx].legacyId;
+			if (!cleaned.legacyId) {
+				delete cleaned.legacyId;
+			}
 			list[idx] = cleaned;
 		} else {
 			list.unshift(cleaned);
 		}
 		this._rebuildSubWorkflowIndexes(list);
-		try {
-			this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(list), StorageScope.PROFILE, StorageTarget.USER);
-		} catch { }
+		if (cleaned.ticketFolderUri) {
+			// The source canvas stays the source of truth: every refresh is written back to the ticket file
+			this._queueSubWorkflowTicketWrite(cleaned);
+		} else {
+			this._storeLegacySubWorkflow(cleaned);
+		}
 		this._onDidChangeSubWorkflows.fire();
 	}
 
 	public deleteSubWorkflow(id: string): void {
-		const list = this.getSubWorkflows().filter(s => s.id !== id);
+		const def = this.getSubWorkflowById(id);
+		if (!def) {
+			return;
+		}
+		const list = this.getSubWorkflows().filter(s => s !== def);
 		this._rebuildSubWorkflowIndexes(list);
+		if (def.ticketFolderUri) {
+			this._storeSubWorkflowTicketIndex();
+			if (def.legacyId) {
+				// Deleted by the user: its legacy backup entry goes too, so it is neither migrated again nor used as a fallback
+				this._removeLegacySubWorkflow(def.legacyId);
+			}
+			const folderUri = URI.parse(def.ticketFolderUri);
+			this._lastWrittenSubWorkflowJson.delete(def.id);
+			this.fileService.del(folderUri, { recursive: true, useTrash: true })
+				.then(() => this.entityPersistenceService.removeSnapshot(folderUri))
+				.catch(err => {
+					this.logService.error(`[WorkflowExecution] Failed to move Sub-Workflow ticket '${def.id}' to the trash:`, err);
+					this.notificationService.error(`Could not delete Sub-Workflow ticket '${def.id}': ${err instanceof Error ? err.message : String(err)}`);
+				});
+		} else {
+			this._removeLegacySubWorkflow(def.id);
+		}
+		this._onDidChangeSubWorkflows.fire();
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Sub-Workflow tickets (CI-23): storage on disk, ticket index, one-time migration of legacy definitions
+	// ---------------------------------------------------------------------------------------------
+
+	private _ensureSubWorkflowTicketsLoading(): Promise<void> {
+		if (!this._subWorkflowsReady) {
+			this._subWorkflowsReady = this._subWorkflowTicketSequencer.queue(() => this._loadSubWorkflowTickets())
+				.catch(err => this.logService.error('[WorkflowExecution] Failed to load Sub-Workflow tickets:', err));
+			this._subWorkflowSnapshotListener ??= this.entityPersistenceService.onDidChangeSnapshots(() => this._scheduleSubWorkflowSnapshotDiscovery());
+		}
+		return this._subWorkflowsReady;
+	}
+
+	private _readLegacySubWorkflowLibrary(): ISubWorkflowDefinition[] {
+		let raw: string | undefined;
 		try {
+			raw = this.storageService.get(SUB_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE);
+		} catch {
+			raw = undefined;
+		}
+		return parseLegacySubWorkflowLibrary(raw).map(def => stripHeavyMediaFromSubWorkflow(def).cleaned);
+	}
+
+	/** Writes one legacy (not migrated) definition back into the profile-storage library, keeping every other entry. */
+	private _storeLegacySubWorkflow(def: ISubWorkflowDefinition): void {
+		try {
+			const parsed: unknown = JSON.parse(this.storageService.get(SUB_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE) || '[]');
+			const list: unknown[] = Array.isArray(parsed) ? parsed : [];
+			const idx = list.findIndex(item => !!item && typeof item === 'object' && (item as { id?: unknown }).id === def.id);
+			const stored: ISubWorkflowDefinition = JSON.parse(JSON.stringify(def));
+			delete stored.ticketFolderUri;
+			if (idx >= 0) {
+				list[idx] = stored;
+			} else {
+				list.unshift(stored);
+			}
 			this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(list), StorageScope.PROFILE, StorageTarget.USER);
 		} catch { }
+	}
+
+	private _removeLegacySubWorkflow(id: string): void {
+		try {
+			const parsed: unknown = JSON.parse(this.storageService.get(SUB_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE) || '[]');
+			const list: unknown[] = Array.isArray(parsed) ? parsed : [];
+			const next = list.filter(item => !(item && typeof item === 'object' && (item as { id?: unknown }).id === id));
+			this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(next), StorageScope.PROFILE, StorageTarget.USER);
+		} catch { }
+	}
+
+	private _markLegacySubWorkflowsMigrated(legacyIds: string[]): void {
+		const migrated = parseMigratedLegacyIds(this.storageService.get(SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY, StorageScope.PROFILE));
+		for (const id of legacyIds) {
+			migrated.add(id);
+		}
+		this.storageService.store(SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY, JSON.stringify(Array.from(migrated)), StorageScope.PROFILE, StorageTarget.MACHINE);
+	}
+
+	private _storeSubWorkflowTicketIndex(): void {
+		try {
+			const index = buildSubWorkflowTicketIndex(this._subWorkflowsCache || []);
+			this.storageService.store(SUB_WORKFLOW_TICKET_INDEX_STORAGE_KEY, JSON.stringify(index), StorageScope.PROFILE, StorageTarget.MACHINE);
+		} catch { }
+	}
+
+	/** Reads a Sub-Workflow ticket's definition file; `undefined` when the folder has none or it is unreadable. */
+	private async _readSubWorkflowTicket(folderUri: URI, fallbackId: string): Promise<ISubWorkflowDefinition | undefined> {
+		const fileUri = getSubWorkflowDefinitionUri(folderUri);
+		try {
+			if (!await this.fileService.exists(fileUri)) {
+				return undefined;
+			}
+			const text = (await this.fileService.readFile(fileUri)).value.toString();
+			const def = parseSubWorkflowDefinition(text, fallbackId);
+			if (!def) {
+				this.logService.warn(`[WorkflowExecution] Ignoring invalid Sub-Workflow definition ${fileUri.toString()}`);
+				return undefined;
+			}
+			def.ticketFolderUri = folderUri.toString();
+			this._lastWrittenSubWorkflowJson.set(def.id, serializeSubWorkflowDefinition(def));
+			return def;
+		} catch (err) {
+			this.logService.warn(`[WorkflowExecution] Could not read Sub-Workflow definition ${fileUri.toString()}:`, err);
+			return undefined;
+		}
+	}
+
+	private async _loadSubWorkflowTickets(): Promise<void> {
+		const ticketDefs: ISubWorkflowDefinition[] = [];
+		const seenFolders = new Set<string>();
+		const addTicketDef = (def: ISubWorkflowDefinition | undefined) => {
+			if (def && def.ticketFolderUri && !seenFolders.has(def.ticketFolderUri) && !ticketDefs.some(d => d.id === def.id)) {
+				seenFolders.add(def.ticketFolderUri);
+				ticketDefs.push(def);
+			}
+		};
+
+		// 1. Known Sub-Workflow tickets (index), then any sub_workflow ticket the explorer already knows
+		const index = parseSubWorkflowTicketIndex(this.storageService.get(SUB_WORKFLOW_TICKET_INDEX_STORAGE_KEY, StorageScope.PROFILE));
+		for (const entry of index) {
+			addTicketDef(await this._readSubWorkflowTicket(URI.parse(entry.folderUri), entry.id));
+		}
+		for (const snap of this.entityPersistenceService.getAllSnapshots()) {
+			if (isSubWorkflowTicketType(snap.entityType) && snap.entityUri && !seenFolders.has(snap.entityUri)) {
+				addTicketDef(await this._readSubWorkflowTicket(URI.parse(snap.entityUri), snap.ticketId || snap.entityName));
+			}
+		}
+
+		// 2. One-time migration of the legacy profile-storage library (the stored data is kept as a backup)
+		const legacyDefs = this._readLegacySubWorkflowLibrary();
+		const migratedIds = parseMigratedLegacyIds(this.storageService.get(SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY, StorageScope.PROFILE));
+		const plan = planSubWorkflowMigration(legacyDefs, ticketDefs, migratedIds);
+		for (const legacy of plan) {
+			try {
+				const migrated = await this._createSubWorkflowTicketNow(legacy, true);
+				addTicketDef(migrated);
+				this._markLegacySubWorkflowsMigrated([legacy.id]);
+				this.logService.info(`[WorkflowExecution] Migrated Sub-Workflow '${legacy.name}' (${legacy.id}) to ticket ${migrated.id} at ${migrated.ticketFolderUri}`);
+			} catch (err) {
+				// Stays usable from the legacy library (below); the migration is retried on the next start
+				this.logService.error(`[WorkflowExecution] Failed to migrate Sub-Workflow '${legacy.name}' (${legacy.id}) to a ticket:`, err);
+			}
+		}
+
+		// Legacy definitions without a loaded ticket (migration failed, or the migrated ticket folder was not found)
+		// stay usable under their legacy id
+		this._rebuildSubWorkflowIndexes([...ticketDefs, ...getUncoveredLegacySubWorkflows(this._readLegacySubWorkflowLibrary(), ticketDefs)]);
+		this._storeSubWorkflowTicketIndex();
+		for (const def of ticketDefs) {
+			await this._ensureSubWorkflowTicketSnapshot(def);
+		}
 		this._onDidChangeSubWorkflows.fire();
+	}
+
+	private _scheduleSubWorkflowSnapshotDiscovery(): void {
+		if (this._subWorkflowDiscoveryTimer) {
+			return;
+		}
+		this._subWorkflowDiscoveryTimer = setTimeout(() => {
+			this._subWorkflowDiscoveryTimer = undefined;
+			this._subWorkflowTicketSequencer.queue(() => this._discoverSubWorkflowTicketsFromSnapshots())
+				.catch(err => this.logService.warn('[WorkflowExecution] Sub-Workflow ticket discovery failed:', err));
+		}, 1500);
+	}
+
+	/** Picks up sub_workflow tickets the explorer found on disk that are not loaded yet (e.g. copied or cloned in). */
+	private async _discoverSubWorkflowTicketsFromSnapshots(): Promise<void> {
+		const knownFolders = new Set((this._subWorkflowsCache || []).map(d => d.ticketFolderUri).filter((u): u is string => !!u));
+		let added = false;
+		for (const snap of this.entityPersistenceService.getAllSnapshots()) {
+			if (!isSubWorkflowTicketType(snap.entityType) || !snap.entityUri || knownFolders.has(snap.entityUri)) {
+				continue;
+			}
+			knownFolders.add(snap.entityUri);
+			const def = await this._readSubWorkflowTicket(URI.parse(snap.entityUri), snap.ticketId || snap.entityName);
+			if (def && !this._subWorkflowByIdCache.has(def.id)) {
+				this._rebuildSubWorkflowIndexes([...(this._subWorkflowsCache || []), def]);
+				added = true;
+			}
+		}
+		if (added) {
+			this._storeSubWorkflowTicketIndex();
+			this._onDidChangeSubWorkflows.fire();
+		}
+	}
+
+	private _upsertSubWorkflowTicket(def: ISubWorkflowDefinition): void {
+		const list = [...this.getSubWorkflows()];
+		const idx = list.findIndex(s => s.id === def.id || (def.legacyId !== undefined && s.id === def.legacyId));
+		if (idx >= 0) {
+			list[idx] = def;
+		} else {
+			list.unshift(def);
+		}
+		this._rebuildSubWorkflowIndexes(list);
+		this._storeSubWorkflowTicketIndex();
+		this._ensureSubWorkflowTicketSnapshot(def).catch(() => { });
+		this._onDidChangeSubWorkflows.fire();
+	}
+
+	/** The folder for Sub-Workflow tickets whose source workflow no longer exists: the global workflows directory. */
+	private async _getGlobalSubWorkflowParentFolder(): Promise<URI> {
+		const home = await this.pathService.userHome();
+		const folder = URI.joinPath(home, 'Documents', 'workflows');
+		if (!await this.fileService.exists(folder)) {
+			await this.fileService.createFolder(folder);
+		}
+		return folder;
+	}
+
+	/**
+	 * Creates the Sub-Workflow ticket for `draft` with the normal ticket numbering of its parent folder: the source
+	 * workflow folder or, for a migrated legacy definition whose workflow is gone, the global workflows directory.
+	 * Writes the definition file and returns the definition with the ticket ID as `id` (a legacy id is kept as `legacyId`).
+	 */
+	private async _createSubWorkflowTicketNow(draft: ISubWorkflowDefinition, isMigration: boolean): Promise<ISubWorkflowDefinition> {
+		let parentUri: URI | undefined;
+		const sourceFolder = getSubWorkflowSourceFolder(draft.sourceWorkflowUri);
+		if (sourceFolder) {
+			try {
+				const stat = await this.fileService.stat(sourceFolder);
+				parentUri = stat.isDirectory ? sourceFolder : undefined;
+			} catch {
+				parentUri = undefined;
+			}
+		}
+		if (!parentUri) {
+			if (!isMigration) {
+				throw new Error('The workflow folder was not found. Save the workflow first, then encapsulate the nodes again.');
+			}
+			parentUri = await this._getGlobalSubWorkflowParentFolder();
+		}
+		const legacyId = isMigration ? (draft.legacyId || draft.id) : draft.legacyId;
+		const preview: ISubWorkflowDefinition = { ...draft, legacyId };
+		const result = await this.workspacesExplorerService.createResourceUnderWorkspace({
+			type: SUB_WORKFLOW_TICKET_TYPE,
+			targetParentUri: parentUri,
+			name: '',
+			title: draft.name,
+			description: buildSubWorkflowTicketDescription(preview),
+			customMetadata: buildSubWorkflowTicketMetadata(preview),
+			allowSubWorkflow: true
+		});
+		if (result.alreadyExists) {
+			throw new Error(`A ticket folder already exists at ${result.uri.toString()}; the Sub-Workflow ticket was not created.`);
+		}
+		const folderUri = result.uri;
+		const snapshot = this.entityPersistenceService.getSnapshot(folderUri);
+		const ticketId = snapshot?.ticketId || folderUri.path.split('/').filter(Boolean).pop() || '';
+		if (!ticketId) {
+			throw new Error('The Sub-Workflow ticket was created without a ticket ID.');
+		}
+		const def: ISubWorkflowDefinition = isMigration
+			? toMigratedSubWorkflowDefinition(draft, ticketId, folderUri.toString())
+			: { ...JSON.parse(JSON.stringify(draft)), id: ticketId, ticketFolderUri: folderUri.toString() };
+		if (!def.legacyId) {
+			delete def.legacyId;
+		}
+		const text = serializeSubWorkflowDefinition(def);
+		await this.fileService.writeFile(getSubWorkflowDefinitionUri(folderUri), VSBuffer.fromString(text));
+		this._lastWrittenSubWorkflowJson.set(def.id, text);
+		this._lastWrittenSubWorkflowMeta.set(def.id, JSON.stringify(buildSubWorkflowTicketMetadata(def)));
+		return def;
+	}
+
+	/** Makes sure GET_TICKETS sees the Sub-Workflow ticket (and its inputs / outputs summary) even before the explorer scanned it. */
+	private async _ensureSubWorkflowTicketSnapshot(def: ISubWorkflowDefinition): Promise<void> {
+		if (!def.ticketFolderUri) {
+			return;
+		}
+		const meta = buildSubWorkflowTicketMetadata(def);
+		const existing = this.entityPersistenceService.getSnapshot(def.ticketFolderUri);
+		if (existing) {
+			const merged = { ...(existing.customMetadata || {}), ...meta };
+			if (JSON.stringify(merged) !== JSON.stringify(existing.customMetadata || {}) || existing.title !== def.name) {
+				await this.entityPersistenceService.saveSnapshot({ ...existing, title: def.name, customMetadata: merged });
+			}
+			return;
+		}
+		await this.entityPersistenceService.saveSnapshot({
+			entityUri: def.ticketFolderUri,
+			entityName: def.id,
+			ticketId: def.id,
+			title: def.name,
+			entityType: SUB_WORKFLOW_TICKET_TYPE,
+			status: 'Todo',
+			description: buildSubWorkflowTicketDescription(def),
+			customMetadata: meta
+		});
+	}
+
+	/** Writes a Sub-Workflow ticket's definition (and its ticket.md summary when that changed), in order per ticket. */
+	private _queueSubWorkflowTicketWrite(def: ISubWorkflowDefinition): void {
+		const snapshot: ISubWorkflowDefinition = JSON.parse(JSON.stringify(def));
+		const previous = this._subWorkflowTicketWrites.get(def.id) || Promise.resolve();
+		const next = previous.then(() => this._writeSubWorkflowTicket(snapshot)).catch(err => {
+			this.logService.error(`[WorkflowExecution] Failed to write Sub-Workflow ticket '${def.id}':`, err);
+		});
+		this._subWorkflowTicketWrites.set(def.id, next);
+		next.finally(() => {
+			if (this._subWorkflowTicketWrites.get(def.id) === next) {
+				this._subWorkflowTicketWrites.delete(def.id);
+			}
+		});
+	}
+
+	private async _writeSubWorkflowTicket(def: ISubWorkflowDefinition): Promise<void> {
+		if (!def.ticketFolderUri) {
+			return;
+		}
+		const folderUri = URI.parse(def.ticketFolderUri);
+		const text = serializeSubWorkflowDefinition(def);
+		if (this._lastWrittenSubWorkflowJson.get(def.id) !== text) {
+			await this.fileService.writeFile(getSubWorkflowDefinitionUri(folderUri), VSBuffer.fromString(text));
+			this._lastWrittenSubWorkflowJson.set(def.id, text);
+		}
+		const meta = buildSubWorkflowTicketMetadata(def);
+		const metaKey = JSON.stringify(meta);
+		if (this._lastWrittenSubWorkflowMeta.get(def.id) === metaKey) {
+			return;
+		}
+		const ticketMdUri = URI.joinPath(folderUri, '.agents', 'ticket.md');
+		if (await this.fileService.exists(ticketMdUri)) {
+			const content = (await this.fileService.readFile(ticketMdUri)).value.toString();
+			const updated = applySubWorkflowMetadataToTicketMd(content, meta);
+			if (updated !== content) {
+				await this.fileService.writeFile(ticketMdUri, VSBuffer.fromString(updated));
+			}
+		}
+		this._lastWrittenSubWorkflowMeta.set(def.id, metaKey);
+		await this._ensureSubWorkflowTicketSnapshot(def);
 	}
 
 	private async _cleanupStaleKernelDirsOnStartup(): Promise<void> {
@@ -3902,9 +4277,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					const stepStartMs = Date.now();
 					try {
 						if (isSubWorkflowStep) {
-							const subDef = this.getSubWorkflowById(stepComp.subWorkflowId || '');
+							// subWorkflowId is the Sub-Workflow ticket ID (or the legacy subwf_... id of a migrated one)
+							const subDef = await this.resolveSubWorkflow(stepComp.subWorkflowId || '', run.workflowUri);
 							if (!subDef) {
-								throw new Error(`Sub-Workflow '${stepComp.subWorkflowName || stepComp.subWorkflowId || stepComp.label}' not found in Sub-Workflow library.`);
+								throw new Error(`Sub-Workflow '${stepComp.subWorkflowName || stepComp.subWorkflowId || stepComp.label}' not found: no sub_workflow ticket with ID '${stepComp.subWorkflowId || ''}'. Find sub-workflows with GET_TICKETS(ticket_type="sub_workflow") and use the ticket ID.`);
 							}
 							const resolvedInputs: Record<string, unknown> = {};
 							for (const inpDef of (subDef.inputs || [])) {

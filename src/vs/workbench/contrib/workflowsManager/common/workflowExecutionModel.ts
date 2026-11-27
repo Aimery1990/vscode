@@ -136,8 +136,19 @@ export interface IWorkflowOutputDef {
 
 export const SUB_WORKFLOWS_STORAGE_KEY = 'anyagent.subWorkflows.library';
 
+/**
+ * A Sub-Workflow (CI-23). Since CI-23 every Sub-Workflow is a ticket of type `sub_workflow` created by encapsulating
+ * nodes; `id` is that ticket ID (e.g. `FINDJ-0042`) and the definition is stored in the ticket folder
+ * (`.agents/sub_workflow.json`). Sub-Workflows created before CI-23 had a random `subwf_...` id and lived only in profile
+ * storage (`SUB_WORKFLOWS_STORAGE_KEY`); after their one-time migration that old id is kept as `legacyId`.
+ */
 export interface ISubWorkflowDefinition {
+	/** The Sub-Workflow ticket ID (or, for a not yet migrated legacy definition, its `subwf_...` id). */
 	id: string;
+	/** The pre-ticket `subwf_...` id of a migrated Sub-Workflow; Call Sub-Workflow steps that store it still resolve. */
+	legacyId?: string;
+	/** Runtime only (never written to the definition file): the Sub-Workflow ticket folder. */
+	ticketFolderUri?: string;
 	name: string;
 	namespace?: string;
 	description?: string;

@@ -699,6 +699,7 @@ export interface ICustomField {
 	voiceAutoTranscribe?: boolean;
 	voicePlaybackRate?: number;
 	voiceRunInFlow?: boolean;
+	/** Call Sub-Workflow: the Sub-Workflow ticket ID (CI-23), or the legacy `subwf_...` id of a migrated Sub-Workflow. */
 	subWorkflowId?: string;
 	subWorkflowName?: string;
 	subWorkflowSourceUri?: string;

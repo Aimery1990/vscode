@@ -73,8 +73,22 @@ export interface IWorkflowExecutionService {
 	executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun>;
 	resolveWorkflowIOContract(data: unknown): IWorkflowIOContract;
 	getWorkflowIOContract(workflowUri: URI | string): Promise<IWorkflowIOContract>;
+	/** All known Sub-Workflows: Sub-Workflow tickets (CI-23) plus legacy definitions that could not be migrated. */
 	getSubWorkflows(): ISubWorkflowDefinition[];
+	/** By ticket ID, or by the legacy `subwf_...` id of a migrated Sub-Workflow. */
 	getSubWorkflowById(id: string): ISubWorkflowDefinition | undefined;
+	/** Resolves once the Sub-Workflow tickets are loaded (and legacy definitions migrated). Never rejects. */
+	whenSubWorkflowsReady(): Promise<void>;
+	/**
+	 * Resolves a Call Sub-Workflow reference (ticket ID or legacy id): the loaded Sub-Workflows first, then the ticket
+	 * with that ID on disk (searched from `contextUri`, e.g. the calling workflow), when it is a `sub_workflow` ticket.
+	 */
+	resolveSubWorkflow(reference: string, contextUri?: string): Promise<ISubWorkflowDefinition | undefined>;
+	/**
+	 * Encapsulation only: creates the Sub-Workflow ticket for `draft` inside its source workflow folder (normal ticket
+	 * numbering) and stores the definition in the ticket folder. Returns the definition with its ticket ID as `id`.
+	 */
+	createSubWorkflowTicket(draft: ISubWorkflowDefinition): Promise<ISubWorkflowDefinition>;
 	getLatestSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;
 	/** The currently executing run of this Sub-Workflow if any, otherwise its latest finished snapshot. */
 	getActiveSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;
