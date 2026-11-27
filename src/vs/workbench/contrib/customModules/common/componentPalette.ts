@@ -2,9 +2,9 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { CustomFieldType, IActionButton, ICompositeComponent, ICustomField } from '../../entityPersistence/common/entityPersistence.js';
+import { COMPONENT_SPECS, IComponentSpec, TEMPLATE_PALETTE_ORDER } from './componentRegistry.js';
 
 /**
  * One entry of the component toolbox ("Base Primitives"): shown by the template designer's palette and by the
@@ -23,40 +23,9 @@ export interface IComponentPaletteItem {
 	readonly createButtons?: () => IActionButton[];
 }
 
-/** The base components offered by every component toolbox, in display order. */
-export const BASE_COMPONENT_PALETTE: readonly IComponentPaletteItem[] = [
-	{ label: 'Inputs (Runtime Variables)', icon: Codicon.symbolVariable, type: 'parameters', defaultName: 'Inputs' },
-	{ label: 'AI Prompt (Model / Agent)', icon: Codicon.sparkle, type: 'prompt', defaultName: 'AI Prompt' },
-	{ label: 'Audio / TTS (Text-to-Speech)', icon: Codicon.unmute, type: 'tts', defaultName: 'TTS Audio' },
-	{ label: 'MP3 / MP4 Player', icon: Codicon.deviceCameraVideo, type: 'media_player', defaultName: 'MP3 / MP4 Player' },
-	{ label: 'Voice Note (Recorder & Transcript)', icon: Codicon.mic, type: 'voice_note', defaultName: 'Voice Note' },
-	{ label: 'Browser (Web Application)', icon: Codicon.globe, type: 'browser', defaultName: 'Browser' },
-	{ label: 'Git Repository & Branch Binding', icon: Codicon.sourceControl, type: 'git', defaultName: 'Git Repository' },
-	{ label: 'Python (Code Automation)', icon: Codicon.code, type: 'python', defaultName: 'Python Script' },
-	{ label: 'HTTP Request (API / REST Client)', icon: Codicon.cloudUpload, type: 'http_request', defaultName: 'API Request' },
-	{ label: 'Data Table (SQLite / Grid)', icon: Codicon.table, type: 'table', defaultName: 'Data Table' },
-	{ label: 'Output', icon: Codicon.output, type: 'output', defaultName: 'Output' },
-	{ label: 'Create Tickets (CREATE_TICKETS)', icon: Codicon.newFile, type: 'create_tickets', defaultName: 'created_ticket' },
-	{ label: 'Run Tickets (RUN_TICKETS)', icon: Codicon.playCircle, type: 'run_tickets', defaultName: 'run_res' },
-	{ label: 'Get Outputs (GET_OUTPUTS)', icon: Codicon.cloudDownload, type: 'get_outputs', defaultName: 'ticket_output' },
-	{ label: 'Display (DISPLAY)', icon: Codicon.eye, type: 'display', defaultName: 'Display' },
-	{ label: 'Single-line Input (Text)', icon: Codicon.symbolString, type: 'text', defaultName: 'Text Field' },
-	{ label: 'Textarea (Multiline)', icon: Codicon.listFlat, type: 'textarea', defaultName: 'Description' },
-	{ label: 'Number Input (Numeric)', icon: Codicon.symbolNumber, type: 'number', defaultName: 'Amount' },
-	{ label: 'Dropdown (Select)', icon: Codicon.chevronDown, type: 'select', defaultName: 'Select Option', defaultChoices: ['Option 1', 'Option 2', 'Option 3'] },
-	{ label: 'Checkboxes (Multiselect)', icon: Codicon.checklist, type: 'multiselect', defaultName: 'Tags', defaultChoices: ['Tag A', 'Tag B', 'Tag C'] },
-	{ label: 'Switch (Toggle)', icon: Codicon.circleFilled, type: 'switch', defaultName: 'Enabled Flag' },
-	{ label: 'Single Date Picker', icon: Codicon.calendar, type: 'date', defaultName: 'Due Date' },
-	{ label: 'Single Time Picker', icon: Codicon.watch, type: 'time', defaultName: 'Time' },
-	{ label: 'Single DateTime Picker', icon: Codicon.history, type: 'datetime', defaultName: 'Timestamp' },
-	{ label: 'Date Range (Start ~ End)', icon: Codicon.calendar, type: 'date_range', defaultName: 'Date Range' },
-	{ label: 'Time Range (Start ~ End)', icon: Codicon.watch, type: 'time_range', defaultName: 'Time Range' },
-	{ label: 'DateTime Range (Start ~ End)', icon: Codicon.history, type: 'datetime_range', defaultName: 'Duration Range' },
-	{
-		label: 'Container (Nested Subfields)',
-		icon: Codicon.layers,
-		type: 'dynamic_list',
-		defaultName: 'Container',
+/** Fresh default sub-fields / buttons of the toolbox entries that need them (new ids on every call). */
+const PALETTE_FACTORIES: Partial<Record<CustomFieldType, Pick<IComponentPaletteItem, 'createItemFields' | 'createButtons'>>> = {
+	dynamic_list: {
 		createItemFields: () => {
 			const ts = Date.now();
 			return [
@@ -65,12 +34,7 @@ export const BASE_COMPONENT_PALETTE: readonly IComponentPaletteItem[] = [
 			];
 		}
 	},
-	{ label: 'Attachment (Files)', icon: Codicon.files, type: 'attachment', defaultName: 'Attachment' },
-	{
-		label: 'Action Buttons (Horizontal)',
-		icon: Codicon.run,
-		type: 'button_group',
-		defaultName: 'Action Buttons',
+	button_group: {
 		createButtons: () => {
 			const ts = Date.now();
 			return [
@@ -79,7 +43,24 @@ export const BASE_COMPONENT_PALETTE: readonly IComponentPaletteItem[] = [
 			];
 		}
 	}
-];
+};
+
+/** The base components offered by every component toolbox, in display order (generated from the component registry). */
+export const BASE_COMPONENT_PALETTE: readonly IComponentPaletteItem[] = TEMPLATE_PALETTE_ORDER.map(type => {
+	const spec: IComponentSpec = COMPONENT_SPECS[type];
+	const entry = spec.templatePalette;
+	if (!entry) {
+		throw new Error(`Component '${type}' is in TEMPLATE_PALETTE_ORDER but has no templatePalette entry.`);
+	}
+	return {
+		label: spec.displayName,
+		icon: spec.icon,
+		type: spec.type,
+		defaultName: entry.defaultName,
+		...(entry.defaultChoices ? { defaultChoices: entry.defaultChoices } : {}),
+		...PALETTE_FACTORIES[spec.type]
+	};
+});
 
 /** Looks up a base component by its type (e.g. the payload of a toolbox drag). */
 export function findPaletteItem(type: string): IComponentPaletteItem | undefined {
