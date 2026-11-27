@@ -5,6 +5,7 @@
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { replaceWorklogMdSummaryBlock, TICKET_CHANGE_ENTRY_KIND, ticketChangeCoalescer } from '../common/ticketChangeLog.js';
 
 /**
  * Default size threshold for splitting large worklog files (512 KB)
@@ -24,6 +25,10 @@ export interface IWorklogRecord {
 		committed_by?: string;
 	};
 	update_by?: string;
+	/** Agent / workflow name of the actor, when known (front matter `actor_name`). */
+	actor_name?: string;
+	/** Kind of entry (front matter `entry_kind`), e.g. `field_changes` for automatically recorded field changes (CI-50). */
+	entry_kind?: string;
 	execution_status?: string;
 	output_summary?: string;
 	raw_content?: string;
@@ -328,19 +333,7 @@ export class TicketWorklogStorage {
 			}
 
 			// Add YAML frontmatter with full provenance & reconstruction metadata
-			const frontmatter = [
-				'---',
-				`ticket_id: ${env.ticketId}`,
-				`timestamp: ${fullDateTime}`,
-				`sequence: ${String(seq).padStart(3, '0')}`,
-				`part: ${part}/${totalParts}`,
-				`total_parts: ${totalParts}`,
-				`is_split: ${isSplit}`,
-				`byte_length: ${VSBuffer.fromString(chunkContent).byteLength}`,
-				`update_by: ${updateBy}`,
-				'---',
-				''
-			].join('\n');
+			const frontmatter = this._buildFrontmatter(env.ticketId, fullDateTime, seq, part, totalParts, chunkContent, updateBy, record);
 
 			const filePayload = frontmatter + chunkContent;
 			await this.fileService.writeFile(fileUri, VSBuffer.fromString(filePayload));
@@ -349,6 +342,11 @@ export class TicketWorklogStorage {
 
 		// Update main worklog.md with a lightweight summary/index (prevent unbounded file growth)
 		await this._appendLightweightSummaryToWorklogMd(env, displayHeader, updateBy, record, createdFiles[0]);
+
+		// Any other entry ends the coalescing of automatically recorded field changes (CI-50)
+		if (record.entry_kind !== TICKET_CHANGE_ENTRY_KIND) {
+			ticketChangeCoalescer.invalidate(env.worklogsDir.toString());
+		}
 
 		const entryMeta: IWorklogEntryMeta = {
 			id: `Ticket_${env.ticketId}_${dateStamp}`,
@@ -370,6 +368,64 @@ export class TicketWorklogStorage {
 			bodyText: bodyMarkdown,
 			fullContent: fullMarkdown
 		};
+	}
+
+	private _buildFrontmatter(ticketId: string, fullDateTime: string, seq: number, part: number, totalParts: number, chunkContent: string, updateBy: string, record: IWorklogRecord): string {
+		const oneLine = (v: string) => v.replace(/[\r\n]+/g, ' ').trim();
+		return [
+			'---',
+			`ticket_id: ${ticketId}`,
+			`timestamp: ${fullDateTime}`,
+			`sequence: ${String(seq).padStart(3, '0')}`,
+			`part: ${part}/${totalParts}`,
+			`total_parts: ${totalParts}`,
+			`is_split: ${totalParts > 1}`,
+			`byte_length: ${VSBuffer.fromString(chunkContent).byteLength}`,
+			`update_by: ${oneLine(updateBy)}`,
+			...(record.actor_name ? [`actor_name: ${oneLine(record.actor_name)}`] : []),
+			...(record.entry_kind ? [`entry_kind: ${oneLine(record.entry_kind)}`] : []),
+			'---',
+			''
+		].join('\n');
+	}
+
+	/**
+	 * Rewrites a single part entry in place (same file name and timestamp) with new `raw_content`, and updates its
+	 * worklog.md summary block. Used to coalesce consecutive field changes into one entry (CI-50).
+	 */
+	public async rewriteSinglePartEntry(entityUri: URI, filename: string, fullDateTime: string, record: IWorklogRecord): Promise<void> {
+		const env = await this.resolveAndEnsureTicketEnvironment(entityUri);
+		const content = (record.raw_content || '').trim();
+		const updateBy = record.update_by || 'User';
+		const frontmatter = this._buildFrontmatter(env.ticketId, fullDateTime, 1, 1, 1, content, updateBy, record);
+		await this.fileService.writeFile(URI.joinPath(env.worklogsDir, filename), VSBuffer.fromString(frontmatter + content));
+		const header = content.startsWith('## ') ? content.split('\n')[0].replace(/^##\s+/, '').trim() : fullDateTime;
+		await this._replaceWorklogMdSummary(env, filename, this._buildSummaryBlock(header, updateBy, record, filename));
+	}
+
+	/** Deletes a single part entry and its worklog.md summary block (a coalesced entry whose changes were all reverted). */
+	public async deleteSinglePartEntry(entityUri: URI, filename: string): Promise<void> {
+		const env = await this.resolveAndEnsureTicketEnvironment(entityUri);
+		const fileUri = URI.joinPath(env.worklogsDir, filename);
+		if (await this.fileService.exists(fileUri)) {
+			await this.fileService.del(fileUri);
+		}
+		await this._replaceWorklogMdSummary(env, filename, undefined);
+	}
+
+	private async _replaceWorklogMdSummary(env: ITicketStorageEnvironment, filename: string, block: string | undefined): Promise<void> {
+		try {
+			if (!await this.fileService.exists(env.worklogMdUri)) {
+				return;
+			}
+			const existing = (await this.fileService.readFile(env.worklogMdUri)).value.toString();
+			const updated = replaceWorklogMdSummaryBlock(existing, filename, block);
+			if (updated !== existing) {
+				await this.fileService.writeFile(env.worklogMdUri, VSBuffer.fromString(updated));
+			}
+		} catch (err) {
+			console.warn('[TicketWorklogStorage] Failed to update summary in worklog.md:', err);
+		}
 	}
 
 	/**
@@ -586,17 +642,22 @@ export class TicketWorklogStorage {
 				existing = `# Work Log - ${env.ticketId}\n\n## Overview\n\n- **Workspace ID**: ${env.workspaceId}\n- **Ticket ID**: ${env.ticketId}\n- **Ticket Type**: ${env.ticketType}\n- **Worklogs Directory**: [Worklogs](.agents/Worklogs)\n\n---\n\n`;
 			}
 
-			// Clean brief summary
-			let briefSummary = record.update_summary || record.user_request || (record.execution_status ? `Workflow status: ${record.execution_status}` : 'Worklog entry recorded');
-			if (briefSummary.length > 200) {
-				briefSummary = briefSummary.substring(0, 197) + '...';
-			}
-
-			const summaryEntry = `\n## ${displayHeader}\n\n- **Log File**: [${primaryFilename}](.agents/Worklogs/${primaryFilename})\n- **Update By**: ${updateBy}\n- **Summary**: ${briefSummary}\n`;
+			const summaryEntry = `\n${this._buildSummaryBlock(displayHeader, updateBy, record, primaryFilename)}`;
 			await this.fileService.writeFile(env.worklogMdUri, VSBuffer.fromString(existing.trimEnd() + '\n' + summaryEntry));
 		} catch (err) {
 			console.warn('[TicketWorklogStorage] Failed to append lightweight summary to worklog.md:', err);
 		}
+	}
+
+	private _buildSummaryBlock(displayHeader: string, updateBy: string, record: IWorklogRecord, primaryFilename: string): string {
+		// Clean brief summary
+		let briefSummary = record.update_summary || record.user_request || (record.execution_status ? `Workflow status: ${record.execution_status}` : 'Worklog entry recorded');
+		briefSummary = briefSummary.replace(/[\r\n]+/g, ' ');
+		if (briefSummary.length > 200) {
+			briefSummary = briefSummary.substring(0, 197) + '...';
+		}
+		const by = record.actor_name ? `${updateBy} (${record.actor_name})` : updateBy;
+		return `## ${displayHeader}\n\n- **Log File**: [${primaryFilename}](.agents/Worklogs/${primaryFilename})\n- **Update By**: ${by}\n- **Summary**: ${briefSummary}\n`;
 	}
 
 	/**
