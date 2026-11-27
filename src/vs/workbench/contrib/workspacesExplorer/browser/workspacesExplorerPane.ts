@@ -3023,7 +3023,26 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const typeButtons: HTMLElement[] = [];
 		let typesList: { type: string; label: string; icon: ThemeIcon; color: string; bg: string }[] = [];
 
+		// Instant full-name tooltip for the type buttons. Lives inside the overlay because the
+		// workbench hover widget renders below this modal's z-index.
+		const typeTooltip = append(overlay, $('.type-option-tooltip'));
+		typeTooltip.style.cssText = 'position: fixed; display: none; z-index: 100001; pointer-events: none; max-width: 320px; padding: 4px 8px; border-radius: 4px; font-size: 12px; line-height: 1.4; white-space: normal; word-break: break-word; color: var(--vscode-editorHoverWidget-foreground, #ddd); background: var(--vscode-editorHoverWidget-background, #252526); border: 1px solid var(--vscode-editorHoverWidget-border, #454545); box-shadow: 0 2px 8px rgba(0,0,0,0.36);';
+		const hideTypeTooltip = () => { typeTooltip.style.display = 'none'; };
+		const showTypeTooltip = (anchor: HTMLElement, text: string) => {
+			typeTooltip.textContent = text;
+			typeTooltip.style.display = 'block';
+			const r = anchor.getBoundingClientRect();
+			const tip = typeTooltip.getBoundingClientRect();
+			const viewW = mainWindow.innerWidth;
+			const left = Math.max(4, Math.min(r.left + (r.width - tip.width) / 2, viewW - tip.width - 4));
+			const below = r.bottom + 6;
+			const top = below + tip.height > mainWindow.innerHeight - 4 ? r.top - tip.height - 6 : below;
+			typeTooltip.style.left = `${left}px`;
+			typeTooltip.style.top = `${top}px`;
+		};
+
 		const renderTypeGrid = async () => {
+			hideTypeTooltip();
 			clearNode(categoryGrid);
 			categoryGrid.style.display = 'grid';
 			categoryGrid.style.gridTemplateColumns = 'repeat(5, minmax(0, 1fr))';
@@ -3153,7 +3172,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				btn.style.width = '100%';
 				btn.style.minWidth = '0';
 				btn.style.minHeight = '34px';
-				btn.title = t.label;
+				btn.setAttribute('aria-label', t.label);
+				btn.addEventListener('mouseenter', () => showTypeTooltip(btn, t.label));
+				btn.addEventListener('mouseleave', hideTypeTooltip);
 
 				const iconSpan = append(btn, $('span' + ThemeIcon.asCSSSelector(t.icon)));
 				iconSpan.style.color = t.color;
