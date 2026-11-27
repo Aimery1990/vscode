@@ -24,6 +24,8 @@ export interface ITimeRange {
 export interface ISubtitleDocument {
 	readonly version: 1;
 	readonly mediaName: string;
+	/** Absolute path (or `file://` URI) of the media the subtitles were extracted from, when known (CI-46). */
+	readonly mediaPath?: string;
 	readonly mediaSize?: number;
 	readonly duration?: number;
 	readonly provider: string;
@@ -476,6 +478,7 @@ export function parseSubtitleDocument(json: string): ISubtitleDocument | undefin
 	return {
 		version: 1,
 		mediaName: typeof parsed.mediaName === 'string' ? parsed.mediaName : '',
+		mediaPath: typeof parsed.mediaPath === 'string' && parsed.mediaPath ? parsed.mediaPath : undefined,
 		mediaSize: typeof parsed.mediaSize === 'number' ? parsed.mediaSize : undefined,
 		duration: typeof parsed.duration === 'number' ? parsed.duration : undefined,
 		provider: typeof parsed.provider === 'string' ? parsed.provider : '',
@@ -484,4 +487,68 @@ export function parseSubtitleDocument(json: string): ISubtitleDocument | undefin
 		createdAt: typeof parsed.createdAt === 'number' ? parsed.createdAt : 0,
 		segments
 	};
+}
+
+// --- is a stored subtitle document current for the loaded media (CI-46) ---------------------------
+
+/** The media file a stored subtitle document is compared with (any part may be unknown). */
+export interface ISubtitleMediaIdentity {
+	readonly name?: string;
+	readonly path?: string;
+	readonly sizeBytes?: number;
+}
+
+/**
+ * - `current`: the subtitles were extracted from this file and can be used as they are;
+ * - `changed`: same file name / path, but the size differs (the file was replaced or edited);
+ * - `other-file`: the subtitles belong to another file.
+ */
+export type SubtitleDocumentMatch = 'current' | 'changed' | 'other-file';
+
+/** `file:///a/b%20c.mp3`, `C:\\a\\b.mp3` and `/a//b.mp3` compared as plain forward-slash paths. */
+export function normalizeMediaPath(path: string | undefined): string {
+	let s = (path || '').trim();
+	if (!s) {
+		return '';
+	}
+	if (/^file:\/\//i.test(s)) {
+		s = s.replace(/^file:\/\//i, '');
+		try {
+			s = decodeURIComponent(s);
+		} catch {
+			// keep the raw text
+		}
+		// file:///C:/x -> C:/x
+		s = s.replace(/^\/([a-zA-Z]:\/)/, '$1');
+	}
+	s = s.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+	return s.length > 1 ? s.replace(/\/$/, '') : s;
+}
+
+function knownSize(n: number | undefined): n is number {
+	return typeof n === 'number' && Number.isFinite(n) && n > 0;
+}
+
+/**
+ * Whether stored subtitles were extracted from `media`: the same path, or the same file name (case-insensitive);
+ * then a known size that differs means the file changed. A document that records neither name nor path (hand-made)
+ * cannot be checked and is trusted.
+ */
+export function matchSubtitleDocument(doc: Pick<ISubtitleDocument, 'mediaName' | 'mediaPath' | 'mediaSize'>, media: ISubtitleMediaIdentity): SubtitleDocumentMatch {
+	const docPath = normalizeMediaPath(doc.mediaPath);
+	const mediaPath = normalizeMediaPath(media.path);
+	const docName = ((doc.mediaName || '').trim() || docPath.split('/').pop() || '').toLowerCase();
+	const mediaName = ((media.name || '').trim() || mediaPath.split('/').pop() || '').toLowerCase();
+	if (!docName && !docPath) {
+		return 'current';
+	}
+	const samePath = !!docPath && docPath === mediaPath;
+	const sameName = !!docName && docName === mediaName;
+	if (!samePath && !sameName) {
+		return 'other-file';
+	}
+	if (knownSize(doc.mediaSize) && knownSize(media.sizeBytes) && doc.mediaSize !== media.sizeBytes) {
+		return 'changed';
+	}
+	return 'current';
 }

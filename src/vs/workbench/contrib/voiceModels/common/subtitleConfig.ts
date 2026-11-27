@@ -15,7 +15,7 @@ export type SubtitleDisplayMode = 'single' | 'scroll' | 'dictation';
 export const SUBTITLE_DISPLAY_MODES: readonly { readonly id: SubtitleDisplayMode; readonly label: string }[] = [
 	{ id: 'single', label: 'Single line' },
 	{ id: 'scroll', label: 'Scrolling list' },
-	{ id: 'dictation', label: 'Dictation' }
+	{ id: 'dictation', label: 'Dictation practice' }
 ];
 
 export const DEFAULT_MEDIA_MAX_UPLOAD_MB = 200;
@@ -40,7 +40,7 @@ export interface IMediaSubtitleFieldProps {
 	mediaDictationUnit?: DictationUnitKind;
 	/** Seconds per unit when the unit is `seconds` (minimum 1, default 5). */
 	mediaDictationSeconds?: number;
-	/** Pause at the end of each dictation unit (default true). */
+	/** "Dictation mode": stop playback at the end of each dictation unit so the user can type it (default true). */
 	mediaDictationAutoPause?: boolean;
 }
 
@@ -93,6 +93,42 @@ export function resolveMediaSubtitlesConfig(field: IMediaSubtitleFieldProps): IM
 		dictationSeconds: Math.max(MIN_DICTATION_SECONDS, Math.round(positive(field.mediaDictationSeconds, 5))),
 		autoPause: field.mediaDictationAutoPause !== false
 	};
+}
+
+// --- "Dictation mode" wording (CI-46) ----------------------------------------------------------------
+// The stored property stays `mediaDictationAutoPause` / `dictationAutoPause`; only the labels changed.
+
+/** Name of the option everywhere it is shown (settings row, card toggle, help). */
+export const DICTATION_MODE_LABEL = 'Dictation mode';
+
+/** "sentence" / "5-second part": what one dictation unit is called in the wording. */
+export function dictationUnitNoun(unit: DictationUnitKind, seconds: number): string {
+	return unit === 'seconds' ? `${Math.max(MIN_DICTATION_SECONDS, Math.round(seconds))}-second part` : 'sentence';
+}
+
+/** Checkbox text of the settings row: `Stop after each sentence so I can type what I hear`. */
+export function dictationModeCheckboxText(unit: DictationUnitKind, seconds: number): string {
+	return `Stop after each ${dictationUnitNoun(unit, seconds)} so I can type what I hear`;
+}
+
+/** Tooltip of the settings row: what the option changes in the Dictation practice display. */
+export function dictationModeDescription(unit: DictationUnitKind, seconds: number): string {
+	const noun = dictationUnitNoun(unit, seconds);
+	return `Used by the Dictation practice display. On: playback stops at the end of each ${noun} and waits until you have typed it (Enter checks, Enter again plays the next one). Off: playback keeps going and the dictation box follows along.`;
+}
+
+/** Tooltip of the card's toggle button for the current state. */
+export function dictationModeToggleTitle(on: boolean, unit: DictationUnitKind, seconds: number): string {
+	const noun = dictationUnitNoun(unit, seconds);
+	return on
+		? `${DICTATION_MODE_LABEL} is on: playback stops after each ${noun} so you can type what you hear. Click to let it keep playing.`
+		: `${DICTATION_MODE_LABEL} is off: playback keeps going and the dictation box follows along. Click to stop after each ${noun}.`;
+}
+
+/** Ticket-relative path of the subtitles JSON of a media player field: `attachments/subtitles_<field>.json`. */
+export function mediaSubtitlesFileName(fieldKey: string): string {
+	const safeKey = fieldKey.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'media';
+	return `attachments/subtitles_${safeKey}.json`;
 }
 
 /** Keys of {@link IMediaSubtitlesState} inside the stored field value. */
