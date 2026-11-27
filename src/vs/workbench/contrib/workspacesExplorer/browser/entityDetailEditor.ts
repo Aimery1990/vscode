@@ -21262,9 +21262,6 @@ ${interpolatedPrompt}`;
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No number set. Click to edit.')
 						))
 					))));
-				} else if (fType === 'git') {
-					// Git primitive is integrated into the dedicated sidebar Git repository binding
-					continue;
 				} else if (fType === 'parameters') {
 					// Inputs Primitive
 					const paramDefs: IParameterDefinition[] = fieldItem.parameters || [];
