@@ -3551,7 +3551,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const credsTop = append(credsBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' }));
 					append(credsTop, $('div', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: #a78bfa;' }, 'Credentials (name = value):'));
-					append(credsTop, $('span', { style: 'font-size: 10px; opacity: 0.55; flex: 1;' }, 'Use {name} in the URL; the value is URL-encoded at run time and hidden in logs and outputs.'));
+					append(credsTop, $('span', { style: 'font-size: 10px; opacity: 0.55; flex: 1;' }, 'Use {name} in the URL (URL-encoded at run time); a credential not in the URL is sent as a request header named after it (e.g. Authorization). Values are hidden in logs and outputs; ticket users see names only.'));
 
 					if (!field.credentials) {
 						field.credentials = [];
@@ -16461,9 +16461,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		});
 	}
 
+	/**
+	 * Fetches `rawUrl` and returns its readable text. `credentialHeaders` (secret values, never logged) are sent with the
+	 * request; the built-in extractor (IWebContentExtractorService) cannot send request headers, so when there are any
+	 * it is skipped and the direct HTTP request is used.
+	 */
 	private async _fetchUrlContent(
 		rawUrl: string,
-		maskText: (text: string) => string = text => text
+		maskText: (text: string) => string = text => text,
+		credentialHeaders: Readonly<Record<string, string>> = {}
 	): Promise<{ title: string; content: string; isAuthRequired?: boolean; rawError?: string }> {
 		let targetUrl = rawUrl.trim();
 		if (!/^https?:\/\//i.test(targetUrl)) {
@@ -16476,7 +16482,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		// This uses the integrated browser's session partition ('persist:vscode-browser'),
 		// so logged-in cookies and JavaScript dynamic single-page applications (SPA) are executed seamlessly!
 		try {
-			const extractorService = this._instantiationService.invokeFunction(accessor => accessor.get(IWebContentExtractorService));
+			const hasCredentialHeaders = Object.keys(credentialHeaders).length > 0;
+			const extractorService = hasCredentialHeaders ? undefined : this._instantiationService.invokeFunction(accessor => accessor.get(IWebContentExtractorService));
 			if (extractorService) {
 				const uri = URI.parse(targetUrl);
 				const extractResults = await Promise.race([
@@ -16517,7 +16524,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				// Fallback to renderer requestService
 			}
 
-			// Credentials are not sent as headers: they are used only where the URL references them as {name}
+			// Credentials not referenced in the URL are sent as headers named after them (values are never logged)
 			const requestOptions = {
 				type: 'GET',
 				url: targetUrl,
@@ -16527,7 +16534,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					'Accept-Language': 'en-US,en;q=0.9',
 					'Sec-Fetch-Dest': 'document',
 					'Sec-Fetch-Mode': 'navigate',
-					'Sec-Fetch-Site': 'none'
+					'Sec-Fetch-Site': 'none',
+					...credentialHeaders
 				},
 				timeout: 20000,
 				callSite: 'customModuleSchemaEditor'
@@ -16935,7 +16943,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			field.defaultUrl = url;
 		}
 
-		// {name} of a credential -> its encoded value; only the masked URL is shown or stored
+		// {name} of a credential -> its encoded value, the other credentials are request headers; only the masked URL is
+		// shown or stored
 		const runtimeCtx = await this._getHydratedWorkflowRuntimeContext();
 		const resolved = resolveBrowserCredentialUrl(url, field.credentials, t => this._interpolateSchemaReferences(t, field, allFields, runtimeCtx));
 		let finalUrl = resolved.url;
@@ -16968,7 +16977,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		statusEl.style.color = '#38bdf8';
 
 		try {
-			const result = await this._fetchUrlContent(finalUrl, mask);
+			const result = await this._fetchUrlContent(finalUrl, mask, resolved.headers);
 			if (result.isAuthRequired) {
 				throw new Error(result.rawError || 'Authentication Required');
 			}
@@ -17005,8 +17014,9 @@ ${rawErr}
 2. Interactive Login:
    Click the "Open in Tab" or "+ New Tab" button directly above this card to open a browser tab beside and log in.
 
-3. Credentials in the URL:
-   If the site accepts a token or key in the URL, add it under "Credentials" above and reference it in the URL as {name}.`;
+3. Credentials:
+   Add a token or key under "Credentials" above. Reference it in the URL as {name}, or leave it out of the URL to send it
+   as a request header named after it (e.g. Authorization, Cookie or X-Api-Key; headers are safer than the URL).`;
 
 				contentEl.textContent = formattedNotice;
 				field.defaultContent = formattedNotice;

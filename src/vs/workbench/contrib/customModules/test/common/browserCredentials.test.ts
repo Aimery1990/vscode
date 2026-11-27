@@ -7,7 +7,9 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import {
 	MASKED_SECRET,
 	findPlaintextBrowserCredentials,
+	hasBrowserCredentialHeaders,
 	isPlaceholderInUrlHost,
+	maskBrowserCredentialHeaders,
 	maskBrowserCredentials,
 	maskSecrets,
 	normalizeBrowserCredentials,
@@ -109,13 +111,48 @@ suite('browserCredentials', () => {
 		]), ['user']);
 	});
 
-	test('pickBrowserCredentials: a ticket list with named rows wins, otherwise the template list', () => {
+	test('pickBrowserCredentials: the template list wins, a ticket list is ignored', () => {
 		const tpl = [{ key: 'user', value: 'tpl' }];
 		const own = [{ key: 'user', value: 'own' }];
-		assert.strictEqual(pickBrowserCredentials(own, tpl), own);
+		assert.strictEqual(pickBrowserCredentials(own, tpl), tpl);
 		assert.strictEqual(pickBrowserCredentials([], tpl), tpl);
-		assert.strictEqual(pickBrowserCredentials([{ key: '', value: 'x' }], tpl), tpl);
 		assert.strictEqual(pickBrowserCredentials('bad', tpl), tpl);
+		assert.deepStrictEqual(pickBrowserCredentials(own, undefined), []);
 		assert.deepStrictEqual(pickBrowserCredentials(undefined, undefined), []);
+	});
+
+	test('credentials referenced in the URL are substituted, the others become headers', () => {
+		const res = resolveBrowserCredentialUrl('https://site/api?key={api_key}', [
+			{ key: 'api_key', value: 'k 1' },
+			{ key: 'Authorization', value: 'Bearer {TOKEN}' },
+			{ key: 'X-Api-Key', value: 'xyz' },
+			{ key: 'empty', value: '' }
+		], contextInterpolator({ TOKEN: 't0k' }));
+		assert.strictEqual(res.url, 'https://site/api?key=k%201');
+		assert.deepStrictEqual(res.usedNames, ['api_key']);
+		assert.deepStrictEqual({ ...res.headers }, { 'Authorization': 'Bearer t0k', 'X-Api-Key': 'xyz' });
+		assert.strictEqual(hasBrowserCredentialHeaders(res), true);
+		// a URL-referenced credential is never also sent as a header, whatever the case of the reference
+		const upper = resolveBrowserCredentialUrl('https://site/?k={API_KEY}', [{ key: 'api_key', value: 'v' }]);
+		assert.deepStrictEqual({ ...upper.headers }, {});
+		assert.strictEqual(hasBrowserCredentialHeaders(upper), false);
+	});
+
+	test('invalid header names and values are not sent', () => {
+		const res = resolveBrowserCredentialUrl('https://site/', [
+			{ key: 'my key', value: 'spaces in name' },
+			{ key: 'X-Bad', value: 'line\r\nInjected: 1' },
+			{ key: '__proto__', value: 'p' },
+			{ key: 'Cookie', value: 'sid=abc' }
+		]);
+		assert.deepStrictEqual(Object.keys(res.headers).sort(), ['Cookie', '__proto__']);
+		assert.strictEqual(res.headers['Cookie'], 'sid=abc');
+	});
+
+	test('header values are masked for logs', () => {
+		const res = resolveBrowserCredentialUrl('https://site/', [{ key: 'Authorization', value: 'Bearer s3cret' }]);
+		assert.deepStrictEqual({ ...maskBrowserCredentialHeaders(res.headers) }, { 'Authorization': MASKED_SECRET });
+		assert.strictEqual(maskSecrets('401 for Authorization: Bearer s3cret', res.secrets), `401 for Authorization: ${MASKED_SECRET}`);
+		assert.strictEqual(res.maskedUrl, 'https://site/');
 	});
 });

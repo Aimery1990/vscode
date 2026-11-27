@@ -15,7 +15,7 @@ import { IInstantiationService, createDecorator } from '../../../../platform/ins
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
+import { maskBrowserCredentialHeaders, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { SUB_WORKFLOW_TICKET_TYPE, createDefaultFreestyleSchema, getProgrammaticTicketTypeError, getReservedTemplateCreateError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { ISubWorkflowContract, ISubWorkflowTicketSummary, buildSubWorkflowContract, buildSubWorkflowTicketMetadata, buildSubWorkflowTicketSummary, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition, subWorkflowSummaryFromMetadata } from '../common/subWorkflowTicket.js';
 import { buildPrimitivesCatalog } from '../../customModules/common/componentRegistry.js';
@@ -1724,7 +1724,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							// 2. Browser Primitive: resolve URL template, existing content, credentials, and fetch
 							let targetUrl = '';
 							let existingContent = '';
-							// The ticket's own credentials (kept as typed when the value is saved back); the run uses them when not empty
+							// A credential list stored on the ticket (older tickets) is written back untouched but never used
 							let ticketCreds: unknown = undefined;
 
 							if (inputOverrides[fieldLabel]) {
@@ -1756,7 +1756,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								targetUrl = field.defaultUrl.trim();
 							}
 
-							// {name} of a credential -> its encoded value; only the masked URL is logged, shown or stored
+							// The template's credentials: {name} in the URL -> its encoded value, the others are request headers.
+							// Only the masked URL is logged, shown or stored.
 							const browserCreds = pickBrowserCredentials(ticketCreds, field.credentials);
 							const resolvedBrowserUrl = resolveBrowserCredentialUrl(targetUrl, browserCreds, t => this._interpolateVariables(t, contextVariables));
 							const interpolatedUrl = resolvedBrowserUrl.url;
@@ -1786,6 +1787,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									retryDelayMs,
 									label: fieldLabel,
 									maskText: maskBrowserSecrets,
+									headers: resolvedBrowserUrl.headers,
 									onRetryLog: (msg) => {
 										this.logService.warn(`[TicketWorkflowRuntime] ${msg}`);
 										options.onProgress?.({
@@ -1816,7 +1818,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									stepOutput = extracted.content || existingContent || (finalFetchError ? `[Fetch Failed: ${finalFetchError}]` : '');
 								}
 
-								// The raw URL template (with {name}) and the ticket's own credentials are kept as typed
+								// The raw URL template (with {name}) and any credential list already on the ticket are kept as stored
 								customMetadata[fieldLabel] = JSON.stringify({
 									url: targetUrl,
 									resolvedUrl: shownUrl,
@@ -1853,6 +1855,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								content: stepOutput,
 								contentLength: typeof stepOutput === 'string' ? stepOutput.length : 0,
 								credentials: maskBrowserCredentials(browserCreds),
+								requestHeaders: maskBrowserCredentialHeaders(resolvedBrowserUrl.headers),
 								attempts: fetchAttempts,
 								retryLogs
 							};
@@ -3671,7 +3674,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					break;
 				}
 				case 'browser': {
-					// {name} of a credential -> its encoded value; only the masked URL is logged, shown or stored
+					// {name} of a credential -> its encoded value, the other credentials are request headers; only the masked URL
+					// is logged, shown or stored
 					const resolvedBrowserUrl = resolveBrowserCredentialUrl((field.defaultUrl || '').trim(), field.credentials, t => this._interpolateVariables(t, contextVariables));
 					const interpolatedUrl = resolvedBrowserUrl.url.trim();
 					const shownUrl = resolvedBrowserUrl.maskedUrl.trim();
@@ -3692,6 +3696,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							retryDelayMs,
 							label: fieldLabel,
 							maskText: text => maskSecrets(text, resolvedBrowserUrl.secrets),
+							headers: resolvedBrowserUrl.headers,
 							onRetryLog: (msg) => this.logService.warn(`[TicketWorkflowRuntime] ${msg}`),
 							checkCancelled: ensureNotCancelled
 						})
@@ -3703,6 +3708,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						url: shownUrl,
 						resolvedUrl: shownUrl,
 						contentLength: extractedText.length,
+						requestHeaders: maskBrowserCredentialHeaders(resolvedBrowserUrl.headers),
 						attempts: extracted.attempts,
 						retryLogs: extracted.retryLogs
 					};
@@ -5025,8 +5031,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	}
 
 	/**
-	 * Fetches `targetUrl` with retries. `targetUrl` may contain credential values: `maskText` hides them in every error,
-	 * retry log and error content that is returned (the fetched page itself is returned as is).
+	 * Fetches `targetUrl` with retries. `targetUrl` and `headers` may contain credential values: `maskText` hides them in
+	 * every error, retry log and error content that is returned (the fetched page itself is returned as is).
 	 */
 	private async _extractWebContentWithRetry(
 		targetUrl: string,
@@ -5037,6 +5043,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			onRetryLog?: (msg: string) => void;
 			checkCancelled?: () => void;
 			maskText?: (text: string) => string;
+			/** Credential request headers (secret values, never logged). */
+			headers?: Readonly<Record<string, string>>;
 		}
 	): Promise<{ title: string; content: string; attempts: number; retryLogs: string[]; lastError?: string }> {
 		const mask = options?.maskText ?? ((text: string) => text);
@@ -5054,7 +5062,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		for (let attempt = 0; attempt <= maxRetries; attempt++) {
 			options?.checkCancelled?.();
 			try {
-				const extracted = await this._extractWebContent(targetUrl, mask);
+				const extracted = await this._extractWebContent(targetUrl, mask, options?.headers);
 				lastResult = extracted;
 				const content = extracted?.content || '';
 				const isErrorContent = !content || content.startsWith('[Fetch Failed') || content.startsWith('HTTP Error');
@@ -5102,7 +5110,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		};
 	}
 
-	private async _extractWebContent(targetUrl: string, maskText: (text: string) => string = text => text): Promise<{ title: string; content: string }> {
+	/**
+	 * Extracts the readable text of `targetUrl`. `credentialHeaders` are sent with the request: the built-in extractor
+	 * (IWebContentExtractorService) cannot send request headers, so when there are any it is skipped and the plain HTTP
+	 * fetch is used directly.
+	 */
+	private async _extractWebContent(targetUrl: string, maskText: (text: string) => string = text => text, credentialHeaders?: Readonly<Record<string, string>>): Promise<{ title: string; content: string }> {
 		const startEpoch = this._cancelEpoch;
 		const controller = new AbortController();
 		this._activeAbortControllers.add(controller);
@@ -5117,9 +5130,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		});
 
 		try {
-			// 1. Try IWebContentExtractorService first
+			const hasCredentialHeaders = !!credentialHeaders && Object.keys(credentialHeaders).length > 0;
+			// 1. Try IWebContentExtractorService first (it takes no request headers: skipped when credentials need them)
 			try {
-				const extractorService = this.instantiationService.invokeFunction(accessor => {
+				const extractorService = hasCredentialHeaders ? undefined : this.instantiationService.invokeFunction(accessor => {
 					try { return accessor.get(IWebContentExtractorService); } catch { return undefined; }
 				});
 				if (extractorService) {
@@ -5146,9 +5160,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			// 2. Fallback HTTP fetch
 			try {
-				// Credentials are not sent as headers: they are used only where the URL references them as {name}
+				// Credentials not referenced in the URL are sent as headers named after them (values are never logged)
 				const headers: Record<string, string> = {
-					'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+					'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+					...credentialHeaders
 				};
 
 				const resp = await fetch(targetUrl, { headers, signal: controller.signal });
@@ -5173,7 +5188,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				}
 				return {
 					title: targetUrl,
-					content: `[Fetch Failed: ${err.message || String(err)}]`
+					content: `[Fetch Failed: ${maskText(err.message || String(err))}]`
 				};
 			}
 		} finally {

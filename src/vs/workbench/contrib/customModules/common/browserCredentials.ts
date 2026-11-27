@@ -3,9 +3,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * Credentials of the `browser` component: any number of `name -> value` pairs chosen by the user. The URL references a
- * credential as `{name}`; at run time the placeholder is replaced with the (URL-encoded) value. Values are secrets:
- * everything that is shown, logged or stored uses the masked URL, where each credential is `***`.
+ * Credentials of the `browser` component: any number of `name -> value` pairs set by the template author. The URL
+ * references a credential as `{name}`; at run time the placeholder is replaced with the (URL-encoded) value. A credential
+ * that the URL does not reference is sent as an HTTP request header named after it (e.g. `Authorization`). Values are
+ * secrets: everything that is shown, logged or stored uses the masked URL, where each credential is `***`.
  */
 
 /** Text that replaces a credential value wherever it would be shown, logged or stored. */
@@ -27,7 +28,18 @@ export interface IBrowserCredentialUrl {
 	readonly usedNames: readonly string[];
 	/** Every secret string (resolved values and their encoded forms) to hide with {@link maskSecrets}. */
 	readonly secrets: readonly string[];
+	/**
+	 * Credentials that the URL does not reference, as request headers `name -> resolved value` (not URL-encoded). Rows
+	 * with an empty value, a name that is not a valid header name or a value with line breaks are left out. Never log
+	 * these values: use {@link maskBrowserCredentialHeaders}.
+	 */
+	readonly headers: Readonly<Record<string, string>>;
 }
+
+/** Characters allowed in an HTTP header name (RFC 9110 token). */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/** Characters that may not appear in an HTTP header value. */
+const HEADER_VALUE_INVALID = /[\r\n\0]/;
 
 /**
  * `{name}` and `{{name}}`. Unlike the runtime interpolation a leading `@` is not part of the placeholder, because in a
@@ -151,12 +163,36 @@ export function resolveBrowserCredentialUrl(template: string, rawCredentials: un
 	realTemplate += source.substring(last);
 	maskedTemplate += source.substring(last);
 
+	// Credentials not referenced in the URL go out as headers named after them (a null-prototype map: any name is safe)
+	const headers: Record<string, string> = Object.create(null);
+	for (const [name, value] of resolvedValues) {
+		if (usedNames.includes(name) || !value || !HEADER_NAME_PATTERN.test(name) || HEADER_VALUE_INVALID.test(value)) {
+			continue;
+		}
+		headers[name] = value;
+	}
+
 	return {
 		url: interpolate(realTemplate),
 		maskedUrl: interpolate(maskedTemplate),
 		usedNames,
-		secrets: Array.from(secretSet)
+		secrets: Array.from(secretSet),
+		headers
 	};
+}
+
+/** True when the resolved credentials include at least one request header. */
+export function hasBrowserCredentialHeaders(resolved: IBrowserCredentialUrl): boolean {
+	return Object.keys(resolved.headers).length > 0;
+}
+
+/** Credential headers as they may be logged or shown: names kept, values replaced with `***`. */
+export function maskBrowserCredentialHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
+	const result: Record<string, string> = Object.create(null);
+	for (const name of Object.keys(headers)) {
+		result[name] = MASKED_SECRET;
+	}
+	return result;
 }
 
 /** Replaces every occurrence of each secret (longest first) with `***`. Use it on logs, errors and stored URLs. */
@@ -192,12 +228,10 @@ export function findPlaintextBrowserCredentials(rawCredentials: unknown): string
 }
 
 /**
- * The credentials a run uses: the ticket's own list when it has at least one named row, otherwise the template's.
- * (An empty list saved on a ticket does not hide the template's credentials.)
+ * The credentials a run uses: always the template's (or the workflow node's). Only the template author knows how to
+ * fill them. A credential list stored on a ticket (older tickets carry stale copies) is ignored; it is left on disk
+ * untouched.
  */
-export function pickBrowserCredentials<T>(ticketCredentials: unknown, templateCredentials: T[] | undefined): T[] {
-	if (Array.isArray(ticketCredentials) && normalizeBrowserCredentials(ticketCredentials).size > 0) {
-		return ticketCredentials as T[];
-	}
+export function pickBrowserCredentials<T>(_ticketCredentials: unknown, templateCredentials: T[] | undefined): T[] {
 	return Array.isArray(templateCredentials) ? templateCredentials : [];
 }
