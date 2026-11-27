@@ -110,7 +110,7 @@ export function validateGlobalPathInput(rawPath: string): string | undefined {
  * the global folder defaults to `~/.anyagent`, the template and component folders to subfolders of it.
  */
 export function resolveAnyAgentGlobalPaths(settings: IAnyAgentGlobalPathSettings, homePath: string): IAnyAgentGlobalPaths {
-	const pick = (raw: string | undefined): string | undefined => (raw && isAcceptableGlobalPath(raw)) ? expandHomePath(raw, homePath) : undefined;
+	const pick = (raw: string | undefined): string | undefined => (raw && isAcceptableGlobalPath(raw)) ? trimTrailingSeparators(expandHomePath(raw, homePath)) : undefined;
 	const root = pick(settings.globalDataPath) ?? expandHomePath(DEFAULT_ANYAGENT_GLOBAL_DATA_PATH, homePath);
 	return {
 		root,
