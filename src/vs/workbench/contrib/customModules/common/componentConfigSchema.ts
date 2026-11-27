@@ -5,6 +5,7 @@
 import { findPlaintextBrowserCredentials, normalizeBrowserCredentials } from './browserCredentials.js';
 import { ConfigPropRole, IComponentConfigProp, getComponentProps, getComponentSpec } from './componentRegistry.js';
 import { IGitComponentConfig, validateGitConfig } from './gitComponent.js';
+import { IShellComponentConfig, validateShellConfig } from './shellComponent.js';
 
 /*
  * Per-component configuration validation (CI-32), driven by the `props` schema of componentRegistry.ts.
@@ -132,6 +133,15 @@ export function validateComponentConfig(type: string, config: Readonly<Record<st
 	if (spec.type === 'git') {
 		// Which settings are needed depends on the selected git command (CI-24)
 		for (const problem of validateGitConfig(config as IGitComponentConfig, options.checkRequired !== false)) {
+			if (!errors.some(e => e.prop === problem.prop)) {
+				errors.push({ code: problem.code, prop: problem.prop, message: `'${label}.${problem.prop}': ${problem.message}` });
+			}
+		}
+	}
+
+	if (spec.type === 'shell') {
+		// Shell type, timeout range and environment lines (CI-55); the script itself is checked as required below
+		for (const problem of validateShellConfig(config as IShellComponentConfig, false)) {
 			if (!errors.some(e => e.prop === problem.prop)) {
 				errors.push({ code: problem.code, prop: problem.prop, message: `'${label}.${problem.prop}': ${problem.message}` });
 			}

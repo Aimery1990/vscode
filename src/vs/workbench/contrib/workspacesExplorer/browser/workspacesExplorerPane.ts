@@ -5427,8 +5427,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 							};
 							fieldParts.set(paramBox, { getParametersData });
 						}
-					} else if (field.type === 'git' || field.type === 'output' || field.type === 'table') {
-						// Git primitive is managed via gitBox above; Output manifest & Data Table are hydrated from schema
+					} else if (field.type === 'git' || field.type === 'shell' || field.type === 'output' || field.type === 'table') {
+						// Git primitive is managed via gitBox above; Shell is set up on the ticket card (CI-55); Output manifest & Data Table are hydrated from schema
 						fieldGroup.remove();
 					} else {
 						registerFieldControl(append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {

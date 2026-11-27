@@ -5694,6 +5694,11 @@ export class WorkflowEditor extends EditorPane {
 					metadataValue = comp.httpUrl ? `[${(comp.httpMethod || 'GET').toUpperCase()}] ${comp.httpUrl}` : '(no URL configured)';
 					break;
 				}
+				case 'shell': {
+					metadataLabel = 'Shell Script';
+					metadataValue = `${comp.shellType || 'default shell'}${comp.shellCwd ? ` in ${comp.shellCwd}` : ''}: ${String(comp.shellScript || '(empty)').split('\n')[0]}`;
+					break;
+				}
 				case 'git': {
 					metadataLabel = 'Git Command';
 					metadataValue = comp.gitCommand
@@ -20477,6 +20482,8 @@ export class WorkflowEditor extends EditorPane {
 				return `${varName} = [${comp.httpMethod || 'GET'}] ${comp.httpUrl || title} (HTTP Request)`;
 			case 'git':
 				return `${varName} = ${title} (git ${comp.gitCommand || 'status'})`;
+			case 'shell':
+				return `${varName} = ${title} (${comp.shellType || 'shell'} script)`;
 			case 'python':
 				return `${varName} = ${title} (Python Script)`;
 			default:
@@ -20757,6 +20764,8 @@ export class WorkflowEditor extends EditorPane {
 			gitCommand: compType === 'git' ? 'status' : undefined,
 			buttons: compType === 'button_group' ? [{ id: `btn_${ts}_1`, label: 'Approve', color: '#10b981' }, { id: `btn_${ts}_2`, label: 'Reject', color: '#ef4444' }] : undefined,
 			gitRepoPath: compType === 'git' ? '' : undefined,
+			shellScript: compType === 'shell' ? '' : undefined,
+			shellTimeoutSec: compType === 'shell' ? 120 : undefined,
 			httpUrl: compType === 'http_request' ? '' : undefined,
 			httpMethod: compType === 'http_request' ? 'GET' : undefined,
 			httpAuthType: compType === 'http_request' ? 'none' : undefined,

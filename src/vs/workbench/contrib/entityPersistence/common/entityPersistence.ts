@@ -54,6 +54,7 @@ export type CustomFieldType =
 	| 'display'
 	| 'ssh'
 	| 'http_request'
+	| 'shell'
 	| 'sub_workflow';
 
 /**
@@ -185,6 +186,31 @@ export interface IGitRunResult {
 	durationMs: number;
 	timedOut?: boolean;
 	/** Why git could not run, or why it failed (timeout, cancelled, ...). */
+	error?: string;
+	/** ISO time of the run. */
+	executedAt?: string;
+}
+
+/** Result of one run of a `shell` component (CI-55). */
+export interface IShellRunResult {
+	/** Exit code 0 (and no error). */
+	ok: boolean;
+	/** Exit code; -1 when the script could not start (invalid config, missing directory, not confirmed, ...), 124 on timeout. */
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	/** Script as executed: {variables} replaced by "$ANYAGENT_VAR_..." references (their values are never stored). */
+	command: string;
+	/** zsh, bash or sh. */
+	shell: string;
+	/** Working directory. */
+	cwd: string;
+	durationMs: number;
+	timedOut?: boolean;
+	cancelled?: boolean;
+	/** The script was written / changed by AI and has not been confirmed by a person yet; nothing ran. */
+	needsConfirmation?: boolean;
+	/** Why the script could not run, or why it failed (timeout, cancelled, ...). */
 	error?: string;
 	/** ISO time of the run. */
 	executedAt?: string;
@@ -693,6 +719,16 @@ export interface ICustomField {
 	gitCustomArgs?: string;
 	/** Result of the last git run (stdout / stderr truncated when stored). */
 	gitLastResult?: IGitRunResult;
+	/** Shell component (CI-55): script, working directory, shell, environment lines, timeout. Text supports {variables}. */
+	shellScript?: string;
+	shellCwd?: string;
+	shellType?: string;
+	shellEnv?: string;
+	shellTimeoutSec?: number | string;
+	/** HMAC of the confirmed script + cwd + shell + env (set by UI edits and by the Confirm dialog, never by AI). */
+	shellConfirmedHash?: string;
+	/** Result of the last shell run (stdout / stderr truncated when stored). */
+	shellLastResult?: IShellRunResult;
 	parameters?: IParameterDefinition[];
 	targetMode?: 'model' | 'agent';
 	targetModel?: string;

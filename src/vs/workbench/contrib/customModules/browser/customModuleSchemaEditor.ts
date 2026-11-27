@@ -17,7 +17,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, IGitRunResult, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, IGitRunResult, IShellRunResult, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModulesService } from '../common/customModules.js';
@@ -53,6 +53,8 @@ import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, cr
 import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
 import { GIT_CONFIG_KEYS, gitMainOutput, pickGitConfig } from '../common/gitComponent.js';
 import { renderGitConfigForm, renderGitResultView } from './gitComponentView.js';
+import { SHELL_CONFIG_KEYS, pickShellConfig, shellMainOutput } from '../common/shellComponent.js';
+import { askToConfirmShellScript, isShellConfirmed, renderShellConfigForm, renderShellConfirmBar, renderShellResultView, shellConfirmationMarker, shellMarkerAfterUiEdit } from './shellComponentView.js';
 import { DEFAULT_WAITING_PROMPT } from '../../workflowsManager/common/humanDecision.js';
 
 
@@ -3819,6 +3821,82 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							showGitResult(result);
 						} finally {
 							gitRunBtn.disabled = false;
+						}
+					};
+				}
+
+				// Shell Primitive Configuration Box (CI-55): script, folder, shell, environment, timeout + confirmation
+				if (field.type === 'shell') {
+					const shellSchemaBox = append(fieldCard, $('.shell-schema-config', {
+						style: 'display: flex; flex-direction: column; gap: 10px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(245, 158, 11, 0.25);'
+					}));
+					const shellNote = append(shellSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.8; line-height: 1.4;' }));
+					append(shellNote, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal), { style: 'margin-right: 6px;' }));
+					append(shellNote, $('span', {}, 'Runs the script on this computer when the ticket or node runs. {variables} are passed as environment variables, never pasted into the script. Scripts written or changed by AI must be confirmed before they run.'));
+					const shellBar = renderShellConfirmBar(shellSchemaBox, this._storageService, () => { void confirmShell(); });
+					const refreshShellBar = () => shellBar.update(pickShellConfig(field), [field.shellConfirmedHash]);
+					const confirmShell = async (): Promise<boolean> => {
+						const config = pickShellConfig(field);
+						if (!(await askToConfirmShellScript(this.dialogService, config, field.label || 'Shell'))) {
+							return false;
+						}
+						field.shellConfirmedHash = await shellConfirmationMarker(this._storageService, config);
+						this._syncDraft();
+						await refreshShellBar();
+						return true;
+					};
+					let shellEdits: Promise<void> = Promise.resolve();
+					renderShellConfigForm(shellSchemaBox, pickShellConfig(field), (next, changed) => {
+						const before = pickShellConfig(field);
+						const beforeMarkers = [field.shellConfirmedHash];
+						for (const key of SHELL_CONFIG_KEYS) {
+							Reflect.set(field, key, next[key]);
+						}
+						this._syncDraft();
+						// A person editing here confirms the script they typed (CI-55); serialized so fast typing keeps the order
+						shellEdits = shellEdits.then(async () => {
+							field.shellConfirmedHash = await shellMarkerAfterUiEdit(this._storageService, before, beforeMarkers, pickShellConfig(field), changed === 'shellScript');
+							this._syncDraft();
+							await refreshShellBar();
+						}).catch(() => undefined);
+					});
+					void refreshShellBar();
+
+					const shellRunRow = append(shellSchemaBox, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+					const shellRunBtn = append(shellRunRow, $('button.monaco-button', {
+						type: 'button',
+						title: 'Run this script now (test). {variables} have no values here.',
+						'aria-label': 'Run shell script',
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11.5px; font-family: inherit; border-radius: 4px; border: 1px solid rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.12); color: inherit; cursor: pointer;'
+					}, $('span.codicon.codicon-play', { style: 'font-size: 12px;' }), 'Run')) as HTMLButtonElement;
+					append(shellRunRow, $('span', { style: 'font-size: 11px; opacity: 0.6;' }, 'Test run; the result is not saved in the template.'));
+					const shellResultMount = append(shellSchemaBox, $('div.shell-result-mount'));
+					const showShellResult = (result: IShellRunResult | undefined, running = false) => renderShellResultView(shellResultMount, result, {
+						running,
+						emptyText: 'Not run yet.',
+						onCopy: text => {
+							this._clipboardService.writeText(text);
+							this.notificationService.info('Shell output copied to clipboard.');
+						}
+					});
+					showShellResult(field.shellLastResult);
+					shellRunBtn.onclick = async () => {
+						shellRunBtn.disabled = true;
+						try {
+							await shellEdits;
+							if (!(await isShellConfirmed(this._storageService, pickShellConfig(field), [field.shellConfirmedHash])) && !(await confirmShell())) {
+								return;
+							}
+							showShellResult(undefined, true);
+							const result = await this._ticketWorkflowRuntimeService.executeShellComponent(pickShellConfig(field), {
+								contextVariables: {},
+								baseDir: this._workspaceUri?.fsPath,
+								confirmationMarkers: [field.shellConfirmedHash],
+								confirmWhere: 'this template'
+							});
+							showShellResult(result);
+						} finally {
+							shellRunBtn.disabled = false;
 						}
 					};
 				}
@@ -10189,6 +10267,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									};
 								} else if (f.type === 'git') {
 									val = f.gitLastResult ? gitMainOutput(f.gitLastResult) : (f.gitRemoteUrl || '');
+								} else if (f.type === 'shell') {
+									val = f.shellLastResult ? shellMainOutput(f.shellLastResult) : '';
 								} else if (['create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets', 'display', 'sub_workflow'].includes(f.type)) {
 									// Do not clobber existing live runtime value in schemaContext with '' if this card hasn't recorded lastExecutionOutput yet
 									val = undefined;
@@ -16902,6 +16982,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				subProps['tableName'] = f.tableDbTableName || '';
 			} else if (f.type === 'git') {
 				valToInsert = (f.gitRemoteUrl || '').trim();
+			} else if (f.type === 'shell') {
+				valToInsert = f.shellLastResult ? shellMainOutput(f.shellLastResult).trim() : '';
 			} else {
 				valToInsert = String(f.defaultContent ?? f.defaultValue ?? '').trim();
 			}
@@ -17643,6 +17725,8 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				refs = extractRefs([f.voiceTranscript, ...(f.voiceClips || []).map(c => c.transcript)]);
 			} else if (f.type === 'git') {
 				refs = extractRefs([f.gitRepoPath, f.gitRemoteUrl, f.gitCloneDir, f.gitBranch, f.gitRemote, f.gitPaths, f.gitMessage, f.gitDiffTarget, f.gitCustomArgs, f.gitLogCount === undefined ? undefined : String(f.gitLogCount)]);
+			} else if (f.type === 'shell') {
+				refs = extractRefs([f.shellScript, f.shellCwd, f.shellEnv]);
 			} else if (f.type === 'http_request') {
 				const paramVals = (f.httpParams || []).map(p => p.value);
 				const headerVals = (f.httpHeaders || []).map(h => h.value);
@@ -17802,6 +17886,14 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 						lines.push(`- **${key}**: \`${String(v)}\``);
 					}
 				}
+			} else if (f.type === 'shell') {
+				lines.push(`- **Shell**: \`${f.shellType || 'default'}\``);
+				lines.push(`- **Working directory**: \`${f.shellCwd || '(workspace folder)'}\``);
+				lines.push(`- **Timeout**: \`${f.shellTimeoutSec || 120} s\``);
+				lines.push('- **Script**:');
+				lines.push('```sh');
+				lines.push(String(f.shellScript || ''));
+				lines.push('```');
 			} else if (f.type === 'http_request') {
 				lines.push(`- **HTTP Method**: \`${(f.httpMethod || 'GET').toUpperCase()}\``);
 				lines.push(`- **Request URL**: \`${f.httpUrl || '(not set)'}\``);

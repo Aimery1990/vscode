@@ -58,9 +58,11 @@ import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponen
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { MASKED_SECRET, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
-import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, IGitRunResult, IShellRunResult } from '../../entityPersistence/common/entityPersistence.js';
 import { GIT_CONFIG_KEYS, IGitComponentConfig, buildGitTicketValue, effectiveGitConfig, gitMainOutput, gitOutputFields, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig } from '../../customModules/common/gitComponent.js';
 import { renderGitConfigForm, renderGitResultView } from '../../customModules/browser/gitComponentView.js';
+import { IShellComponentConfig, IShellTicketValue, SHELL_CONFIG_KEYS, buildShellTicketValue, effectiveShellConfig, isShellTicketValue, normalizeShellTicketValue, pickShellConfig, shellMainOutput, shellOutputFields } from '../../customModules/common/shellComponent.js';
+import { askToConfirmShellScript, isShellConfirmed, renderShellConfigForm, renderShellConfirmBar, renderShellResultView, shellConfirmationMarker, shellMarkerAfterUiEdit } from '../../customModules/browser/shellComponentView.js';
 import { IHumanDecisionService, IPendingHumanDecision, buildHumanDecision, parseButtonGroupValue } from '../../workflowsManager/common/humanDecision.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
@@ -250,6 +252,8 @@ interface IEditorParts {
 	sshCardMount?: HTMLElement;
 	gitCardMount?: HTMLElement;
 	gitPrimitiveCards?: HTMLElement[];
+	shellCardMount?: HTMLElement;
+	shellPrimitiveCards?: HTMLElement[];
 	sshHeaderTargetBadge?: HTMLElement;
 	sshPrimitiveCards?: HTMLElement[];
 	statusLifecycleInfoBtn?: HTMLButtonElement;
@@ -303,7 +307,7 @@ const SHOW_TICKET_INSTRUCTIONS = false;
 type EditorPartRole = keyof IEditorParts;
 
 /** Roles that keep every element built for them (in build order). */
-const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['attachmentCards', 'browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'gitPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
+const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['attachmentCards', 'browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'gitPrimitiveCards', 'shellPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
 
 const partRolesOf = new WeakMap<Element, readonly EditorPartRole[]>();
 const builtParts = new WeakMap<Element, IEditorParts>();
@@ -2473,6 +2477,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateTablePrimitiveCards();
 		await this._hydrateSshPrimitiveCards();
 		this._hydrateGitPrimitiveCards();
+		this._hydrateShellPrimitiveCards();
 		this._syncButtonGroupDecisionState();
 		this._renderBrowserCredentialNames();
 		this._appendWorkflowRuntimeBlocks(mod);
@@ -2708,6 +2713,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateTablePrimitiveCards();
 			await this._hydrateSshPrimitiveCards();
 			this._hydrateGitPrimitiveCards();
+			this._hydrateShellPrimitiveCards();
 			this._syncButtonGroupDecisionState();
 			this._renderBrowserCredentialNames();
 			this._applyAttachmentTamperMarks();
@@ -9366,6 +9372,14 @@ ${rawErr}
 						}
 					} else {
 						primitiveVal = typeof savedObj === 'string' ? savedObj : (f.gitRemoteUrl || '');
+					}
+				} else if (f.type === 'shell') {
+					const lastShell = normalizeShellTicketValue(savedObj)?.shellLastResult ?? f.shellLastResult;
+					primitiveVal = lastShell ? shellMainOutput(lastShell) : '';
+					if (lastShell) {
+						for (const [sk, sv] of Object.entries(shellOutputFields(lastShell))) {
+							subProps[sk] = String(sv);
+						}
 					}
 				} else if (f.type === 'http_request') {
 					let resBody = '';
@@ -16648,6 +16662,141 @@ ${rawErr}
 		}
 	}
 
+	/**
+	 * Shell component cards (CI-55): settings form (ticket values win over the template), confirmation bar, Run button
+	 * and last result. A script written / changed by AI runs only after the Confirm dialog; editing the script here
+	 * confirms it implicitly.
+	 */
+	private _hydrateShellPrimitiveCards(): void {
+		if (!this._container) { return; }
+		const cards = Array.from((this._pageParts.shellPrimitiveCards ?? [])) as HTMLElement[];
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const fieldId = card.getAttribute('data-field-id') || '';
+			const fieldLabel = card.getAttribute('data-field-label') || fieldKey;
+			const mount = partsOf(card).shellCardMount as HTMLElement | null;
+			if (!mount || !fieldKey) { continue; }
+			clearNode(mount);
+			const schemaField = this._lastCustomModule?.fields?.find(f => (fieldId && f.id === fieldId) || f.label === fieldKey);
+			const templateConfig = pickShellConfig(schemaField);
+			const templateMarker = schemaField?.shellConfirmedHash;
+			const stored = normalizeShellTicketValue(card.getAttribute('data-shell-json') || '');
+			let ticketConfig: IShellComponentConfig = pickShellConfig(stored);
+			let ticketMarker: string | undefined = stored?.shellConfirmedHash;
+			let lastResult: IShellRunResult | undefined = stored?.shellLastResult ?? schemaField?.shellLastResult;
+			const effective = () => effectiveShellConfig(templateConfig, ticketConfig);
+			const markers = () => [templateMarker, ticketMarker];
+
+			const persist = () => {
+				const value: IShellTicketValue = buildShellTicketValue({ ...ticketConfig, shellConfirmedHash: ticketMarker }, lastResult);
+				const str = JSON.stringify(value);
+				card.setAttribute('data-shell-json', str);
+				if (!this._isPreviewMode) {
+					this._persistCustomFieldQuietly(fieldKey, str);
+				}
+			};
+
+			const confirmBar = renderShellConfirmBar(mount, this._storageService, () => { void confirm(); });
+			const refreshBar = () => confirmBar.update(effective(), markers());
+			const confirm = async (): Promise<boolean> => {
+				const config = effective();
+				if (!(await askToConfirmShellScript(this._dialogService, config, fieldLabel))) {
+					return false;
+				}
+				ticketMarker = await shellConfirmationMarker(this._storageService, config);
+				persist();
+				await refreshBar();
+				return true;
+			};
+
+			const formBox = append(mount, $('div.shell-card-form'));
+			let saveTimer: ReturnType<typeof setTimeout> | undefined;
+			let edits: Promise<void> = Promise.resolve();
+			renderShellConfigForm(formBox, ticketConfig, (next, changed) => {
+				const before = effective();
+				const beforeMarkers = markers();
+				const own: IShellComponentConfig = {};
+				for (const key of SHELL_CONFIG_KEYS) {
+					const val = next[key];
+					// An empty value keeps the template value
+					if (val !== undefined && val !== '') {
+						Reflect.set(own, key, val);
+					}
+				}
+				ticketConfig = own;
+				// Typing the script here confirms it; other edits keep the confirmation only if it was confirmed before
+				const typedScript = changed === 'shellScript' && !!String(own.shellScript ?? '').trim();
+				edits = edits.then(async () => {
+					ticketMarker = await shellMarkerAfterUiEdit(this._storageService, before, beforeMarkers, effective(), typedScript);
+					await refreshBar();
+				}).catch(() => undefined);
+				if (saveTimer) { clearTimeout(saveTimer); }
+				saveTimer = setTimeout(() => { void edits.then(persist); }, 350);
+			}, { fallback: templateConfig });
+			void refreshBar();
+
+			const actions = append(mount, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+			const runBtn = append(actions, $('button.shell-run-btn', {
+				type: 'button',
+				title: 'Run this script now',
+				'aria-label': 'Run shell script',
+				style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 12px; font-size: 12px; font-family: inherit; border-radius: 4px; border: 1px solid rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.14); color: inherit; cursor: pointer;'
+			}, $('span.codicon.codicon-play', { style: 'font-size: 12px;' }), 'Run')) as HTMLButtonElement;
+			if (this._isPreviewMode) {
+				append(actions, $('span', { style: 'font-size: 11px; opacity: 0.6;' }, 'Node view: edit the settings in the node\'s component editor.'));
+			}
+			const resultMount = append(mount, $('div.shell-card-result'));
+			const showResult = (running = false) => renderShellResultView(resultMount, lastResult, {
+				running,
+				emptyText: 'Not run yet. Click Run, or run the ticket.',
+				onCopy: text => {
+					this._clipboardService.writeText(text);
+					this._notificationService.info('Shell output copied to clipboard.');
+				}
+			});
+			showResult();
+
+			runBtn.onclick = async e => {
+				e.preventDefault();
+				e.stopPropagation();
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.error('Ticket workflow runtime service is not available.');
+					return;
+				}
+				if (saveTimer) { clearTimeout(saveTimer); saveTimer = undefined; }
+				runBtn.disabled = true;
+				try {
+					await edits;
+					// First run of a script written / changed by AI: show it and ask (CI-55)
+					if (!(await isShellConfirmed(this._storageService, effective(), markers())) && !(await confirm())) {
+						persist();
+						return;
+					}
+					showResult(true);
+					const wsRootUri = this._entityUri ? await this._workspacesExplorerService?.findWorkspaceRootUri(this._entityUri) : undefined;
+					const wsFolder = this._entityUri ? this._workspaceContextService.getWorkspaceFolder(this._entityUri) : undefined;
+					const baseUri = wsRootUri || wsFolder?.uri;
+					lastResult = await runtime.executeShellComponent(effective(), {
+						resolve: text => this._interpolateParameters(text),
+						baseDir: baseUri?.fsPath,
+						confirmationMarkers: markers(),
+						confirmWhere: 'this ticket'
+					});
+					persist();
+					showResult();
+					if (!lastResult.ok) {
+						this._notificationService.warn(`Shell script '${fieldLabel}' failed: ${lastResult.error || `exit code ${lastResult.exitCode}`}`);
+					}
+				} finally {
+					runBtn.disabled = false;
+				}
+			};
+		}
+	}
+
 	/** Git component cards (CI-24): settings form (ticket values win over the template), Run button, last result. */
 	private _hydrateGitPrimitiveCards(): void {
 		if (!this._container) { return; }
@@ -20639,6 +20788,8 @@ ${interpolatedPrompt}`;
 								fType = 'ssh';
 							} else if (isGitTicketValue(parsedCheck)) {
 								fType = 'git';
+							} else if (isShellTicketValue(parsedCheck)) {
+								fType = 'shell';
 							}
 						}
 					} catch { }
@@ -22631,6 +22782,23 @@ ${interpolatedPrompt}`;
 							)
 						))),
 						part('gitCardMount', $('div.git-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' }))
+					))));
+				} else if (fType === 'shell') {
+					// Shell component card (CI-55): settings + confirmation + Run + last result; hydrated by _hydrateShellPrimitiveCards
+					const shellStored = typeof v === 'string' ? v : (v && typeof v === 'object' ? JSON.stringify(v) : '');
+					customFieldsContent.push(part(['sectionCards', 'shellPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card shell-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'shell', 'data-shell-json': textOf(shellStored) },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(245, 158, 11, 0.16); color: #f59e0b; font-weight: 700; text-transform: uppercase;' },
+									'Shell'
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge()
+							)
+						))),
+						part('shellCardMount', $('div.shell-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' }))
 					))));
 				} else if (fType === 'ssh') {
 					let sshHost: string = fieldItem.sshHost || '';

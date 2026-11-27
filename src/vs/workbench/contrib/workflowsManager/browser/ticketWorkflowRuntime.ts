@@ -13,7 +13,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText, IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText, IGitRunResult, IShellRunResult } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { maskBrowserCredentialHeaders, maskBrowserCredentials, maskSecrets, mergeBrowserRequestHeaders, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { createDefaultFreestyleSchema, getProgrammaticTicketTypeError, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
@@ -44,6 +44,8 @@ import { IPathService } from '../../../services/path/common/pathService.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { env as processEnv } from '../../../../base/common/process.js';
 import { IHumanDecisionContext, IHumanDecisionService, normalizeDecisionButtons, publishButtonGroupOutputs, resolveWaitingPrompt } from '../common/humanDecision.js';
+import { IShellComponentConfig, ShellPlanResult, buildShellPlan, buildShellTicketValue, effectiveShellConfig, getShellConfirmationKey, isShellConfigConfirmed, isShellTicketValue, normalizeShellTicketValue, pickShellConfig, publishShellOutputs, runShellPlan, shellFailureResult, shellMainOutput, shellNeedsConfirmationMessage, shellTicketValueOutputText, SHELL_MAX_OUTPUT_BYTES } from '../../customModules/common/shellComponent.js';
+import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -538,6 +540,17 @@ export interface ITicketWorkflowRuntimeService {
 		config: IGitComponentConfig,
 		options: { contextVariables?: Record<string, unknown>; resolve?: (text: string) => string; baseDir?: string }
 	): Promise<IGitRunResult>;
+
+	/**
+	 * Runs a shell component configuration (CI-55). Fails without running when no marker in `confirmationMarkers`
+	 * confirms this script (`confirmWhere` names where a person can confirm it). {variables} (from `resolve`, or from
+	 * `contextVariables`) are passed as ANYAGENT_VAR_* environment variables, never pasted into the script. Runs in the
+	 * shared process; Stop kills the process group. Never throws.
+	 */
+	executeShellComponent(
+		config: IShellComponentConfig,
+		options: { contextVariables?: Record<string, unknown>; resolve?: (text: string) => string; baseDir?: string; confirmationMarkers: readonly (string | undefined)[]; confirmWhere: string }
+	): Promise<IShellRunResult>;
 
 	validateAndSanitizeComponentOutput(
 		fieldType: CustomFieldType | string,
@@ -2572,6 +2585,26 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'shell': {
+							// Shell component (CI-55): the ticket's own settings win over the template; never retried
+							const rawShellMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
+							const ticketShell = normalizeShellTicketValue(rawShellMeta);
+							const shellConfig = effectiveShellConfig(pickShellConfig(field), ticketShell);
+							const shellRes = await this.executeShellComponent(shellConfig, {
+								contextVariables,
+								baseDir: wsUri.fsPath,
+								confirmationMarkers: [field.shellConfirmedHash, ticketShell?.shellConfirmedHash],
+								confirmWhere: `ticket '${ticketResult.title || ticketResult.ticketId}'`
+							});
+							customMetadata[fieldLabel] = JSON.stringify(buildShellTicketValue(ticketShell, shellRes));
+							stepOutput = publishShellOutputs(contextVariables, fieldLabel, shellRes);
+							stepDetails = { ...shellRes };
+							if (!shellRes.ok) {
+								throw new Error(shellRes.needsConfirmation ? (shellRes.error ?? 'Shell script needs confirmation') : `${shellRes.shell} script '${fieldLabel}': ${shellRes.error || `exit code ${shellRes.exitCode}`}${shellRes.stderr && shellRes.stderr !== shellRes.error ? `\n${shellRes.stderr.slice(0, 2000)}` : ''}`);
+							}
+							break;
+						}
+
 						case 'http_request': {
 							const effectiveField: IRuntimeCustomField = { ...field };
 							const rawHttpMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
@@ -4096,6 +4129,27 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 					break;
 				}
+				case 'shell': {
+					// Shell component (CI-55): same outputs as a ticket run
+					const shellConfig = pickShellConfig(field);
+					const nodeName = humanDecisionContext?.workflowNodeLabel;
+					const shellRes = await this.executeShellComponent(shellConfig, {
+						contextVariables,
+						baseDir: workUri.fsPath,
+						confirmationMarkers: [field.shellConfirmedHash],
+						confirmWhere: nodeName ? `the workflow node '${nodeName}' (component '${fieldLabel}')` : `the workflow node with the component '${fieldLabel}'`
+					});
+					field.shellLastResult = buildShellTicketValue(undefined, shellRes).shellLastResult;
+					stepOutput = publishShellOutputs(contextVariables, fieldLabel, shellRes);
+					stepDetails = { ...shellRes };
+					field.lastExecutionLog = `>>> ${shellRes.shell} -c (cwd ${shellRes.cwd || '?'}; exit ${shellRes.exitCode}, ${shellRes.durationMs}ms)\n${shellMainOutput(shellRes)}`;
+					field.lastExecutionOutput = stepOutput;
+					field.lastExecutionExitCode = shellRes.exitCode;
+					if (!shellRes.ok) {
+						throw new Error(shellRes.error || `${shellRes.shell} exited with code ${shellRes.exitCode}`);
+					}
+					break;
+				}
 				case 'http_request': {
 					const httpRes = await this.executeHttpRequest(field, contextVariables);
 					field.httpResponseStatus = httpRes.status;
@@ -4932,6 +4986,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (isGitTicketValue(parsed)) {
 						return gitTicketValueOutputText(parsed);
 					}
+					if (isShellTicketValue(parsed)) {
+						return shellTicketValueOutputText(parsed);
+					}
 					if (parsed.output !== undefined && !Array.isArray(parsed.output)) { return String(parsed.output); }
 					if (parsed.url !== undefined && parsed.content === undefined) { return String(parsed.url); }
 				} catch { }
@@ -4960,6 +5017,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 			if (isGitTicketValue(rawVal)) {
 				return gitTicketValueOutputText(rawVal);
+			}
+			if (isShellTicketValue(rawVal)) {
+				return shellTicketValueOutputText(rawVal);
 			}
 			if (rawVal.output !== undefined && !Array.isArray(rawVal.output)) { return String(rawVal.output); }
 			return JSON.stringify(rawVal, null, 2);
@@ -5829,6 +5889,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (isGitTicketValue(rawMeta)) {
 				return gitTicketValueOutputText(rawMeta);
 			}
+			if (isShellTicketValue(rawMeta)) {
+				return shellTicketValueOutputText(rawMeta);
+			}
 			if (rawMeta.text !== undefined) {
 				const t = String(rawMeta.text).trim();
 				return t ? this._parseOutputFieldValue(t) : null;
@@ -6162,6 +6225,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					// Git primitive (CI-24)
 					if (isGitTicketValue(parsed)) {
 						return gitTicketValueOutputText(parsed);
+					}
+					// Shell primitive (CI-55)
+					if (isShellTicketValue(parsed)) {
+						return shellTicketValueOutputText(parsed);
 					}
 					// Prompt primitive
 					if (parsed.prompt !== undefined || parsed.output !== undefined) {
@@ -6506,6 +6573,76 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}, GIT_COMPONENT_TIMEOUT_MS);
 		} catch (err) {
 			return gitFailureResult(command, `git could not run: ${err?.message || String(err)}`, built.plan.repoPath);
+		} finally {
+			this._activeAbortControllers.delete(controller);
+		}
+	}
+
+	async executeShellComponent(
+		config: IShellComponentConfig,
+		options: { contextVariables?: Record<string, unknown>; resolve?: (text: string) => string; baseDir?: string; confirmationMarkers: readonly (string | undefined)[]; confirmWhere: string }
+	): Promise<IShellRunResult> {
+		// 1. A script written / changed by AI runs only after a person confirmed it (CI-55)
+		try {
+			const storage = this.instantiationService.invokeFunction(accessor => accessor.get(IStorageService));
+			const confirmed = await isShellConfigConfirmed(getShellConfirmationKey(storage), config, options.confirmationMarkers);
+			if (!confirmed) {
+				return shellFailureResult(config, shellNeedsConfirmationMessage(options.confirmWhere), { needsConfirmation: true });
+			}
+		} catch (err) {
+			return shellFailureResult(config, `The shell script could not be checked for confirmation: ${err?.message || String(err)}`, { needsConfirmation: true });
+		}
+
+		// 2. Build: variables become environment variables
+		const resolve = options.resolve ?? ((text: string) => this._interpolateVariables(text, options.contextVariables ?? {}));
+		let homeDir: string | undefined;
+		try {
+			const pathService = this.instantiationService.invokeFunction(accessor => accessor.get(IPathService));
+			homeDir = (await pathService.userHome({ preferLocal: true })).fsPath;
+		} catch {
+			homeDir = processEnv['HOME'] || processEnv['USERPROFILE'] || undefined;
+		}
+		const built: ShellPlanResult = buildShellPlan(config, { resolve, baseDir: options.baseDir, homeDir });
+		if (!built.ok) {
+			return shellFailureResult(config, built.error);
+		}
+		let localService: ILocalGitService | undefined;
+		try {
+			localService = this.instantiationService.invokeFunction(accessor => accessor.get(ILocalGitService));
+		} catch {
+			localService = undefined;
+		}
+		if (!localService) {
+			return shellFailureResult(config, 'Shell scripts can only run in the desktop app (the local process service is not available).', { cwd: built.plan.cwd, shell: built.plan.shell, command: built.plan.script });
+		}
+		const service = localService;
+		// PATH of the user's shell (resolved by the workbench), so the script finds the user's tools
+		const baseEnv: Record<string, string> = {};
+		if (processEnv['PATH']) {
+			baseEnv['PATH'] = processEnv['PATH'];
+		}
+
+		// 3. Run in the shared process; Stop (cancelAllActiveOperations) kills the process group
+		const controller = new AbortController();
+		this._activeAbortControllers.add(controller);
+		const startEpoch = this._cancelEpoch;
+		try {
+			return await runShellPlan(built.plan, async plan => {
+				if (controller.signal.aborted || this._cancelEpoch !== startEpoch) {
+					return { exitCode: 130, stdout: '', stderr: '', durationMs: 0, cancelled: true, error: 'Cancelled by Stop request' };
+				}
+				const opId = generateUuid();
+				const onAbort = () => { service.cancel(opId).catch(() => undefined); };
+				controller.signal.addEventListener('abort', onAbort);
+				try {
+					const res = await service.execShell(opId, { shell: plan.shell, script: plan.script, cwd: plan.cwd, env: { ...baseEnv, ...plan.env }, timeoutMs: plan.timeoutMs, maxOutputBytes: SHELL_MAX_OUTPUT_BYTES });
+					return controller.signal.aborted ? { ...res, cancelled: true, error: res.error || 'Cancelled by Stop request' } : res;
+				} finally {
+					controller.signal.removeEventListener('abort', onAbort);
+				}
+			});
+		} catch (err) {
+			return shellFailureResult(config, `The shell script could not run: ${err?.message || String(err)}`, { cwd: built.plan.cwd, shell: built.plan.shell, command: built.plan.script });
 		} finally {
 			this._activeAbortControllers.delete(controller);
 		}

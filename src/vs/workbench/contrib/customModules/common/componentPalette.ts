@@ -125,6 +125,11 @@ export function createComponentField(item: IComponentPaletteItem, fields: readon
 			field.gitCommand = 'status';
 			field.gitRepoPath = '';
 			break;
+		case 'shell':
+			field.shellScript = '';
+			field.shellCwd = '';
+			field.shellTimeoutSec = 120;
+			break;
 		case 'python':
 			field.pythonPath = '';
 			field.pythonEnvMode = 'existing';

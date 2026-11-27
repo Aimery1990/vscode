@@ -549,7 +549,8 @@ export function publishGitOutputs(context: Record<string, unknown>, label: strin
 // Ticket value (stored in ticket.md)
 // ---------------------------------------------------------------------------------------------
 
-function truncateUtf8(text: string, maxBytes: number): string {
+/** Cuts a text to `maxBytes` UTF-8 bytes (no broken character) and appends a note with the full size. */
+export function truncateUtf8(text: string, maxBytes: number): string {
 	const encoder = new TextEncoder();
 	const bytes = encoder.encode(text);
 	if (bytes.length <= maxBytes) {

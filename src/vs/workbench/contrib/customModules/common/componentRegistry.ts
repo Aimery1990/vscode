@@ -674,6 +674,81 @@ export const COMPONENT_SPECS = {
 		nodePalette: { label: 'Git', accent: '#a3e635', icon: Codicon.gitMerge, tooltip: 'Run a git command (status, clone, checkout, pull, fetch, add, commit, push, log, diff, branch, custom) and publish its output.' }
 	},
 
+	shell: {
+		type: 'shell',
+		displayName: 'Shell (Local Script)',
+		icon: Codicon.terminal,
+		category: 'processing',
+		usableIn: ['ticket', 'node'],
+		ai: 'exposed',
+		purpose: 'Runs a command or multi-line script with zsh, bash or sh on this computer.',
+		description: 'Runs shellScript (one command or a multi-line script) locally with shellType (zsh | bash | sh; default zsh on macOS, bash elsewhere) as `<shell> -c <script>`, in shellCwd (absolute, ~/..., or relative to the workspace / workflow folder; default the workspace folder). shellEnv adds environment variables, one KEY=VALUE per line (no secrets in plain text: a secret-looking name must reference a variable, e.g. API_TOKEN={API_TOKEN}; BASH_ENV, ENV, ZDOTDIR, IFS, LD_* / DYLD_* and ANYAGENT_VAR_* are refused). shellTimeoutSec (default 120, max 3600) kills the whole process group. {variables} in the script are NOT pasted into the script text: each is passed as an environment variable and the reference becomes "${ANYAGENT_VAR_name}", so a value can never inject shell syntax (it stays one word, also inside quotes). References with no value (e.g. awk \'{print $1}\') are left as written. Non-interactive: no stdin, no terminal; commands that prompt fail. SAFETY: a script written or changed by AI must be confirmed by a person (Confirm button on the card, which shows the full script, folder and shell) before its first run; scripts typed in the UI are confirmed implicitly. An unconfirmed script fails the step with "Shell script needs confirmation". A non-zero exit code, a timeout or an invalid config fails the component; it is never retried automatically.',
+		runtime: 'Merges the ticket\'s own settings over the template, checks the confirmation marker (shellConfirmedHash = HMAC of shell + cwd + script + env with a local key; fails the step when it does not match), resolves {variables} into ANYAGENT_VAR_* environment variables, runs `<shell> -c <script>` in the working directory via the shared-process service (stdin closed, no TTY, process group killed on timeout / Stop), captures stdout / stderr (4 MB each), exit code and duration. Publishes the main text and the structured fields; stores the result (stdout / stderr cut to 3072 bytes) under shellLastResult. Exit code != 0, a timeout, an unconfirmed script or an invalid config fails the step (the run stops like for other components); never retried.',
+		props: [
+			{ name: 'shellScript', kind: 'string', required: true, ticketValue: true, description: 'Command or multi-line script. {var} references are passed as environment variables (never pasted as text).' },
+			{ name: 'shellCwd', kind: 'string', ticketValue: true, description: 'Working directory: absolute, ~/..., or relative to the workspace / workflow folder (default: that folder). Supports {var}.' },
+			{ name: 'shellType', kind: 'string', enum: ['zsh', 'bash', 'sh'], default: 'zsh', ticketValue: true, description: 'Shell: zsh (default on macOS), bash (default elsewhere) or sh.' },
+			{ name: 'shellEnv', kind: 'string', ticketValue: true, description: 'Extra environment variables, one KEY=VALUE per line; values support {var}. Never plain-text secrets.' },
+			{ name: 'shellTimeoutSec', kind: 'number', default: 120, ticketValue: true, description: 'Timeout in seconds (1-3600); the process group is killed after it.' },
+			{ name: 'shellConfirmedHash', kind: 'string', role: 'state', ticketValue: true, description: 'Confirmation marker set by the UI (user edit or Confirm dialog). Never written by AI; a changed script invalidates it.' },
+			{ name: 'shellLastResult', kind: 'object', role: 'state', ticketValue: true, description: 'Result of the last run (stdout / stderr cut to 3072 bytes).' }
+		],
+		outputs: [
+			{ name: '{var}', type: 'string', when: 'both', description: 'main text: stdout, or stderr when the script failed', example: '"build ok\\n"' },
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
+			{ name: '{Label.ok}', type: 'boolean', when: 'both', description: 'true when the script exited with 0', example: 'true' },
+			{ name: '{Label.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when it could not start, 124 on timeout)', example: '0' },
+			{ name: '{Label.stdout}', type: 'string', when: 'both', description: 'standard output' },
+			{ name: '{Label.stderr}', type: 'string', when: 'both', description: 'standard error' },
+			{ name: '{Label.command}', type: 'string', when: 'both', description: 'script as executed ({variables} shown as "${ANYAGENT_VAR_...}")', example: '"ls -la \\"${ANYAGENT_VAR_folder}\\""' },
+			{ name: '{Label.cwd}', type: 'string', when: 'both', description: 'working directory', example: '"/Users/me/project"' },
+			{ name: '{Label.durationMs}', type: 'number', when: 'both', description: 'duration in milliseconds', example: '42' },
+			{ name: '{Label}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["shell_1_result"]["exitCode"]); also under {label_key}_result' }
+		],
+		example: {
+			id: 'shell_build',
+			label: 'Build Project',
+			type: 'shell',
+			shellScript: 'npm ci\nnpm run build -- --out "{out_dir}"',
+			shellCwd: '{repo_path}',
+			shellType: 'zsh',
+			shellTimeoutSec: 600
+		},
+		notes: [
+			'Runs real commands on the user\'s computer. A script written or changed by AI does not run until a person confirms it on the card.',
+			'Do not put passwords or tokens into shellScript or shellEnv: reference a variable (e.g. TOKEN={API_TOKEN}).',
+			'{variables} reach the script as environment variables ("${ANYAGENT_VAR_name}"); write them where a shell word is expected. Inside a quoted heredoc (<<\'EOF\') they are not replaced.',
+			'Structured fields are read with a dot: {Build Project.exitCode}, {Build Project.stderr}.'
+		],
+		help: {
+			badge: 'Execution & Automation',
+			summary: 'Runs a command or a multi-line script with zsh, bash or sh on this computer. Shows the script, exit code, duration and output under the card, and passes the result to later steps.',
+			designerConfig: [
+				{ name: 'Script', desc: 'One command or several lines. {variables} are allowed and are passed safely as environment variables.' },
+				{ name: 'Working directory', desc: 'Absolute, ~/..., or relative to the workspace / workflow folder. Empty: the workspace folder.' },
+				{ name: 'Shell', desc: 'zsh (default on macOS), bash or sh.' },
+				{ name: 'Environment', desc: 'Optional KEY=VALUE lines. No plain-text secrets: use KEY={variable}.' },
+				{ name: 'Timeout', desc: 'Seconds before the script and its child processes are stopped (default 120, max 3600).' }
+			],
+			headline: 'How RUN_TICKETS Executes a Shell Script',
+			steps: [
+				{ step: '1. Confirm', detail: 'A script written or changed by AI needs a person\'s confirmation (the card shows the full script, folder and shell). Unconfirmed scripts fail with "Shell script needs confirmation".' },
+				{ step: '2. Resolve', detail: 'Ticket settings win over the template. Each {variable} in the script becomes "${ANYAGENT_VAR_name}" and its value is passed in the environment, so values can never become shell code.' },
+				{ step: '3. Run', detail: '<shell> -c <script> runs in the working directory without input or terminal; after the timeout (or Stop) the whole process group is killed.' },
+				{ step: '4. Publish', detail: '{Label} = stdout (stderr on failure); {Label.ok}, .exitCode, .stdout, .stderr, .command, .cwd, .durationMs. A non-zero exit fails the step; it is never retried automatically.' }
+			],
+			variableResolution: '{Field Label} for the output text, {Field Label.exitCode} / {Field Label.stderr} ... for the fields.',
+			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text) and TICKET_CONTEXT["field_label_result"] (dict).',
+			syntaxExamples: ['ls -la {folder}', 'echo "Hello {name}" > out.txt', '{Build Project.exitCode}', 'TICKET_CONTEXT["build_project_result"]["stdout"]'],
+			tips: [
+				'Commands that ask for input (passwords, y/n) fail: there is no terminal. Use non-interactive flags (e.g. -y).',
+				'For remote servers use the SSH component; for git use the Git component.'
+			]
+		},
+		templatePalette: { defaultName: 'Shell' },
+		nodePalette: { label: 'Shell', accent: '#f59e0b', icon: Codicon.terminal, tooltip: 'Run a local zsh / bash / sh script and publish its output (exit code, stdout, stderr).' }
+	},
+
 	python: {
 		type: 'python',
 		displayName: 'Python (Code Automation)',
@@ -1773,7 +1848,7 @@ export type ComponentType = keyof typeof COMPONENT_SPECS;
 
 /** Order of the template designer / Freestyle toolbox ("Base Primitives"). Every entry needs `templatePalette`. */
 export const TEMPLATE_PALETTE_ORDER: readonly ComponentType[] = [
-	'parameters', 'prompt', 'tts', 'media_player', 'voice_note', 'browser', 'git', 'python', 'http_request', 'table', 'output',
+	'parameters', 'prompt', 'tts', 'media_player', 'voice_note', 'browser', 'git', 'shell', 'python', 'http_request', 'table', 'output',
 	'create_tickets', 'run_tickets', 'get_outputs', 'display', 'sub_workflow',
 	'text', 'textarea', 'number', 'select', 'multiselect', 'switch', 'date', 'time', 'datetime', 'date_range', 'time_range', 'datetime_range',
 	'dynamic_list', 'attachment', 'button_group'
@@ -1782,7 +1857,7 @@ export const TEMPLATE_PALETTE_ORDER: readonly ComponentType[] = [
 /** Order of the workflow editor "Node Components" palette. Every entry needs `nodePalette`. */
 export const NODE_PALETTE_ORDER: readonly ComponentType[] = [
 	'parameters', 'output', 'python', 'create_tickets', 'run_tickets', 'get_outputs', 'get_tickets', 'display',
-	'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'http_request', 'git', 'button_group'
+	'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'shell', 'http_request', 'git', 'button_group'
 ];
 
 /** Help of a Reusable Class instance (a Container bound to a composite class); not a component type of its own. */

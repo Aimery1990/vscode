@@ -4646,14 +4646,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				const isDirectComponentStep = stepComp && (
 					step.type === 'component' ||
-					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'git', 'python', 'http_request', 'button_group'].includes(stepComp.type)
+					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'git', 'shell', 'python', 'http_request', 'button_group'].includes(stepComp.type)
 				);
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));
 
 				const isSubWorkflowStep = stepComp?.type === 'sub_workflow';
-				// A git command (commit, push, clone ...) or a human decision (CI-25) is never retried automatically
-				const isTicketSideEffectStep = isSubWorkflowStep || stepComp?.type === 'git' || stepComp?.type === 'button_group' || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
+				// A git command (commit, push, clone ...), a shell script (CI-55) or a human decision (CI-25) is never retried automatically
+				const isTicketSideEffectStep = isSubWorkflowStep || stepComp?.type === 'git' || stepComp?.type === 'shell' || stepComp?.type === 'button_group' || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
 				const maxStepAttempts = isTicketSideEffectStep ? 1 : 3;
 				let stepAttempt = 0;
 
