@@ -16,7 +16,9 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { maskBrowserCredentialHeaders, maskBrowserCredentials, maskSecrets, mergeBrowserRequestHeaders, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
-import { SUB_WORKFLOW_TICKET_TYPE, createDefaultFreestyleSchema, getProgrammaticTicketTypeError, getReservedTemplateCreateError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { createDefaultFreestyleSchema, getProgrammaticTicketTypeError, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { SUB_WORKFLOW_TICKET_TYPE, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
+import { getTemplateCreateTypeError } from '../../customModules/common/templateNameClash.js';
 import { ISubWorkflowContract, ISubWorkflowTicketSummary, buildSubWorkflowContract, buildSubWorkflowTicketMetadata, buildSubWorkflowTicketSummary, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition, subWorkflowSummaryFromMetadata } from '../common/subWorkflowTicket.js';
 import { buildPrimitivesCatalog } from '../../customModules/common/componentRegistry.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
@@ -609,9 +611,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// 1. Locate schema definition (normalize spaces, hyphens, and underscores so "Job_Filter", "Job Filter", and "job-filter" all match)
 			const allModules = await this.customModulesService.getCustomModules(wsUri);
 			const matchedModule = this._findMatchingCustomModule(allModules, ticketType);
-			const reservedTemplateError = getReservedTemplateCreateError(matchedModule);
+			const reservedTemplateError = getTemplateCreateTypeError(matchedModule);
 			if (reservedTemplateError) {
-				// A (legacy) template using a reserved name would produce a ticket read as Freestyle / Sub-Workflow
+				// A (legacy) template whose name clashes with a built-in ticket type (Freestyle or sub_workflow) would produce a ticket read as that type
 				throw new Error(reservedTemplateError);
 			}
 			const canonicalTicketType = matchedModule ? matchedModule.id : ticketType;

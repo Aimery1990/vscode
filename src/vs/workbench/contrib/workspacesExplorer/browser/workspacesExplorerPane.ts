@@ -48,7 +48,8 @@ import { isCommentKeybinding, togglePythonComment } from '../../customModules/br
 import { stringifyYaml } from '../../customModules/browser/customModulesService.js';
 import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/common/browserCredentials.js';
-import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType, isReservedTemplate } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
+import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
@@ -3103,7 +3104,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				bg: hexToRgba(FREESTYLE_TICKET_COLOR, 0.18)
 			};
 			// A (legacy) template using the reserved "freestyle" name is never offered: "Freestyle" always means no template
-			const customTypes = customModules.filter(m => !isReservedTemplate(m)).map(m => {
+			const customTypes = customModules.filter(m => !clashesWithBuiltInTicketType(m)).map(m => {
 				const icon = m.icon
 					? resolveCustomModuleIcon(m.icon, m.id)
 					: (systemPreconfiguredIcons[m.id.toLowerCase()] || resolveCustomModuleIcon(undefined, m.id));

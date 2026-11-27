@@ -12,7 +12,8 @@ import { IAgentsManagerService } from '../../../agentsManager/common/agentsManag
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ISqliteTableOperationResult, ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { findTemplateField, getTemplateFields, parseTemplateYaml } from '../../../customModules/common/templateYaml.js';
-import { getProgrammaticTicketTypeError, isFreestyleTicketType, isSubWorkflowTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
+import { getProgrammaticTicketTypeError, isFreestyleTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
+import { isSubWorkflowTicketType } from '../../../customModules/common/subWorkflowType.js';
 import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';

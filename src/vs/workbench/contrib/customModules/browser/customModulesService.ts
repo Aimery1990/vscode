@@ -23,7 +23,7 @@ import {
 	getDefaultCustomModuleColor
 } from '../../entityPersistence/common/entityPersistence.js';
 import { parseTemplateYaml } from '../common/templateYaml.js';
-import { getReservedTemplateNameError, getReservedTypeNameMessage, isReservedTemplate, isReservedTicketTypeName } from '../common/freestyleTicket.js';
+import { clashesWithBuiltInTicketType, getTemplateNameClashError, getTemplateNameClashMessage, isBuiltInTicketTypeName } from '../common/templateNameClash.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
 import { getAnyAgentGlobalFolders } from '../common/anyagentGlobalPaths.js';
@@ -423,7 +423,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 	private async _findReservedTemplateNameError(modules: ICustomModule[], targetUri: URI | undefined): Promise<string | undefined> {
 		const globalDir = this.getGlobalEntityTypeDir();
 		for (const m of modules) {
-			if (!isReservedTemplate(m)) {
+			if (!clashesWithBuiltInTicketType(m)) {
 				continue;
 			}
 			const filename = `${m.id}.yaml`;
@@ -442,7 +442,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 					}
 				} catch { }
 			}
-			const error = getReservedTemplateNameError(m, existing ? { id: m.id, name: typeof existing.name === 'string' ? existing.name : m.name } : undefined);
+			const error = getTemplateNameClashError(m, existing ? { id: m.id, name: typeof existing.name === 'string' ? existing.name : m.name } : undefined);
 			if (error) {
 				return error;
 			}
@@ -831,9 +831,9 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 			if (found) {
 				targetModuleName = found.name;
 			} else {
-				if (isReservedTicketTypeName(targetModuleId)) {
+				if (isBuiltInTicketTypeName(targetModuleId)) {
 					// Opening the designer on an unknown id would create that template
-					this.notificationService.error(getReservedTypeNameMessage(targetModuleId));
+					this.notificationService.error(getTemplateNameClashMessage(targetModuleId));
 					return;
 				}
 				targetModuleName = targetModuleId;
@@ -846,7 +846,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 				validateInput: async value => {
 					const trimmed = value.trim();
 					const candidateId = trimmed.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-					return isReservedTemplate({ id: candidateId, name: trimmed }) ? getReservedTypeNameMessage(trimmed) : undefined;
+					return clashesWithBuiltInTicketType({ id: candidateId, name: trimmed }) ? getTemplateNameClashMessage(trimmed) : undefined;
 				}
 			});
 			if (!enteredName || !enteredName.trim()) {
@@ -854,8 +854,8 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 			}
 			targetModuleName = enteredName.trim();
 			targetModuleId = targetModuleName.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-			if (isReservedTemplate({ id: targetModuleId, name: targetModuleName })) {
-				this.notificationService.error(getReservedTypeNameMessage(targetModuleName));
+			if (clashesWithBuiltInTicketType({ id: targetModuleId, name: targetModuleName })) {
+				this.notificationService.error(getTemplateNameClashMessage(targetModuleName));
 				return;
 			}
 

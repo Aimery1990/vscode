@@ -45,7 +45,7 @@ import { IMediaSubtitleSettingsWidget, renderMediaSubtitleSettings } from './med
 import { IMediaFileFacts } from '../../voiceModels/common/subtitleConfig.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
-import { isReservedTemplate } from '../common/freestyleTicket.js';
+import { clashesWithBuiltInTicketType } from '../common/templateNameClash.js';
 import { checkTemplateCallCycle, renderSubWorkflowPickerRow, resolveSubWorkflowContract } from './subWorkflowTemplateCard.js';
 import { IWorkflowExecutionService } from '../../workflowsManager/common/workflowExecutionService.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -1267,7 +1267,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			const newField = createComponentField(bc, fields, {
 				defaultModel: resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }),
 				// Freestyle tickets can only be created manually in the UI: never default to a reserved-name template
-				defaultTicketType: allWorkspaceModules.find(m => !isReservedTemplate(m))?.name || ''
+				defaultTicketType: allWorkspaceModules.find(m => !clashesWithBuiltInTicketType(m))?.name || ''
 			});
 			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= fields.length) {
 				const safeInsertIndex = Math.max(1, insertIndex);
@@ -14915,7 +14915,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						})) as HTMLSelectElement;
 						append(typeSelect, $('option', { value: '' }, '-- Select Ticket Type --'));
 						// Freestyle tickets can only be created manually in the UI: not offered here
-						allWorkspaceModules.filter(m => !isReservedTemplate(m)).forEach(m => {
+						allWorkspaceModules.filter(m => !clashesWithBuiltInTicketType(m)).forEach(m => {
 							const opt = append(typeSelect, $('option', { value: m.name }, m.name)) as HTMLOptionElement;
 							if ((field.wfTicketType || '').toLowerCase() === (m.name || '').toLowerCase()) {
 								opt.selected = true;

@@ -11,7 +11,7 @@ import { ICustomModulesService } from '../../common/customModules.js';
 import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/workspacesExplorer.js';
 import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, normalizeFieldType } from '../../../entityPersistence/common/entityPersistence.js';
 import { resolveDefaultModel } from '../../../agentsManager/common/agentsManager.js';
-import { getReservedTemplateNameError } from '../../common/freestyleTicket.js';
+import { getTemplateNameClashError } from '../../common/templateNameClash.js';
 import { IAiBasePrimitive, IComponentConfigProp, buildAiBasePrimitives, describeAiConfigProps, getAiConfigProps, getAiTemplateComponentTypes, getSecretPropNames } from '../../common/componentRegistry.js';
 import { coerceComponentConfigValue, validateComponentConfig } from '../../common/componentConfigSchema.js';
 
@@ -487,7 +487,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 			}
 
 			// "freestyle" is reserved for Freestyle tickets (no template): never create or rename a template to it
-			const reservedNameError = getReservedTemplateNameError(
+			const reservedNameError = getTemplateNameClashError(
 				{ id: cleanId, name: (params.module_name || existingMod?.name || cleanId).trim() },
 				existingMod ? { id: existingMod.id, name: existingMod.name } : undefined
 			);

@@ -43,7 +43,9 @@ import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { CustomModuleSchemaEditor } from '../../customModules/browser/customModuleSchemaEditor.js';
 import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHelpGuide.js';
-import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, isReservedTemplate, isSubWorkflowTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
+import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
@@ -1521,7 +1523,7 @@ export class EntityDetailEditor extends EditorPane {
 		try {
 			const modules = await this._customModulesService.getCustomModules(await this._findWorkspaceRootForTicket(ticketUri));
 			// Freestyle tickets can only be created manually in the UI: never default to a reserved-name template
-			return modules.find(m => !isReservedTemplate(m))?.name || '';
+			return modules.find(m => !clashesWithBuiltInTicketType(m))?.name || '';
 		} catch {
 			return '';
 		}

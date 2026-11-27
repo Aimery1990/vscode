@@ -21,7 +21,7 @@ import { IPathService } from '../../../services/path/common/pathService.js';
 import { getAnyAgentGlobalFolders, IAnyAgentGlobalFolders, toFolderAccessError } from '../../customModules/common/anyagentGlobalPaths.js';
 import { Sequencer } from '../../../../base/common/async.js';
 import { IDisposable } from '../../../../base/common/lifecycle.js';
-import { SUB_WORKFLOW_TICKET_TYPE, isSubWorkflowTicketType } from '../../customModules/common/freestyleTicket.js';
+import { SUB_WORKFLOW_TICKET_TYPE, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import {
 	SUB_WORKFLOW_MIGRATED_IDS_STORAGE_KEY,
 	SUB_WORKFLOW_TICKET_INDEX_STORAGE_KEY,

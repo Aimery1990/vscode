@@ -12,7 +12,8 @@ import { INativeEnvironmentService } from '../../../../platform/environment/comm
 import { IEntityPersistenceService, IBaseEntitySnapshot } from '../common/entityPersistence.js';
 import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { dirname } from '../../../../base/common/resources.js';
-import { FREESTYLE_TYPE_DEFINITION, FREESTYLE_TYPE_PROMPT, SUB_WORKFLOW_TYPE_DEFINITION, SUB_WORKFLOW_TYPE_PROMPT } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_TYPE_DEFINITION, FREESTYLE_TYPE_PROMPT } from '../../customModules/common/freestyleTicket.js';
+import { SUB_WORKFLOW_TYPE_DEFINITION, SUB_WORKFLOW_TYPE_PROMPT } from '../../customModules/common/subWorkflowType.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';

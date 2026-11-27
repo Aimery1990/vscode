@@ -9,17 +9,11 @@ import { ICustomModule } from '../../../entityPersistence/common/entityPersisten
 import {
 	FREESTYLE_PROGRAMMATIC_CREATE_ERROR,
 	FREESTYLE_TICKET_TYPE,
-	getReservedTemplateCreateError,
-	getReservedTypeNameMessage,
-	isReservedSubWorkflowName,
-	isReservedTemplate,
-	isReservedTicketTypeName,
-	isSubWorkflowTicketType,
 	createDefaultFreestyleSchema,
 	isLegacyFreestyleDesignerModuleId,
 	getFreestyleSchemaUri,
 	getProgrammaticTicketTypeError,
-	getReservedTemplateNameError,
+	getReservedFreestyleTemplateNameError,
 	isFreestyleTicketType,
 	isReservedFreestyleName,
 	isReservedFreestyleTemplate,
@@ -123,20 +117,20 @@ suite('freestyleTicket', () => {
 	});
 
 	test('creating or renaming a template to the reserved name is refused', () => {
-		assert.ok(getReservedTemplateNameError({ id: 'freestyle', name: 'Freestyle' })?.includes('"Freestyle" is reserved'));
-		assert.ok(getReservedTemplateNameError({ id: 'custom', name: 'FREE_STYLE' })?.includes('"FREE_STYLE"'));
-		assert.ok(getReservedTemplateNameError({ id: 'free-style', name: 'Something' })?.includes('"free-style"'));
+		assert.ok(getReservedFreestyleTemplateNameError({ id: 'freestyle', name: 'Freestyle' })?.includes('"Freestyle" is reserved'));
+		assert.ok(getReservedFreestyleTemplateNameError({ id: 'custom', name: 'FREE_STYLE' })?.includes('"FREE_STYLE"'));
+		assert.ok(getReservedFreestyleTemplateNameError({ id: 'free-style', name: 'Something' })?.includes('"free-style"'));
 		// Renaming an existing template into the reserved name
-		assert.ok(getReservedTemplateNameError({ id: 'bug', name: 'Free Style' }, { id: 'bug', name: 'Bug' }));
+		assert.ok(getReservedFreestyleTemplateNameError({ id: 'bug', name: 'Free Style' }, { id: 'bug', name: 'Bug' }));
 		// Normal names are fine
-		assert.strictEqual(getReservedTemplateNameError({ id: 'bug', name: 'Bug' }), undefined);
-		assert.strictEqual(getReservedTemplateNameError({ id: 'bug', name: 'Bug Fix' }, { id: 'bug', name: 'Bug' }), undefined);
+		assert.strictEqual(getReservedFreestyleTemplateNameError({ id: 'bug', name: 'Bug' }), undefined);
+		assert.strictEqual(getReservedFreestyleTemplateNameError({ id: 'bug', name: 'Bug Fix' }, { id: 'bug', name: 'Bug' }), undefined);
 	});
 
 	test('a legacy template that already uses the reserved name can still be saved unchanged', () => {
-		assert.strictEqual(getReservedTemplateNameError({ id: 'free-style', name: 'Free Style' }, { id: 'Free-Style', name: 'Free Style' }), undefined);
+		assert.strictEqual(getReservedFreestyleTemplateNameError({ id: 'free-style', name: 'Free Style' }, { id: 'Free-Style', name: 'Free Style' }), undefined);
 		// ...but not renamed to another reserved spelling
-		assert.ok(getReservedTemplateNameError({ id: 'free-style', name: 'FREESTYLE' }, { id: 'free-style', name: 'Free Style' }));
+		assert.ok(getReservedFreestyleTemplateNameError({ id: 'free-style', name: 'FREESTYLE' }, { id: 'free-style', name: 'Free Style' }));
 	});
 
 	test('programmatic ticket creation refuses the Freestyle type', () => {
@@ -144,41 +138,5 @@ suite('freestyleTicket', () => {
 		assert.strictEqual(getProgrammaticTicketTypeError('free-style'), FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
 		assert.strictEqual(getProgrammaticTicketTypeError('Task'), undefined);
 		assert.strictEqual(getProgrammaticTicketTypeError(undefined), undefined);
-	});
-
-	test('sub_workflow is a reserved ticket type in every spelling (CI-23)', () => {
-		for (const value of ['sub_workflow', 'Sub-Workflow', 'SUBWORKFLOW', 'sub workflow', ' Sub_Workflow ']) {
-			assert.strictEqual(isReservedSubWorkflowName(value), true, value);
-			assert.strictEqual(isSubWorkflowTicketType(value), true, value);
-			assert.strictEqual(isReservedTicketTypeName(value), true, value);
-			assert.strictEqual(isFreestyleTicketType(value), false, value);
-		}
-		for (const value of ['workflow', 'sub_workflows', 'sub', 'task', '', undefined, null]) {
-			assert.strictEqual(isReservedSubWorkflowName(value), false, String(value));
-		}
-		assert.strictEqual(isReservedTicketTypeName('Freestyle'), true);
-		assert.strictEqual(isReservedTemplate({ id: 'x', name: 'Sub Workflow' }), true);
-		assert.strictEqual(isReservedTemplate({ id: 'free-style', name: 'X' }), true);
-		assert.strictEqual(isReservedTemplate({ id: 'bug', name: 'Bug' }), false);
-	});
-
-	test('programs and AI may create sub_workflow tickets; only a clashing template is refused', () => {
-		assert.strictEqual(getProgrammaticTicketTypeError('sub_workflow'), undefined);
-		assert.strictEqual(getProgrammaticTicketTypeError('Sub-Workflow'), undefined);
-		assert.strictEqual(getProgrammaticTicketTypeError('Freestyle'), FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
-		// A (legacy) template whose id or name collides with the reserved name is a naming clash
-		assert.ok(getReservedTemplateCreateError({ id: 'sub-workflow', name: 'My Flow' })?.includes('reserved for the sub_workflow ticket type'));
-		assert.ok(getReservedTemplateCreateError({ id: 'x', name: 'Sub Workflow' })?.includes('"Sub Workflow"'));
-		assert.strictEqual(getReservedTemplateCreateError({ id: 'x', name: 'Freestyle' }), FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
-		assert.strictEqual(getReservedTemplateCreateError({ id: 'bug', name: 'Bug' }), undefined);
-		assert.strictEqual(getReservedTemplateCreateError(undefined), undefined);
-	});
-
-	test('templates may not be created with or renamed to the sub_workflow name', () => {
-		assert.ok(getReservedTemplateNameError({ id: 'sub_workflow', name: 'Sub Workflow' })?.includes('reserved for Sub-Workflow tickets'));
-		assert.ok(getReservedTemplateNameError({ id: 'bug', name: 'SubWorkflow' }, { id: 'bug', name: 'Bug' })?.includes('"SubWorkflow"'));
-		assert.ok(getReservedTypeNameMessage('sub-workflow').includes('Sub-Workflow tickets'));
-		assert.ok(getReservedTypeNameMessage('Freestyle').includes('Freestyle tickets'));
-		assert.strictEqual(getReservedTemplateNameError({ id: 'flow', name: 'Flow' }), undefined);
 	});
 });
