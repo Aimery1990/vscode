@@ -11,6 +11,33 @@ export interface IGitPullOptions {
 	readonly allowHardResetOnDivergence?: boolean;
 }
 
+/** Options of {@link ILocalGitService.exec} (AnyAgent git component, CI-24). */
+export interface IGitExecOptions {
+	/** Working directory (native path). Must exist. */
+	readonly cwd?: string;
+	/** Kills the process (and its children) after this many ms. */
+	readonly timeoutMs?: number;
+	/** Extra environment variables (merged over the process environment and the non-interactive defaults). */
+	readonly env?: Readonly<Record<string, string>>;
+	/** Bytes kept per stream (stdout / stderr); the rest is dropped and the stream marked truncated. */
+	readonly maxOutputBytes?: number;
+}
+
+/** Result of {@link ILocalGitService.exec}. Never rejects for a failing git command: the exit code tells. */
+export interface IGitExecResult {
+	/** Exit code; -1 when git could not be started, 124 on timeout (when the process reported no code). */
+	readonly exitCode: number;
+	readonly stdout: string;
+	readonly stderr: string;
+	readonly durationMs: number;
+	readonly timedOut: boolean;
+	readonly cancelled?: boolean;
+	readonly stdoutTruncated?: boolean;
+	readonly stderrTruncated?: boolean;
+	/** Why git could not be started or was stopped. */
+	readonly error?: string;
+}
+
 /**
  * Low-level service for executing git commands on the local machine.
  * Used in the shared process where Node.js APIs are available.
@@ -26,4 +53,9 @@ export interface ILocalGitService {
 	fetch(operationId: string, repoPath: string): Promise<void>;
 	revListCount(repoPath: string, fromRef: string, toRef: string): Promise<number>;
 	cancel(operationId: string): Promise<void>;
+	/**
+	 * Runs `git <args>` as an argv array (no shell), non-interactively (`GIT_TERMINAL_PROMPT=0`, no controlling
+	 * terminal), capturing stdout, stderr, exit code and duration. Cancel it with {@link cancel}.
+	 */
+	exec(operationId: string, args: readonly string[], options?: IGitExecOptions): Promise<IGitExecResult>;
 }

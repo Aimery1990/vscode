@@ -6,13 +6,15 @@
 import * as cp from 'child_process';
 import { CancellationError } from '../../../base/common/errors.js';
 import { generateUuid } from '../../../base/common/uuid.js';
-import { IGitPullOptions, ILocalGitService } from '../common/localGitService.js';
+import { IGitExecOptions, IGitExecResult, IGitPullOptions, ILocalGitService } from '../common/localGitService.js';
+import { IRunningGitCommand, startGitCommand } from './gitCommandRunner.js';
 import { ILogService } from '../../log/common/log.js';
 
 export class LocalGitService implements ILocalGitService {
 	declare readonly _serviceBrand: undefined;
 
 	private _runningProcesses = new Map<string, cp.ChildProcess>();
+	private _runningCommands = new Map<string, IRunningGitCommand>();
 
 	constructor(
 		@ILogService private readonly _logService: ILogService,
@@ -150,7 +152,23 @@ export class LocalGitService implements ILocalGitService {
 		return Number(result.trim()) || 0;
 	}
 
+	async exec(operationId: string, args: readonly string[], options?: IGitExecOptions): Promise<IGitExecResult> {
+		this._logService.trace(`[LocalGitService] exec git ${args.join(' ')}${options?.cwd ? ` (cwd: ${options.cwd})` : ''}`);
+		const running = startGitCommand(args, options);
+		this._runningCommands.set(operationId, running);
+		try {
+			return await running.result;
+		} finally {
+			this._runningCommands.delete(operationId);
+		}
+	}
+
 	async cancel(operationId: string): Promise<void> {
+		const command = this._runningCommands.get(operationId);
+		if (command) {
+			this._runningCommands.delete(operationId);
+			command.kill();
+		}
 		const proc = this._runningProcesses.get(operationId);
 		if (proc) {
 			this._runningProcesses.delete(operationId);
