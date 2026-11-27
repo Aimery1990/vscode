@@ -58,7 +58,9 @@ import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponen
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { MASKED_SECRET, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
-import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
+import { GIT_CONFIG_KEYS, IGitComponentConfig, buildGitTicketValue, effectiveGitConfig, gitMainOutput, gitOutputFields, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig } from '../../customModules/common/gitComponent.js';
+import { renderGitConfigForm, renderGitResultView } from '../../customModules/browser/gitComponentView.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -245,6 +247,8 @@ interface IEditorParts {
 	customFieldCards?: HTMLElement[];
 	sectionTitle?: HTMLElement;
 	sshCardMount?: HTMLElement;
+	gitCardMount?: HTMLElement;
+	gitPrimitiveCards?: HTMLElement[];
 	sshHeaderTargetBadge?: HTMLElement;
 	sshPrimitiveCards?: HTMLElement[];
 	statusLifecycleInfoBtn?: HTMLButtonElement;
@@ -298,7 +302,7 @@ const SHOW_TICKET_INSTRUCTIONS = false;
 type EditorPartRole = keyof IEditorParts;
 
 /** Roles that keep every element built for them (in build order). */
-const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['attachmentCards', 'browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
+const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['attachmentCards', 'browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'gitPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
 
 const partRolesOf = new WeakMap<Element, readonly EditorPartRole[]>();
 const builtParts = new WeakMap<Element, IEditorParts>();
@@ -2463,6 +2467,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateMediaPlayerPrimitiveCards();
 		await this._hydrateTablePrimitiveCards();
 		await this._hydrateSshPrimitiveCards();
+		this._hydrateGitPrimitiveCards();
 		this._renderBrowserCredentialNames();
 		this._appendWorkflowRuntimeBlocks(mod);
 		this._applySavedScrollPosition(scrollKey);
@@ -2696,6 +2701,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateMediaPlayerPrimitiveCards();
 			await this._hydrateTablePrimitiveCards();
 			await this._hydrateSshPrimitiveCards();
+			this._hydrateGitPrimitiveCards();
 			this._renderBrowserCredentialNames();
 			this._applyAttachmentTamperMarks();
 			this._checkAttachmentIntegrity(this._entityUri, loadSeq);
@@ -9326,6 +9332,17 @@ ${rawErr}
 					subProps['host'] = sshHost;
 					subProps['cwd'] = sshCwd;
 					subProps['command'] = sshCmd;
+				} else if (f.type === 'git') {
+					const gitVal = normalizeGitTicketValue(savedObj);
+					const lastGit = gitVal?.gitLastResult ?? f.gitLastResult;
+					if (lastGit) {
+						primitiveVal = gitMainOutput(lastGit);
+						for (const [gk, gv] of Object.entries(gitOutputFields(lastGit))) {
+							subProps[gk] = String(gv);
+						}
+					} else {
+						primitiveVal = typeof savedObj === 'string' ? savedObj : (f.gitRemoteUrl || '');
+					}
 				} else if (f.type === 'http_request') {
 					let resBody = '';
 					let resData: unknown = undefined;
@@ -16554,6 +16571,106 @@ ${rawErr}
 		}
 	}
 
+	/** Git component cards (CI-24): settings form (ticket values win over the template), Run button, last result. */
+	private _hydrateGitPrimitiveCards(): void {
+		if (!this._container) { return; }
+		const cards = Array.from((this._pageParts.gitPrimitiveCards ?? [])) as HTMLElement[];
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const fieldId = card.getAttribute('data-field-id') || '';
+			const mount = partsOf(card).gitCardMount as HTMLElement | null;
+			if (!mount || !fieldKey) { continue; }
+			clearNode(mount);
+			const schemaField = this._lastCustomModule?.fields?.find(f => (fieldId && f.id === fieldId) || f.label === fieldKey);
+			const templateConfig = pickGitConfig(schemaField);
+			const stored = normalizeGitTicketValue(card.getAttribute('data-git-json') || '');
+			let ticketConfig: IGitComponentConfig = pickGitConfig(stored);
+			let lastResult: IGitRunResult | undefined = stored?.gitLastResult ?? schemaField?.gitLastResult;
+			const isNodeView = this._isPreviewMode;
+
+			const persist = () => {
+				const value = buildGitTicketValue(ticketConfig, lastResult);
+				const str = JSON.stringify(value);
+				card.setAttribute('data-git-json', str);
+				if (!this._isPreviewMode) {
+					this._persistCustomFieldQuietly(fieldKey, str);
+				}
+			};
+
+			if (isGitReferenceOnly(effectiveGitConfig(templateConfig, ticketConfig)) && templateConfig.gitRemoteUrl) {
+				mount.appendChild($('div', { style: 'font-size: 11.5px; opacity: 0.75;' }, `Repository: ${templateConfig.gitRemoteUrl}${schemaField?.gitBranch ? ` (${schemaField.gitBranch})` : ''} — pick a command below to run git.`));
+			}
+			const formBox = append(mount, $('div.git-card-form'));
+			let saveTimer: ReturnType<typeof setTimeout> | undefined;
+			const initialForm: IGitComponentConfig = { ...ticketConfig, gitCommand: ticketConfig.gitCommand ?? templateConfig.gitCommand ?? 'status' };
+			renderGitConfigForm(formBox, initialForm, next => {
+				const own: IGitComponentConfig = {};
+				for (const key of GIT_CONFIG_KEYS) {
+					const val = next[key];
+					// An empty text keeps the template value; the command and switches are stored as set
+					if (val !== undefined && val !== '') {
+						Reflect.set(own, key, val);
+					}
+				}
+				ticketConfig = own;
+				if (saveTimer) { clearTimeout(saveTimer); }
+				saveTimer = setTimeout(persist, 350);
+			}, { fallback: templateConfig });
+
+			const actions = append(mount, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+			const runBtn = append(actions, $('button.git-run-btn', {
+				type: 'button',
+				title: 'Run this git command now',
+				'aria-label': 'Run git command',
+				style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 12px; font-size: 12px; border-radius: 4px; border: 1px solid rgba(163, 230, 53, 0.45); background: rgba(163, 230, 53, 0.14); color: inherit; cursor: pointer;'
+			}, $('span.codicon.codicon-play', { style: 'font-size: 12px;' }), 'Run')) as HTMLButtonElement;
+			if (isNodeView) {
+				append(actions, $('span', { style: 'font-size: 11px; opacity: 0.6;' }, 'Node view: edit the settings in the node\'s component editor.'));
+			}
+			const resultMount = append(mount, $('div.git-card-result'));
+			const showResult = (running = false) => renderGitResultView(resultMount, lastResult, {
+				running,
+				emptyText: 'Not run yet. Click Run, or run the ticket.',
+				onCopy: text => {
+					this._clipboardService.writeText(text);
+					this._notificationService.info('Git output copied to clipboard.');
+				}
+			});
+			showResult();
+
+			runBtn.onclick = async e => {
+				e.preventDefault();
+				e.stopPropagation();
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.error('Ticket workflow runtime service is not available.');
+					return;
+				}
+				if (saveTimer) { clearTimeout(saveTimer); saveTimer = undefined; }
+				runBtn.disabled = true;
+				showResult(true);
+				try {
+					const wsRootUri = this._entityUri ? await this._workspacesExplorerService?.findWorkspaceRootUri(this._entityUri) : undefined;
+					const wsFolder = this._entityUri ? this._workspaceContextService.getWorkspaceFolder(this._entityUri) : undefined;
+					const baseUri = wsRootUri || wsFolder?.uri;
+					lastResult = await runtime.executeGitComponent(effectiveGitConfig(templateConfig, ticketConfig), {
+						resolve: text => this._interpolateParameters(text),
+						baseDir: baseUri?.fsPath
+					});
+					persist();
+					showResult();
+					if (!lastResult.ok) {
+						this._notificationService.warn(`git ${lastResult.gitCommand} failed: ${lastResult.error || `exit code ${lastResult.exitCode}`}`);
+					}
+				} finally {
+					runBtn.disabled = false;
+				}
+			};
+		}
+	}
+
 	private async _hydrateSshPrimitiveCards(): Promise<void> {
 		if (!this._container) { return; }
 		const cards = Array.from((this._pageParts.sshPrimitiveCards ?? [])) as HTMLElement[];
@@ -20443,6 +20560,8 @@ ${interpolatedPrompt}`;
 								fType = 'http_request';
 							} else if (isSshTicketValue(parsedCheck)) {
 								fType = 'ssh';
+							} else if (isGitTicketValue(parsedCheck)) {
+								fType = 'git';
 							}
 						}
 					} catch { }
@@ -22413,6 +22532,23 @@ ${interpolatedPrompt}`;
 							)
 						))),
 						part(['customFieldView', 'customFieldViews', 'tableCardMount'], $('div.custom-field-view.table-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' }))
+					))));
+				} else if (fType === 'git') {
+					// Git component card (CI-24): settings + Run + last result; hydrated by _hydrateGitPrimitiveCards
+					const gitStored = typeof v === 'string' ? v : (v && typeof v === 'object' ? JSON.stringify(v) : '');
+					customFieldsContent.push(part(['sectionCards', 'gitPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card git-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'git', 'data-git-json': textOf(gitStored) },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
+							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
+								$('span', undefined, k),
+								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(163, 230, 53, 0.16); color: #a3e635; font-weight: 700; text-transform: uppercase;' },
+									'Git'
+								)
+							),
+							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
+								...stepBadge()
+							)
+						))),
+						part('gitCardMount', $('div.git-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' }))
 					))));
 				} else if (fType === 'ssh') {
 					let sshHost: string = fieldItem.sshHost || '';

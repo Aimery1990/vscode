@@ -4627,7 +4627,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));
 
 				const isSubWorkflowStep = stepComp?.type === 'sub_workflow';
-				const isTicketSideEffectStep = isSubWorkflowStep || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
+				// A git command (commit, push, clone ...) is never retried automatically (CI-24)
+				const isTicketSideEffectStep = isSubWorkflowStep || stepComp?.type === 'git' || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
 				const maxStepAttempts = isTicketSideEffectStep ? 1 : 3;
 				let stepAttempt = 0;
 

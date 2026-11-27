@@ -595,48 +595,83 @@ export const COMPONENT_SPECS = {
 
 	git: {
 		type: 'git',
-		displayName: 'Git Repository & Branch Binding',
+		displayName: 'Git (Repository Command)',
 		icon: Codicon.sourceControl,
-		category: 'data',
+		category: 'processing',
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
-		purpose: 'Records a git repository URL and branch on the ticket (reference only).',
-		description: 'Records a git repository URL (gitRemoteUrl) and branch (gitBranch) on the ticket as reference metadata. NOT EXECUTABLE YET: no clone / checkout / fetch is performed and no git variables are registered; use a Python or SSH component for real git operations.',
-		runtime: 'NOT EXECUTABLE YET: no clone / checkout / fetch is performed and no git variables are registered; at run time the component only passes its text value through.',
+		purpose: 'Runs one git command (status, clone, checkout, pull, fetch, add, commit, push, log, diff, branch or custom) in a repository.',
+		description: 'Runs one real git command on this computer. gitCommand selects it: status | clone | checkout | pull | fetch | add | commit | push | log | diff | branch | custom (default status). gitRepoPath is the working directory for every command except clone (absolute, ~/..., or relative to the workspace folder). Parameters per command: clone = gitRemoteUrl (required), gitCloneDir (target directory; default: repo name in the workspace folder), gitBranch (optional); checkout = gitBranch (required), gitCreateBranch (-b); pull = gitRemote, gitBranch; fetch = gitRemote; add = gitPaths (default "."); commit = gitMessage (required), gitAddAll (git add -A first); push = gitRemote, gitBranch, gitSetUpstream (-u); log = gitLogCount (default 10); diff = gitDiffTarget (optional target / paths / options); branch = gitBranch (empty: list all branches, set: create it); custom = gitCustomArgs (the arguments after "git", required). Every text value supports {variable} references; a variable is always ONE argument (no word splitting). Arguments are run as an argv array without a shell. git never prompts (GIT_TERMINAL_PROMPT=0): authentication uses the user\'s existing credential helpers / SSH keys; never put credentials in the config. Force push and reset --hard are not offered (only custom runs what the user explicitly wrote). A non-zero exit code fails the component.',
+		runtime: 'Merges the ticket\'s own settings over the template, resolves {variables}, builds the git argv (commit with gitAddAll runs `git add -A` first), runs git in gitRepoPath via the shared-process git service (timeout 120 s, non-interactive), captures stdout, stderr, exit code and duration, then reads the current branch (git rev-parse --abbrev-ref HEAD) and short HEAD commit. Publishes the main text and the structured fields; stores the result (stdout / stderr cut to 3072 bytes) in the ticket value under gitLastResult. Exit code != 0, a timeout or an invalid config fails the step (the run stops like for other components). A template with neither gitCommand nor gitRepoPath (pre CI-24 reference-only component) runs nothing and publishes gitRemoteUrl.',
 		props: [
-			{ name: 'gitRemoteUrl', kind: 'string', required: true, description: 'Git clone / remote URL.' },
-			{ name: 'gitBranch', kind: 'string', default: 'main', description: 'Branch.' }
+			{ name: 'gitCommand', kind: 'string', enum: ['status', 'clone', 'checkout', 'pull', 'fetch', 'add', 'commit', 'push', 'log', 'diff', 'branch', 'custom'], default: 'status', ticketValue: true, description: 'git command to run.' },
+			{ name: 'gitRepoPath', kind: 'string', ticketValue: true, description: 'Repository path / working directory (all commands except clone). Supports {var}.' },
+			{ name: 'gitRemoteUrl', kind: 'string', ticketValue: true, description: 'clone: repository URL. Supports {var}.' },
+			{ name: 'gitCloneDir', kind: 'string', ticketValue: true, description: 'clone: target directory (default: repo name in the workspace folder).' },
+			{ name: 'gitBranch', kind: 'string', ticketValue: true, description: 'Branch: checkout target (required), pull / push branch, clone --branch, or the branch to create with the branch command.' },
+			{ name: 'gitRemote', kind: 'string', ticketValue: true, description: 'pull / fetch / push: remote (e.g. origin).' },
+			{ name: 'gitCreateBranch', kind: 'boolean', default: false, ticketValue: true, description: 'checkout: create the branch (git checkout -b).' },
+			{ name: 'gitPaths', kind: 'string', default: '.', ticketValue: true, description: 'add: paths, separated by spaces (quote paths that contain spaces).' },
+			{ name: 'gitMessage', kind: 'string', ticketValue: true, description: 'commit: commit message (required). Supports {var}.' },
+			{ name: 'gitAddAll', kind: 'boolean', default: false, ticketValue: true, description: 'commit: run git add -A before committing.' },
+			{ name: 'gitLogCount', kind: 'number', default: 10, ticketValue: true, description: 'log: number of commits.' },
+			{ name: 'gitDiffTarget', kind: 'string', ticketValue: true, description: 'diff: optional target / paths / options (e.g. HEAD~1, --stat, src/).' },
+			{ name: 'gitSetUpstream', kind: 'boolean', default: false, ticketValue: true, description: 'push: set upstream (git push -u).' },
+			{ name: 'gitCustomArgs', kind: 'string', ticketValue: true, description: 'custom: the arguments after "git" (required), e.g. stash list. Quotes group words.' },
+			{ name: 'gitLastResult', kind: 'object', role: 'state', ticketValue: true, description: 'Result of the last run (stdout / stderr cut to 3072 bytes).' }
 		],
 		outputs: [
-			{ name: '{var}', type: 'string', when: 'both', description: 'the stored text value (no git data)' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{var}', type: 'string', when: 'both', description: 'main text: stdout, or stderr when the command failed', example: '"On branch main\\nnothing to commit"' },
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
+			{ name: '{Label.ok}', type: 'boolean', when: 'both', description: 'true when every git step exited with 0', example: 'true' },
+			{ name: '{Label.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when git could not start)', example: '0' },
+			{ name: '{Label.stdout}', type: 'string', when: 'both', description: 'standard output' },
+			{ name: '{Label.stderr}', type: 'string', when: 'both', description: 'standard error' },
+			{ name: '{Label.command}', type: 'string', when: 'both', description: 'command line that ran', example: '"git commit -m \'Fix\'"' },
+			{ name: '{Label.repoPath}', type: 'string', when: 'both', description: 'working directory (clone: the new folder)' },
+			{ name: '{Label.branch}', type: 'string', when: 'both', description: 'current branch after the command', example: '"main"' },
+			{ name: '{Label.commit}', type: 'string', when: 'both', description: 'short HEAD commit after the command', example: '"3f2a9c1"' },
+			{ name: '{Label}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["git_1_result"]["exitCode"]); also under {label_key}_result' }
 		],
 		example: {
-			id: 'git_binding',
-			label: 'Git Repository',
+			id: 'git_commit',
+			label: 'Commit Changes',
 			type: 'git',
-			gitRemoteUrl: 'git@github.com:org/repo.git',
-			gitBranch: 'main'
+			gitCommand: 'commit',
+			gitRepoPath: '{repo_path}',
+			gitMessage: 'Update report for {ticketId}',
+			gitAddAll: true
 		},
-		notes: ['Reference only: running does no git operation (CI-24 pending).'],
+		notes: [
+			'Runs real git commands on the user\'s computer: commit / push / checkout change the repository.',
+			'Credentials are never stored in the config: git uses the user\'s credential helper / SSH agent and never prompts; a missing login fails the step.',
+			'Structured fields are read with a dot: {Commit Changes.exitCode}, {Commit Changes.branch}.'
+		],
 		help: {
 			badge: 'Environment & Version Control',
-			summary: 'Records which Git repository and branch the ticket relates to. Reference information only: running the ticket does not clone, check out, or read the repository yet.',
+			summary: 'Runs one git command in a local repository: status, clone, checkout, pull, fetch, add, commit, push, log, diff, branch, or any custom arguments. Shows the command, exit code, duration and output under the card, and passes the result to later steps.',
 			designerConfig: [
-				{ name: 'Repository URL', desc: 'Git clone / remote URL.' },
-				{ name: 'Default Branch', desc: 'Target working branch (e.g. main, dev).' }
+				{ name: 'Command', desc: 'Pick the git command; only its parameters are shown.' },
+				{ name: 'Repository path', desc: 'Working directory for every command except clone. Absolute, ~/..., or relative to the workspace folder; {variables} allowed.' },
+				{ name: 'Parameters', desc: 'clone: URL, target directory, branch · checkout: branch, create new · pull: remote, branch · fetch: remote · add: paths · commit: message, add all first · push: remote, branch, set upstream · log: count · diff: target / paths · branch: name (empty = list) · custom: arguments after "git".' }
 			],
-			headline: 'How RUN_TICKETS Handles Git Binding',
+			headline: 'How RUN_TICKETS Executes Git',
 			steps: [
-				{ step: '1. Pass-through only', detail: 'No git operation is performed. The component\'s stored text value is passed to the context under its label.' }
+				{ step: '1. Resolve', detail: 'Ticket settings win over the template. {variables} are resolved in every value; each variable stays one argument.' },
+				{ step: '2. Run', detail: 'git runs with the argument list (no shell) in the repository path, non-interactively, timeout 120 s. Commit with "add all" runs git add -A first.' },
+				{ step: '3. Inspect', detail: 'Reads the current branch and short HEAD commit after the command.' },
+				{ step: '4. Publish', detail: '{Label} = stdout (stderr on failure); {Label.ok}, .exitCode, .stdout, .stderr, .command, .repoPath, .branch, .commit. A non-zero exit fails the step.' }
 			],
-			variableResolution: '{Field Label}',
-			downstreamPassing: 'Downstream steps can read the stored value via {Field Label}. To run real git commands, use a Python or SSH component.',
-			syntaxExamples: ['{Git Repo}'],
-			tips: ['Use a Python or SSH component for actual clone / pull / commit operations.']
+			variableResolution: '{Field Label} for the output text, {Field Label.exitCode} / {Field Label.branch} ... for the fields.',
+			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text) and TICKET_CONTEXT["field_label_result"] (dict).',
+			syntaxExamples: ['{Git Status}', '{Git Status.branch}', '{Commit Changes.commit}', 'TICKET_CONTEXT["commit_changes_result"]["exitCode"]'],
+			tips: [
+				'Log in once in a terminal (or set up an SSH key / credential helper): the component never asks for passwords.',
+				'Use custom for anything else (e.g. stash list, tag v1.0); force push and reset --hard are deliberately not offered as options.'
+			]
 		},
-		templatePalette: { defaultName: 'Git Repository' },
-		nodePalette: { label: 'Git Repo', accent: '#a3e635', icon: Codicon.gitMerge, tooltip: 'Git repository binding (reference only: no git operation is run).' }
+		templatePalette: { defaultName: 'Git' },
+		nodePalette: { label: 'Git', accent: '#a3e635', icon: Codicon.gitMerge, tooltip: 'Run a git command (status, clone, checkout, pull, fetch, add, commit, push, log, diff, branch, custom) and publish its output.' }
 	},
 
 	python: {

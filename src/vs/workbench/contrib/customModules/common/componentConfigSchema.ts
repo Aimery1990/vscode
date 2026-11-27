@@ -4,6 +4,7 @@
 
 import { findPlaintextBrowserCredentials, normalizeBrowserCredentials } from './browserCredentials.js';
 import { ConfigPropRole, IComponentConfigProp, getComponentProps, getComponentSpec } from './componentRegistry.js';
+import { IGitComponentConfig, validateGitConfig } from './gitComponent.js';
 
 /*
  * Per-component configuration validation (CI-32), driven by the `props` schema of componentRegistry.ts.
@@ -11,7 +12,7 @@ import { ConfigPropRole, IComponentConfigProp, getComponentProps, getComponentSp
  * validate_component_config AI tool.
  */
 
-export type ComponentConfigErrorCode = 'unknownType' | 'unknownProp' | 'notWritable' | 'type' | 'enum' | 'required' | 'plaintextSecret';
+export type ComponentConfigErrorCode = 'unknownType' | 'unknownProp' | 'notWritable' | 'type' | 'enum' | 'required' | 'plaintextSecret' | 'invalidValue';
 
 export interface IComponentConfigError {
 	readonly code: ComponentConfigErrorCode;
@@ -124,6 +125,15 @@ export function validateComponentConfig(type: string, config: Readonly<Record<st
 				}
 			} else if (String(value).trim() && !VARIABLE_REFERENCE.test(String(value))) {
 				errors.push({ code: 'plaintextSecret', prop: key, message: `'${label}.${key}' must reference a variable such as {API_TOKEN}; plain-text secrets are not allowed.` });
+			}
+		}
+	}
+
+	if (spec.type === 'git') {
+		// Which settings are needed depends on the selected git command (CI-24)
+		for (const problem of validateGitConfig(config as IGitComponentConfig, options.checkRequired !== false)) {
+			if (!errors.some(e => e.prop === problem.prop)) {
+				errors.push({ code: problem.code, prop: problem.prop, message: `'${label}.${problem.prop}': ${problem.message}` });
 			}
 		}
 	}

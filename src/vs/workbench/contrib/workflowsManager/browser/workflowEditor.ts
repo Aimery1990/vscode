@@ -5695,8 +5695,10 @@ export class WorkflowEditor extends EditorPane {
 					break;
 				}
 				case 'git': {
-					metadataLabel = 'Default Git Remote URL';
-					metadataValue = (comp.gitRemoteUrl || '').trim();
+					metadataLabel = 'Git Command';
+					metadataValue = comp.gitCommand
+						? `git ${comp.gitCommand}${comp.gitCommand === 'clone' ? ` ${comp.gitRemoteUrl || ''}` : (comp.gitRepoPath ? ` (in ${comp.gitRepoPath})` : '')}`
+						: (comp.gitRemoteUrl || '').trim();
 					break;
 				}
 				default: {
@@ -20445,7 +20447,7 @@ export class WorkflowEditor extends EditorPane {
 			case 'http_request':
 				return `${varName} = [${comp.httpMethod || 'GET'}] ${comp.httpUrl || title} (HTTP Request)`;
 			case 'git':
-				return `${varName} = ${title} (Git Branch)`;
+				return `${varName} = ${title} (git ${comp.gitCommand || 'status'})`;
 			case 'python':
 				return `${varName} = ${title} (Python Script)`;
 			default:
@@ -20722,6 +20724,8 @@ export class WorkflowEditor extends EditorPane {
 			sshLastOutput: compType === 'ssh' ? '' : undefined,
 			sshOutputLines: compType === 'ssh' ? 50 : undefined,
 			sshQuickCommands: compType === 'ssh' ? SSH_DEFAULT_QUICK_COMMANDS.map(c => ({ ...c })) : undefined,
+			gitCommand: compType === 'git' ? 'status' : undefined,
+			gitRepoPath: compType === 'git' ? '' : undefined,
 			httpUrl: compType === 'http_request' ? '' : undefined,
 			httpMethod: compType === 'http_request' ? 'GET' : undefined,
 			httpAuthType: compType === 'http_request' ? 'none' : undefined,

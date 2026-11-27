@@ -17,7 +17,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, IGitRunResult, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModulesService } from '../common/customModules.js';
@@ -51,6 +51,8 @@ import { IWorkflowExecutionService } from '../../workflowsManager/common/workflo
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField } from '../common/componentPalette.js';
 import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
+import { GIT_CONFIG_KEYS, gitMainOutput, pickGitConfig } from '../common/gitComponent.js';
+import { renderGitConfigForm, renderGitResultView } from './gitComponentView.js';
 
 
 /**
@@ -3756,38 +3758,51 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 				}
 
-				// Git Primitive Configuration Box
+				// Git Primitive Configuration Box (CI-24): command selector + the selected command's parameters
 				if (field.type === 'git') {
 					const gitSchemaBox = append(fieldCard, $('.git-schema-config', {
-						style: 'display: flex; flex-direction: column; gap: 10px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(249, 115, 22, 0.25);'
+						style: 'display: flex; flex-direction: column; gap: 10px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(163, 230, 53, 0.25);'
 					}));
-
-					const gitNote = append(gitSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.8; line-height: 1.4; color: #fb923c;' }));
+					const gitNote = append(gitSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.8; line-height: 1.4;' }));
 					append(gitNote, $('span' + ThemeIcon.asCSSSelector(Codicon.sourceControl), { style: 'margin-right: 6px;' }));
-					append(gitNote, $('span', {}, 'When included in schema, tickets of this type will enable Git repository and branch binding.'));
+					append(gitNote, $('span', {}, 'Runs one git command when the ticket or node runs. Text values accept {variables}; git never prompts for credentials (it uses your credential helper / SSH keys).'));
+					if (!field.gitCommand && !field.gitRepoPath && field.gitRemoteUrl) {
+						append(gitSchemaBox, $('div', { style: 'font-size: 11px; color: #fbbf24;' }, 'This component only records a repository URL (older reference-only component). Pick a command and a repository path to make it run.'));
+					}
+					renderGitConfigForm(gitSchemaBox, pickGitConfig(field), next => {
+						for (const key of GIT_CONFIG_KEYS) {
+							Reflect.set(field, key, next[key]);
+						}
+						this._syncDraft();
+					});
 
-					// Default Remote URL
-					const remoteRow = append(gitSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
-					append(remoteRow, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Git Remote URL (Optional):'));
-					const remoteInput = append(remoteRow, $('input.monaco-inputbox', {
-						placeholder: 'e.g. git@github.com:org/repo.git or https://github.com/org/repo.git',
-						style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box;'
-					})) as HTMLInputElement;
-					remoteInput.value = field.gitRemoteUrl || '';
-					remoteInput.oninput = () => {
-						field.gitRemoteUrl = remoteInput.value.trim();
-					};
-
-					// Default Target Branch
-					const branchRow = append(gitSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
-					append(branchRow, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Target Branch (Optional):'));
-					const branchInput = append(branchRow, $('input.monaco-inputbox', {
-						placeholder: 'e.g. main, master, feature/base',
-						style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box;'
-					})) as HTMLInputElement;
-					branchInput.value = field.gitBranch || '';
-					branchInput.oninput = () => {
-						field.gitBranch = branchInput.value.trim();
+					const gitRunRow = append(gitSchemaBox, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+					const gitRunBtn = append(gitRunRow, $('button.monaco-button', {
+						type: 'button',
+						title: 'Run this git command now (test). {variables} have no values here.',
+						'aria-label': 'Run git command',
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(163, 230, 53, 0.4); background: rgba(163, 230, 53, 0.12); color: inherit; cursor: pointer;'
+					}, $('span.codicon.codicon-play', { style: 'font-size: 12px;' }), 'Run')) as HTMLButtonElement;
+					append(gitRunRow, $('span', { style: 'font-size: 11px; opacity: 0.6;' }, 'Test run; the result is not saved in the template.'));
+					const gitResultMount = append(gitSchemaBox, $('div.git-result-mount'));
+					const showGitResult = (result: IGitRunResult | undefined, running = false) => renderGitResultView(gitResultMount, result, {
+						running,
+						emptyText: 'Not run yet.',
+						onCopy: text => {
+							this._clipboardService.writeText(text);
+							this.notificationService.info('Git output copied to clipboard.');
+						}
+					});
+					showGitResult(field.gitLastResult);
+					gitRunBtn.onclick = async () => {
+						gitRunBtn.disabled = true;
+						showGitResult(undefined, true);
+						try {
+							const result = await this._ticketWorkflowRuntimeService.executeGitComponent(pickGitConfig(field), { contextVariables: {}, baseDir: this._workspaceUri?.fsPath });
+							showGitResult(result);
+						} finally {
+							gitRunBtn.disabled = false;
+						}
 					};
 				}
 
@@ -10156,7 +10171,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										tableName: f.tableDbTableName || ''
 									};
 								} else if (f.type === 'git') {
-									val = f.gitRemoteUrl || '';
+									val = f.gitLastResult ? gitMainOutput(f.gitLastResult) : (f.gitRemoteUrl || '');
 								} else if (['create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets', 'display', 'sub_workflow'].includes(f.type)) {
 									// Do not clobber existing live runtime value in schemaContext with '' if this card hasn't recorded lastExecutionOutput yet
 									val = undefined;
@@ -17610,7 +17625,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			} else if (f.type === 'voice_note') {
 				refs = extractRefs([f.voiceTranscript, ...(f.voiceClips || []).map(c => c.transcript)]);
 			} else if (f.type === 'git') {
-				refs = extractRefs([f.gitRemoteUrl, f.gitBranch]);
+				refs = extractRefs([f.gitRepoPath, f.gitRemoteUrl, f.gitCloneDir, f.gitBranch, f.gitRemote, f.gitPaths, f.gitMessage, f.gitDiffTarget, f.gitCustomArgs, f.gitLogCount === undefined ? undefined : String(f.gitLogCount)]);
 			} else if (f.type === 'http_request') {
 				const paramVals = (f.httpParams || []).map(p => p.value);
 				const headerVals = (f.httpHeaders || []).map(h => h.value);
@@ -17763,8 +17778,13 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					lines.push(`  - Clip #${ci + 1} (${c.durationSeconds ? `${c.durationSeconds}s` : 'audio'}): ${c.transcript ? c.transcript : '(no transcript)'}`);
 				});
 			} else if (f.type === 'git') {
-				lines.push(`- **Git Remote URL**: \`${f.gitRemoteUrl || '(not set)'}\``);
-				lines.push(`- **Git Branch**: \`${f.gitBranch || 'main'}\``);
+				lines.push(`- **Git Command**: \`git ${f.gitCommand || 'status'}\``);
+				for (const key of GIT_CONFIG_KEYS) {
+					const v = Reflect.get(f, key);
+					if (key !== 'gitCommand' && v !== undefined && v !== '') {
+						lines.push(`- **${key}**: \`${String(v)}\``);
+					}
+				}
 			} else if (f.type === 'http_request') {
 				lines.push(`- **HTTP Method**: \`${(f.httpMethod || 'GET').toUpperCase()}\``);
 				lines.push(`- **Request URL**: \`${f.httpUrl || '(not set)'}\``);

@@ -13,7 +13,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText, IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { maskBrowserCredentialHeaders, maskBrowserCredentials, maskSecrets, mergeBrowserRequestHeaders, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { createDefaultFreestyleSchema, getProgrammaticTicketTypeError, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
@@ -39,6 +39,11 @@ import { buildDynamicListContextValue } from '../common/dynamicListValue.js';
 import { ISubWorkflowCallChain, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain } from '../common/subWorkflowCallGraph.js';
 import { ISubWorkflowInvocationResult, IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 import { mainWindow } from '../../../../base/browser/window.js';
+import { ILocalGitService } from '../../../../platform/git/common/localGitService.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
+import { env as processEnv } from '../../../../base/common/process.js';
+import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
 
@@ -519,6 +524,16 @@ export interface ITicketWorkflowRuntimeService {
 		field: IRuntimeCustomField,
 		contextVariables: Record<string, unknown>
 	): Promise<IPrimitiveExecutionStepResult>;
+
+	/**
+	 * Runs a git component configuration (CI-24): resolves {variables} (with `resolve`, or from `contextVariables`),
+	 * builds the argv, runs git through the shared-process git service and returns the result. Never throws.
+	 * `baseDir` is the folder relative paths resolve against.
+	 */
+	executeGitComponent(
+		config: IGitComponentConfig,
+		options: { contextVariables?: Record<string, unknown>; resolve?: (text: string) => string; baseDir?: string }
+	): Promise<IGitRunResult>;
 
 	validateAndSanitizeComponentOutput(
 		fieldType: CustomFieldType | string,
@@ -2496,6 +2511,29 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'git': {
+							// Git component (CI-24): the ticket's own settings win over the template
+							const rawGitMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
+							const ticketGit = normalizeGitTicketValue(rawGitMeta);
+							const gitConfig = effectiveGitConfig(pickGitConfig(field), ticketGit);
+							if (isGitReferenceOnly(gitConfig)) {
+								// Pre CI-24 reference-only component: nothing to run
+								stepOutput = this._interpolateVariables(String(gitConfig.gitRemoteUrl ?? ''), contextVariables);
+								contextVariables[fieldLabel] = stepOutput;
+								contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+								stepDetails = { referenceOnly: true, gitRemoteUrl: stepOutput, gitBranch: field.gitBranch };
+								break;
+							}
+							const gitRes = await this.executeGitComponent(gitConfig, { contextVariables, baseDir: wsUri.fsPath });
+							customMetadata[fieldLabel] = JSON.stringify(buildGitTicketValue(ticketGit, gitRes));
+							stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes);
+							stepDetails = { ...gitRes };
+							if (!gitRes.ok) {
+								throw new Error(gitRes.error ? `${gitRes.command || `git ${gitRes.gitCommand}`}: ${gitRes.error}${gitRes.stderr && gitRes.stderr !== gitRes.error ? `\n${gitRes.stderr.slice(0, 2000)}` : ''}` : `git failed with exit code ${gitRes.exitCode}`);
+							}
+							break;
+						}
+
 						case 'http_request': {
 							const effectiveField: IRuntimeCustomField = { ...field };
 							const rawHttpMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
@@ -3946,6 +3984,30 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					break;
 				}
+				case 'git': {
+					// Git component (CI-24): same outputs as a ticket run
+					const gitConfig = pickGitConfig(field);
+					if (isGitReferenceOnly(gitConfig)) {
+						stepOutput = this._interpolateVariables(String(gitConfig.gitRemoteUrl ?? ''), contextVariables);
+						contextVariables[fieldLabel] = stepOutput;
+						contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+						stepDetails = { referenceOnly: true, gitRemoteUrl: stepOutput };
+						field.lastExecutionLog = `>>> Git "${fieldLabel}": no command configured (reference only)`;
+						field.lastExecutionOutput = stepOutput;
+						break;
+					}
+					const gitRes = await this.executeGitComponent(gitConfig, { contextVariables, baseDir: workUri.fsPath });
+					field.gitLastResult = buildGitTicketValue(undefined, gitRes).gitLastResult;
+					stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes);
+					stepDetails = { ...gitRes };
+					field.lastExecutionLog = `>>> ${gitRes.command || `git ${gitRes.gitCommand}`}  (exit ${gitRes.exitCode}, ${gitRes.durationMs}ms${gitRes.branch ? `, branch ${gitRes.branch}` : ''})\n${gitMainOutput(gitRes)}`;
+					field.lastExecutionOutput = stepOutput;
+					field.lastExecutionExitCode = gitRes.exitCode;
+					if (!gitRes.ok) {
+						throw new Error(gitRes.error || `git failed with exit code ${gitRes.exitCode}`);
+					}
+					break;
+				}
 				case 'http_request': {
 					const httpRes = await this.executeHttpRequest(field, contextVariables);
 					field.httpResponseStatus = httpRes.status;
@@ -4779,6 +4841,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (isSshTicketValue(parsed)) {
 						return sshTicketValueOutputText(parsed);
 					}
+					if (isGitTicketValue(parsed)) {
+						return gitTicketValueOutputText(parsed);
+					}
 					if (parsed.output !== undefined && !Array.isArray(parsed.output)) { return String(parsed.output); }
 					if (parsed.url !== undefined && parsed.content === undefined) { return String(parsed.url); }
 				} catch { }
@@ -4804,6 +4869,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 			if (isSshTicketValue(rawVal)) {
 				return sshTicketValueOutputText(rawVal);
+			}
+			if (isGitTicketValue(rawVal)) {
+				return gitTicketValueOutputText(rawVal);
 			}
 			if (rawVal.output !== undefined && !Array.isArray(rawVal.output)) { return String(rawVal.output); }
 			return JSON.stringify(rawVal, null, 2);
@@ -5670,6 +5738,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const sliced = sshTicketValueOutputText(sshVal);
 				return sliced ? this._parseOutputFieldValue(sliced) : {};
 			}
+			if (isGitTicketValue(rawMeta)) {
+				return gitTicketValueOutputText(rawMeta);
+			}
 			if (rawMeta.text !== undefined) {
 				const t = String(rawMeta.text).trim();
 				return t ? this._parseOutputFieldValue(t) : null;
@@ -6000,6 +6071,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (isSshTicketValue(parsed)) {
 						return sshTicketValueOutputText(parsed) || '{}';
 					}
+					// Git primitive (CI-24)
+					if (isGitTicketValue(parsed)) {
+						return gitTicketValueOutputText(parsed);
+					}
 					// Prompt primitive
 					if (parsed.prompt !== undefined || parsed.output !== undefined) {
 						return parsed.output && parsed.output.trim()
@@ -6287,6 +6362,62 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 		} catch (err) {
 			this.logService.warn(`[TicketWorkflowRuntime] Failed to persist execution state to worklog:`, err);
+		}
+	}
+
+	async executeGitComponent(
+		config: IGitComponentConfig,
+		options: { contextVariables?: Record<string, unknown>; resolve?: (text: string) => string; baseDir?: string }
+	): Promise<IGitRunResult> {
+		const command = gitCommandOf(config);
+		const resolve = options.resolve ?? ((text: string) => this._interpolateVariables(text, options.contextVariables ?? {}));
+		let homeDir: string | undefined;
+		try {
+			const pathService = this.instantiationService.invokeFunction(accessor => accessor.get(IPathService));
+			homeDir = (await pathService.userHome({ preferLocal: true })).fsPath;
+		} catch {
+			homeDir = processEnv['HOME'] || processEnv['USERPROFILE'] || undefined;
+		}
+		const built = buildGitPlan(config, { resolve, baseDir: options.baseDir, homeDir });
+		if (!built.ok) {
+			return gitFailureResult(command, built.error);
+		}
+		let gitService: ILocalGitService | undefined;
+		try {
+			gitService = this.instantiationService.invokeFunction(accessor => accessor.get(ILocalGitService));
+		} catch {
+			gitService = undefined;
+		}
+		if (!gitService) {
+			return gitFailureResult(command, 'Git commands can only run in the desktop app (the git service is not available).', built.plan.repoPath);
+		}
+		const service = gitService;
+		// PATH of the user's shell (resolved by the workbench), so git finds its helpers (credential managers, git-lfs, ...)
+		const execEnv: Record<string, string> = {};
+		if (processEnv['PATH']) {
+			execEnv['PATH'] = processEnv['PATH'];
+		}
+		const controller = new AbortController();
+		this._activeAbortControllers.add(controller);
+		const startEpoch = this._cancelEpoch;
+		try {
+			return await runGitPlan(built.plan, async (args, cwd, timeoutMs) => {
+				if (controller.signal.aborted || this._cancelEpoch !== startEpoch) {
+					return { exitCode: 130, stdout: '', stderr: '', durationMs: 0, cancelled: true, error: 'Cancelled by Stop request' };
+				}
+				const opId = generateUuid();
+				const onAbort = () => { service.cancel(opId).catch(() => undefined); };
+				controller.signal.addEventListener('abort', onAbort);
+				try {
+					return await service.exec(opId, args, { cwd, timeoutMs, env: execEnv });
+				} finally {
+					controller.signal.removeEventListener('abort', onAbort);
+				}
+			}, GIT_COMPONENT_TIMEOUT_MS);
+		} catch (err) {
+			return gitFailureResult(command, `git could not run: ${err?.message || String(err)}`, built.plan.repoPath);
+		} finally {
+			this._activeAbortControllers.delete(controller);
 		}
 	}
 

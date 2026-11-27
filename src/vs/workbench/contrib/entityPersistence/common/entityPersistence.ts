@@ -164,6 +164,32 @@ export interface IHttpTicketValue extends Pick<ICustomField,
 	[key: string]: unknown;
 }
 
+/** Result of one run of a `git` component (CI-24). */
+export interface IGitRunResult {
+	/** Exit code 0 for every git step. */
+	ok: boolean;
+	/** Exit code of the last step that ran; -1 when git could not be started (invalid config, missing directory, ...). */
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	/** Command line(s) that ran, e.g. `git commit -m 'fix'`. */
+	command: string;
+	/** Selected git command (status, clone, ...). */
+	gitCommand: string;
+	/** Working directory (for clone: the cloned folder). */
+	repoPath: string;
+	/** Current branch after the command ('' when unknown). */
+	branch: string;
+	/** Short HEAD commit after the command ('' when unknown). */
+	commit: string;
+	durationMs: number;
+	timedOut?: boolean;
+	/** Why git could not run, or why it failed (timeout, cancelled, ...). */
+	error?: string;
+	/** ISO time of the run. */
+	executedAt?: string;
+}
+
 /**
  * Ticket value of an `ssh` component with canonical (template) property names. Values come from persisted JSON,
  * so additional / unknown keys may be present.
@@ -650,6 +676,21 @@ export interface ICustomField {
 	credentials?: ICredentialPair[];
 	gitRemoteUrl?: string;
 	gitBranch?: string;
+	/** Git component (CI-24): command and its parameters. Text values support {variable} references. */
+	gitCommand?: string;
+	gitRepoPath?: string;
+	gitCloneDir?: string;
+	gitRemote?: string;
+	gitCreateBranch?: boolean;
+	gitPaths?: string;
+	gitMessage?: string;
+	gitAddAll?: boolean;
+	gitLogCount?: number | string;
+	gitDiffTarget?: string;
+	gitSetUpstream?: boolean;
+	gitCustomArgs?: string;
+	/** Result of the last git run (stdout / stderr truncated when stored). */
+	gitLastResult?: IGitRunResult;
 	parameters?: IParameterDefinition[];
 	targetMode?: 'model' | 'agent';
 	targetModel?: string;

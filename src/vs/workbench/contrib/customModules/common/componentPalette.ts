@@ -122,8 +122,8 @@ export function createComponentField(item: IComponentPaletteItem, fields: readon
 			field.credentials = [];
 			break;
 		case 'git':
-			field.gitRemoteUrl = '';
-			field.gitBranch = 'main';
+			field.gitCommand = 'status';
+			field.gitRepoPath = '';
 			break;
 		case 'python':
 			field.pythonPath = '';
