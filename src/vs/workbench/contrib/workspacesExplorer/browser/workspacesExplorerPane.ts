@@ -53,6 +53,7 @@ import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/commo
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
+import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
@@ -716,6 +717,22 @@ export class MainWorkspaceViewPane extends ViewPane {
 	private static readonly VIEW_STATE_KEY = 'anyagent.workspacesExplorer.viewState';
 	private _lastSavedViewState = '';
 
+	/** Pinned workspaces (UI-11), keyed by canonical workspace id; kept per profile, not in workspace files. */
+	private _getWorkspacePins(): IWorkspacePin[] {
+		return parseWorkspacePins(this._storageService.get(WORKSPACE_PINS_STORAGE_KEY, StorageScope.PROFILE));
+	}
+
+	private _toggleWorkspacePin(canonicalWsId: string): void {
+		const pins = this._getWorkspacePins();
+		const next = isWorkspacePinned(pins, canonicalWsId) ? unpinWorkspace(pins, canonicalWsId) : pinWorkspace(pins, canonicalWsId, Date.now());
+		if (next.length === 0) {
+			this._storageService.remove(WORKSPACE_PINS_STORAGE_KEY, StorageScope.PROFILE);
+		} else {
+			this._storageService.store(WORKSPACE_PINS_STORAGE_KEY, serializeWorkspacePins(next), StorageScope.PROFILE, StorageTarget.USER);
+		}
+		this.renderContent();
+	}
+
 	private _restoreViewState(): void {
 		try {
 			const raw = this._storageService.get(MainWorkspaceViewPane.VIEW_STATE_KEY, StorageScope.WORKSPACE, '');
@@ -755,7 +772,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		this._ensureStaticChrome();
 		const currentVersion = ++this.renderVersion;
 
-		const workspaces = await this.workspacesExplorerService.getWorkspaces();
+		const workspacePins = this._getWorkspacePins();
+		const workspaces = orderByPins(await this.workspacesExplorerService.getWorkspaces(), workspacePins, w => this.getCanonicalId(w.id));
 		if (this.renderVersion !== currentVersion || !this.containerEl || !this.treeBoxEl) {
 			return;
 		}
@@ -862,6 +880,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 
 				const isExpanded = this.expandedWorkspaces.has(canonicalWsId);
+				const isPinned = isWorkspacePinned(workspacePins, canonicalWsId);
 
 				// Card Header
 				const cardHeader = append(wsCard, $('.card-header-row'));
@@ -872,8 +891,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				cardHeader.style.padding = '6px 8px';
 				cardHeader.style.cursor = 'pointer';
 				cardHeader.title = `${ws.name} - ${ws.uri.fsPath} (Right click for menu, drag to reorder, double click to open in window)`;
-				cardHeader.onmouseenter = () => cardHeader.style.backgroundColor = 'rgba(255, 255, 255, 0.04)';
-				cardHeader.onmouseleave = () => cardHeader.style.backgroundColor = 'transparent';
 
 				if (isWorkspaceSelected && !this.selectedItemId) {
 					this.targetSelectedElement = cardHeader;
@@ -885,6 +902,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.stopPropagation();
 
 					const actions = [
+						new Action('toggle_pin_workspace', isPinned ? 'Unpin' : 'Pin to Top', ThemeIcon.asClassName(isPinned ? Codicon.pinned : Codicon.pin), true, async () => {
+							this._toggleWorkspacePin(canonicalWsId);
+						}),
 						new Action('refresh_workspace', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
 							this.renderContent();
 							const activeEditor = this.editorService.activeEditorPane;
@@ -1059,7 +1079,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				cardHeader.setAttribute(
 					'data-visual-sig',
-					`${isExpanded ? '1' : '0'}|${ws.detectedType || ''}|${wsDisplayText}|${badgeText}|${badgeBg}|${badgeFg}|${wsIcon.className}|${wsIcon.style.color}`
+					`${isExpanded ? '1' : '0'}|${isPinned ? 'P' : ''}|${ws.detectedType || ''}|${wsDisplayText}|${badgeText}|${badgeBg}|${badgeFg}|${wsIcon.className}|${wsIcon.style.color}`
 				);
 
 				// Header Actions
@@ -1075,6 +1095,30 @@ export class MainWorkspaceViewPane extends ViewPane {
 				createBtn.onclick = (e) => {
 					e.stopPropagation();
 					this.showCreateResourceModal(ws.uri, ws.name);
+				};
+
+				// Pin to Top / Unpin (UI-11): always visible when pinned, otherwise only while hovering the header
+				const pinBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(isPinned ? Codicon.pinned : Codicon.pin)));
+				pinBtn.style.fontSize = '13px';
+				pinBtn.style.opacity = '0.8';
+				pinBtn.style.visibility = isPinned ? 'visible' : 'hidden';
+				if (isPinned) {
+					pinBtn.style.color = '#38bdf8';
+				}
+				pinBtn.title = isPinned ? 'Unpin' : 'Pin to Top';
+				pinBtn.setAttribute('role', 'button');
+				pinBtn.setAttribute('aria-label', pinBtn.title);
+				pinBtn.onclick = (e) => {
+					e.stopPropagation();
+					this._toggleWorkspacePin(canonicalWsId);
+				};
+				cardHeader.onmouseenter = () => {
+					cardHeader.style.backgroundColor = 'rgba(255, 255, 255, 0.04)';
+					pinBtn.style.visibility = 'visible';
+				};
+				cardHeader.onmouseleave = () => {
+					cardHeader.style.backgroundColor = 'transparent';
+					pinBtn.style.visibility = isPinned ? 'visible' : 'hidden';
 				};
 
 				// Single Click: Select workspace card, open its Domain Form in main editor area, and toggle expansion in-place
