@@ -335,7 +335,7 @@ function renderExtractSection(details: HTMLElement, field: ICustomField, voiceMo
 	const previewWrap = append(section, $('div.media-subtitle-extract-preview-wrap', { style: 'display: none; flex-direction: column; border-radius: 4px; background: rgba(0, 0, 0, 0.25);' }));
 	const previewHead = append(previewWrap, $('div', { style: 'display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08);' }));
 	const previewCount = append(previewHead, $('span', { style: 'flex: 1; font-size: 10px; color: rgba(255, 255, 255, 0.5);' }));
-	const copyBtn = append(previewHead, $<HTMLButtonElement>('button.media-subtitle-copy-btn', { type: 'button', title: 'Copy all subtitles (with timestamps)', 'aria-label': 'Copy all subtitles', style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: transparent; border: 1px solid rgba(251, 191, 36, 0.35); color: #fcd34d;' }));
+	const copyBtn = append(previewHead, $<HTMLButtonElement>('button.media-subtitle-copy-btn', { type: 'button', title: 'Copy all subtitles (choose with or without timestamps)', 'aria-label': 'Copy all subtitles', style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: transparent; border: 1px solid rgba(251, 191, 36, 0.35); color: #fcd34d;' }));
 	const copyIcon = append(copyBtn, $('span.codicon.codicon-copy', { style: 'font-size: 13px;' }));
 	const preview = append(previewWrap, $('div.media-subtitle-extract-preview', { style: 'display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; max-height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, 0.8); user-select: text;' }));
 	let previewDoc: ISubtitleDocument | undefined;
@@ -344,23 +344,40 @@ function renderExtractSection(details: HTMLElement, field: ICustomField, voiceMo
 	store.add(addDisposableListener(copyBtn, 'click', async e => {
 		e.preventDefault();
 		e.stopPropagation();
-		if (!previewDoc || !previewDoc.segments.length) {
+		const doc = previewDoc;
+		if (!doc || !doc.segments.length) {
 			return;
 		}
+		// Ask whether to include timestamps; the box is ticked by default.
+		let withTimestamps = true;
+		if (extraction) {
+			const answer = await extraction.dialogService.confirm({
+				type: 'info',
+				message: `Copy ${doc.segments.length} subtitle lines`,
+				detail: 'With timestamps: "[0:06.9 - 0:10.5] text". Without: the text only, one line per subtitle.',
+				primaryButton: 'Copy',
+				checkbox: { label: 'Include timestamps', checked: true }
+			});
+			if (!answer.confirmed || store.isDisposed) {
+				return;
+			}
+			withTimestamps = answer.checkboxChecked !== false;
+		}
+		const text = withTimestamps ? toTimedText(doc.segments) : doc.segments.map(seg => seg.text).join('\n');
 		let ok = true;
 		try {
-			await navigator.clipboard.writeText(toTimedText(previewDoc.segments));
+			await navigator.clipboard.writeText(text);
 		} catch {
 			ok = false;
 		}
 		copyIcon.className = ok ? 'codicon codicon-check' : 'codicon codicon-error';
-		copyBtn.title = ok ? `Copied ${previewDoc.segments.length} lines` : 'Copy failed';
+		copyBtn.title = ok ? `Copied ${doc.segments.length} lines` : 'Copy failed';
 		if (copyResetTimer) {
 			clearTimeout(copyResetTimer);
 		}
 		copyResetTimer = setTimeout(() => {
 			copyIcon.className = 'codicon codicon-copy';
-			copyBtn.title = 'Copy all subtitles (with timestamps)';
+			copyBtn.title = 'Copy all subtitles (choose with or without timestamps)';
 		}, 1500);
 	}));
 
