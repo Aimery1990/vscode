@@ -40,7 +40,8 @@ import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService, findUnresolvedTemplateVariables } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from './pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
-import { renderMediaSubtitleSettings } from './mediaSubtitleSettings.js';
+import { IMediaSubtitleSettingsWidget, renderMediaSubtitleSettings } from './mediaSubtitleSettings.js';
+import { IMediaFileFacts } from '../../voiceModels/common/subtitleConfig.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
 import { isReservedFreestyleTemplate } from '../common/freestyleTicket.js';
@@ -7705,6 +7706,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					append(mediaNotice, $('span' + ThemeIcon.asCSSSelector(Codicon.deviceCameraVideo)));
 					append(mediaNotice, $('span', {}, 'MP3 / MP4 Player: Select or drag & drop a local audio/video file (MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc.) for native HTML5 playback with 0.25x\u20132.0x speed control.'));
+					if (isEmbeddedFieldMode && input.embeddedTicketMedia) {
+						append(mediaBox, $('div.media-player-ticket-media-note', {
+							style: 'font-size: 10.5px; color: rgba(255, 255, 255, 0.6); line-height: 1.4;'
+						}, 'This is the media file of this ticket. Changing or clearing it here applies to the ticket when you click Save; Cancel keeps the ticket\'s file.'));
+					}
 
 					// Hidden <input type="file"> fallback
 					const hiddenFileInput = append(mediaBox, $('input', {
@@ -7847,6 +7853,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					let activeKind: 'audio' | 'video' = field.mediaKind === 'video' ? 'video' : 'audio';
 					let currentBlobUrl: string | undefined;
+					// Size / duration of the loaded file, shown next to the subtitle limits (CI-45)
+					let currentMediaFacts: IMediaFileFacts | undefined;
+					const subtitleSettings: { widget?: IMediaSubtitleSettingsWidget } = {};
+					const reportMediaFacts = (facts: IMediaFileFacts | undefined) => {
+						currentMediaFacts = facts;
+						subtitleSettings.widget?.setCurrentMedia(facts);
+					};
 					let currentLocalFileUri: URI | undefined;
 					let triedProtocolFallback = false;
 					let knownDurationSec = 0;
@@ -8069,6 +8082,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						field.mediaKind = info.kind;
 						field.mediaMimeType = info.mimeType;
+						reportMediaFacts({ sizeBytes: blob.size });
 
 						updateHeaderBadges(field.mediaFileName, field.mediaFilePath || '', info.kind, info.ext);
 
@@ -8178,6 +8192,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							el.playbackRate = currentPlaybackRate;
 							if (Number.isFinite(el.duration) && el.duration > 0) {
 								knownDurationSec = el.duration;
+								reportMediaFacts({ ...currentMediaFacts, durationSec: el.duration });
 							}
 							updateMediaTimeUi();
 						};
@@ -8187,6 +8202,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 							if (Number.isFinite(el.duration) && el.duration > 0) {
 								knownDurationSec = el.duration;
+								reportMediaFacts({ ...currentMediaFacts, durationSec: el.duration });
 							}
 							updateMediaTimeUi();
 						};
@@ -8362,6 +8378,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.mediaFileName = '';
 						field.mediaKind = 'audio';
 						field.mediaMimeType = '';
+						reportMediaFacts(undefined);
 						videoStageWrap.style.display = 'none';
 						customPlayerWrap.style.display = 'none';
 						updateHeaderBadges('', '', 'audio', '');
@@ -8437,10 +8454,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const subtitleVoiceModels = this._instantiationService.invokeFunction(accessor => {
 						try { return accessor.get(IVoiceModelService); } catch { return undefined; }
 					});
-					this._register(renderMediaSubtitleSettings(mediaBox, field, subtitleVoiceModels, () => {
+					subtitleSettings.widget = this._register(renderMediaSubtitleSettings(mediaBox, field, subtitleVoiceModels, () => {
 						this._syncDraft();
 						this._persistCurrentModule().catch(() => { });
-					}));
+					}, currentMediaFacts));
 				}
 
 				if (field.type === 'output') {

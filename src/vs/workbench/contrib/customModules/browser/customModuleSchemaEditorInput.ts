@@ -42,6 +42,11 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	 * in `draftModule` and the host saves them.
 	 */
 	public embeddedFieldId?: string;
+	/**
+	 * Embedded mode opened from a ticket: the media fields of the `embeddedFieldId` component in `draftModule` hold
+	 * the ticket's current media (not the structure's default), and the host applies a changed file to the ticket.
+	 */
+	public embeddedTicketMedia?: boolean;
 
 	private readonly _onDidUpdateExternalDraft = this._register(new Emitter<string | undefined>());
 	public readonly onDidUpdateExternalDraft = this._onDidUpdateExternalDraft.event;

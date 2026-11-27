@@ -6,13 +6,21 @@ import { $, addDisposableListener, append, clearNode } from '../../../../base/br
 import { DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { ICustomField } from '../../entityPersistence/common/entityPersistence.js';
 import { IVoiceModelService, SUBTITLE_MODEL_CATALOG, VOICE_PROVIDER_CATALOG } from '../../voiceModels/common/voiceModel.js';
-import { DEFAULT_MEDIA_MAX_UPLOAD_MB, resolveMediaSubtitlesConfig, SUBTITLE_DISPLAY_MODES } from '../../voiceModels/common/subtitleConfig.js';
+import { checkMediaLimits, DEFAULT_MEDIA_MAX_UPLOAD_MB, describeMediaFacts, formatMediaDuration, IMediaFileFacts, resolveMediaSubtitlesConfig, SUBTITLE_DISPLAY_MODES } from '../../voiceModels/common/subtitleConfig.js';
 import { MIN_DICTATION_SECONDS } from '../../voiceModels/common/dictation.js';
 
 const LABEL_STYLE = 'font-size: 11px; color: rgba(255, 255, 255, 0.7); min-width: 150px;';
 const INPUT_STYLE = 'background: rgba(0, 0, 0, 0.3); color: #f8fafc; border: 1px solid rgba(251, 191, 36, 0.35); border-radius: 4px; padding: 3px 6px; font-size: 11px; outline: none;';
 const OPTION_STYLE = 'background: #1e1e2e; color: #f8fafc;';
 const OTHER_MODEL = '__other__';
+const INFO_STYLE = 'font-size: 10.5px; color: rgba(255, 255, 255, 0.55);';
+const WARNING_STYLE = 'display: none; font-size: 10.5px; color: #fbbf24; font-weight: 600; padding-left: 158px; line-height: 1.4;';
+
+/** The settings block; the host tells it which media file is loaded so the limits can be compared with it. */
+export interface IMediaSubtitleSettingsWidget extends IDisposable {
+	/** Size / duration of the file currently loaded in the player (undefined = no file). */
+	setCurrentMedia(facts: IMediaFileFacts | undefined): void;
+}
 
 function row(parent: HTMLElement, label: string, title?: string): HTMLElement {
 	const r = append(parent, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
@@ -28,7 +36,7 @@ function option(value: string, label: string, title?: string): HTMLOptionElement
  * Subtitles + dictation settings of an MP3 / MP4 Player field (CI-45), shown in the template designer and in the
  * Freestyle component settings dialog. Writes the `media*` subtitle props onto `field` and calls `onChange`.
  */
-export function renderMediaSubtitleSettings(container: HTMLElement, field: ICustomField, voiceModelService: IVoiceModelService | undefined, onChange: () => void): IDisposable {
+export function renderMediaSubtitleSettings(container: HTMLElement, field: ICustomField, voiceModelService: IVoiceModelService | undefined, onChange: () => void, initialMedia?: IMediaFileFacts): IMediaSubtitleSettingsWidget {
 	const store = new DisposableStore();
 	const box = append(container, $('div.media-subtitle-settings', { style: 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(251, 191, 36, 0.2);' }));
 
@@ -123,21 +131,53 @@ export function renderMediaSubtitleSettings(container: HTMLElement, field: ICust
 	languageInput.value = cfg.language;
 	store.add(addDisposableListener(languageInput, 'change', () => { field.mediaSubtitleLanguage = languageInput.value.trim(); onChange(); }));
 
-	// Limits
-	const sizeInput = append(row(details, 'Max file size (MB)', 'Larger files are rejected before decoding.'), $<HTMLInputElement>('input', { type: 'number', min: '1', step: '1', style: `${INPUT_STYLE} width: 80px;` }));
+	// Limits, compared with the file loaded in the player
+	let currentMedia = initialMedia;
+	const sizeRow = row(details, 'Max file size (MB)', 'Larger files are refused before they are read and decoded.');
+	const sizeInput = append(sizeRow, $<HTMLInputElement>('input', { type: 'number', min: '1', step: '1', style: `${INPUT_STYLE} width: 80px;` }));
 	sizeInput.value = String(cfg.maxUploadMb);
+	const sizeInfo = append(sizeRow, $('span', { style: INFO_STYLE }));
+	const durationRow = row(details, 'Max duration (min)', 'Longer audio is refused before it is sent to the model. 0 = no limit.');
+	const durationInput = append(durationRow, $<HTMLInputElement>('input', { type: 'number', min: '0', step: '1', placeholder: '0 = no limit', style: `${INPUT_STYLE} width: 80px;` }));
+	durationInput.value = String(cfg.maxDurationMin);
+	const durationInfo = append(durationRow, $('span', { style: INFO_STYLE }));
+	const limitWarning = append(details, $('div.media-subtitle-limit-warning', { style: WARNING_STYLE, role: 'status' }));
+
+	const syncLimitInfo = () => {
+		const limits = resolveMediaSubtitlesConfig(field);
+		const facts = describeMediaFacts(currentMedia);
+		sizeInfo.textContent = facts ? `Current file: ${facts}` : 'No file loaded';
+		const check = checkMediaLimits(limits, currentMedia);
+		const currentDuration = currentMedia?.durationSec;
+		durationInfo.textContent = typeof currentDuration === 'number' && currentDuration > 0
+			? `0 = no limit \u00B7 current file: ${formatMediaDuration(currentDuration)}`
+			: '0 = no limit';
+		durationInfo.style.color = check.durationExceeded ? '#fbbf24' : 'rgba(255, 255, 255, 0.55)';
+		const warnings: string[] = [];
+		if (check.sizeExceeded) {
+			warnings.push(`Current file exceeds the ${limits.maxUploadMb} MB size limit - extraction will be refused.`);
+		}
+		if (check.durationExceeded) {
+			warnings.push(`Current file is longer than ${limits.maxDurationMin} min - extraction will be refused.`);
+		}
+		limitWarning.textContent = warnings.join(' ');
+		limitWarning.style.display = warnings.length ? 'block' : 'none';
+		sizeInfo.style.color = check.sizeExceeded ? '#fbbf24' : 'rgba(255, 255, 255, 0.55)';
+	};
+	syncLimitInfo();
+
 	store.add(addDisposableListener(sizeInput, 'change', () => {
 		const n = Math.round(Number(sizeInput.value));
 		field.mediaMaxUploadMb = Number.isFinite(n) && n > 0 ? n : DEFAULT_MEDIA_MAX_UPLOAD_MB;
 		sizeInput.value = String(field.mediaMaxUploadMb);
+		syncLimitInfo();
 		onChange();
 	}));
-	const durationInput = append(row(details, 'Max duration (min)', '0 = no limit.'), $<HTMLInputElement>('input', { type: 'number', min: '0', step: '1', style: `${INPUT_STYLE} width: 80px;` }));
-	durationInput.value = String(cfg.maxDurationMin);
 	store.add(addDisposableListener(durationInput, 'change', () => {
 		const n = Math.round(Number(durationInput.value));
 		field.mediaMaxDurationMin = Number.isFinite(n) && n > 0 ? n : 0;
 		durationInput.value = String(field.mediaMaxDurationMin);
+		syncLimitInfo();
 		onChange();
 	}));
 
@@ -199,5 +239,13 @@ export function renderMediaSubtitleSettings(container: HTMLElement, field: ICust
 		fillModels();
 	}, () => { /* the catalog alone is fine */ });
 
-	return store;
+	return {
+		setCurrentMedia: facts => {
+			currentMedia = facts;
+			if (!store.isDisposed) {
+				syncLimitInfo();
+			}
+		},
+		dispose: () => store.dispose()
+	};
 }
