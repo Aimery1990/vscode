@@ -20086,7 +20086,7 @@ ${interpolatedPrompt}`;
 						}
 					}
 
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20094,6 +20094,7 @@ ${interpolatedPrompt}`;
 									'Attachment'
 								)
 							),
+							...stepBadge(),
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'attachment', 'data-ai-field-label': k, 'data-ai-current-value': textOf(parsedAttachmentList ? JSON.stringify(parsedAttachmentList) : String(v || '')), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
@@ -20211,7 +20212,7 @@ ${interpolatedPrompt}`;
 					))));
 				} else if (fType === 'switch' || fType === 'boolean' || k.toLowerCase().includes('flag')) {
 					const isChecked = String(v).trim().toLowerCase() === 'true';
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20219,6 +20220,7 @@ ${interpolatedPrompt}`;
 									'Switch'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'switch', 'data-ai-field-label': k, 'data-ai-current-value': (isChecked ? 'true' : 'false'), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20237,7 +20239,7 @@ ${interpolatedPrompt}`;
 						))
 					))));
 				} else if (fType === 'select' || fType === 'single_select') {
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20245,6 +20247,7 @@ ${interpolatedPrompt}`;
 									'Select'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'select', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20272,7 +20275,7 @@ ${interpolatedPrompt}`;
 							selectedArr = tr.split(',').map(s => s.trim()).filter(Boolean);
 						}
 					}
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20280,6 +20283,7 @@ ${interpolatedPrompt}`;
 									'Multiselect'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'multiselect', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20296,7 +20300,7 @@ ${interpolatedPrompt}`;
 						))
 					))));
 				} else if (fType === 'date') {
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20304,6 +20308,7 @@ ${interpolatedPrompt}`;
 									'Date'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'date', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20318,7 +20323,7 @@ ${interpolatedPrompt}`;
 						))
 					))));
 				} else if (fType === 'time') {
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20326,6 +20331,7 @@ ${interpolatedPrompt}`;
 									'Time'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'time', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20340,7 +20346,7 @@ ${interpolatedPrompt}`;
 						))
 					))));
 				} else if (fType === 'datetime') {
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20348,6 +20354,7 @@ ${interpolatedPrompt}`;
 									'DateTime'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'datetime', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20368,7 +20375,7 @@ ${interpolatedPrompt}`;
 					((fType === 'text' || !fType) && typeof v === 'string' && !v.trim().startsWith('{') && !v.trim().startsWith('[') && v.length < 64 && /^\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}/.test(v.trim()) && (v.includes('~') || /^\d{4}-\d{2}-\d{2}$/.test(v.trim())))
 				) {
 					const rangeType = fType || 'date_range';
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20376,6 +20383,7 @@ ${interpolatedPrompt}`;
 									'Range'
 								)
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': rangeType, 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -20404,14 +20412,15 @@ ${interpolatedPrompt}`;
 						);
 					});
 
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card.action-button-group-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card action-button-group-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
 									'Actions'
 								)
-							)
+							),
+							...stepBadge()
 						))),
 						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 6px 0;' },
 							$('div.action-buttons-group-row', undefined, ...buttonsNodes)
@@ -20437,7 +20446,7 @@ ${interpolatedPrompt}`;
 							formattedVal = formattedNum;
 						}
 					}
-					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card.number-field-card', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card number-field-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text') },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
@@ -20450,6 +20459,7 @@ ${interpolatedPrompt}`;
 									)
 								] : [])
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'number', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v ?? '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -21576,7 +21586,7 @@ ${interpolatedPrompt}`;
 					const interpolatedSpeechText = this._interpolateParameters(ttsText);
 					const interpolatedDisplayText = this._interpolateParameters(ttsDisplayText);
 
-					customFieldsContent.push(part(['sectionCards', 'ttsPrimitiveCards'], withParts(() => $('div.section-card.custom-property-card.tts-primitive-card', { 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
+					customFieldsContent.push(part(['sectionCards', 'ttsPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card tts-primitive-card${stepCardClass}`, 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text'), 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
@@ -21596,6 +21606,7 @@ ${interpolatedPrompt}`;
 									')'
 								))
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'tts', 'data-ai-field-label': k, 'data-ai-current-value': textOf(ttsDisplayText), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -21772,7 +21783,7 @@ ${interpolatedPrompt}`;
 					const resolvedFileName = mediaFileName || (interpolatedMediaPath ? (interpolatedMediaPath.split(/[\\/]/).pop() || interpolatedMediaPath) : '');
 					const detected = detectMediaFileInfo(resolvedFileName || interpolatedMediaPath, mediaMimeType);
 
-					customFieldsContent.push(part(['sectionCards', 'mediaPlayerPrimitiveCards'], withParts(() => $('div.section-card.custom-property-card.media-player-primitive-card', { 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false'), 'data-subtitles-config': fieldItem.mediaSubtitlesEnabled ? JSON.stringify(mediaSubtitleFieldProps(fieldItem)) : '' },
+					customFieldsContent.push(part(['sectionCards', 'mediaPlayerPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card media-player-primitive-card${stepCardClass}`, 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text'), 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false'), 'data-subtitles-config': fieldItem.mediaSubtitlesEnabled ? JSON.stringify(mediaSubtitleFieldProps(fieldItem)) : '' },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
@@ -21785,6 +21796,7 @@ ${interpolatedPrompt}`;
 									textOf((detected.ext || 'MEDIA').toUpperCase())
 								))
 							),
+							...stepBadge(),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'media_player', 'data-ai-field-label': k, 'data-ai-current-value': textOf(interpolatedMediaPath), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
@@ -21834,8 +21846,9 @@ ${interpolatedPrompt}`;
 								)
 							] : [])
 						));
-					customFieldsContent.push(part('customFieldCards', withParts(() => $('div.custom-field-card', { 'data-field-key': textOf(rawKey), 'data-field-type': 'voice_note', style: 'background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;' },
-						$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px;' },
+					// Also a section card (its inline style keeps the look) so a ticket run can mark it like the others (CI-44)
+					customFieldsContent.push(part(['customFieldCards', 'sectionCards'], withParts(() => $('div', { class: `custom-field-card section-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'voice_note', style: 'background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;' },
+						part('sectionTitle', withParts(() => $('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px;' },
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								part('codicon', $('span.codicon.codicon-mic', { style: 'color: #94a3b8;' })),
 								$('span', { style: 'font-weight: 600; font-size: 13px;' }, textOf(k)),
@@ -21844,8 +21857,9 @@ ${interpolatedPrompt}`;
 									String(voiceClips.length),
 									')'
 								)
-							)
-						),
+							),
+							...stepBadge()
+						))),
 						$('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }, ...clipNodes),
 
 						...(voiceTranscript && voiceClips.length === 0 ? [
