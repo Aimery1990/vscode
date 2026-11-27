@@ -840,7 +840,7 @@ PRIMITIVE_GUIDES['sub_workflow'] = builtinGuide('sub_workflow', 'Call Sub-Workfl
 	],
 	'Later steps read the result from the output variable.',
 	['{call_sub_workflow_result}'],
-	['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes); this creates the sub_workflow ticket inside that workflow. CREATE_TICKETS, Python and AI tools cannot create sub_workflow tickets; this component only calls existing ones.']);
+	['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes), or create a sub_workflow ticket from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; without a definition it starts empty. This component only calls existing ones.']);
 
 /**
  * Returns guide documentation for any primitive type or fallback generic info.

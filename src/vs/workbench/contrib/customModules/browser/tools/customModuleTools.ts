@@ -422,7 +422,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'create_tickets',
 		label: 'Create Tickets',
-		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}}. Output: a ticket handle usable by Run Tickets / Get Outputs as {var}. The reserved types "freestyle" and "sub_workflow" cannot be created here (a sub-workflow is created only by encapsulating nodes on a workflow canvas).',
+		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}}. Output: a ticket handle usable by Run Tickets / Get Outputs as {var}. Freestyle tickets cannot be created here. wfTicketType "sub_workflow" creates a reusable sub-workflow ticket: wfTicketPath must be the parent workflow folder (or inside it) and wfTicketParams.definition may hold {name, nodes, links, inputs, outputs} (validated; omitted = empty sub-workflow).',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'new_run', label: 'New Run', type: 'create_tickets', wfTicketType: 'training_run', wfTicketTitle: 'Run {run_no}', wfTicketParams: { lr: '{lr}' } }
