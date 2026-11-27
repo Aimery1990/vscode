@@ -2,11 +2,12 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, append, clearNode, getActiveDocument, isHTMLInputElement } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, EventType, getActiveDocument, getWindow, isHTMLInputElement } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { ViewPane, IViewPaneOptions } from '../../../browser/parts/views/viewPane.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
-import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
+import { IContextMenuService, IContextViewService, IOpenContextView } from '../../../../platform/contextview/browser/contextView.js';
+import { DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IViewDescriptorService } from '../../../common/views.js';
@@ -29,7 +30,7 @@ import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, CanonicalStatusCategory } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentCredential, IAgentItem, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
@@ -53,8 +54,8 @@ import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/commo
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
-import { createDefaultCategoryMap, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
-import { applyFinishedFilter, describeHiddenTickets, HIDE_FINISHED_TICKETS_STORAGE_KEY } from '../common/ticketVisibility.js';
+import { createDefaultCategoryMap, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
+import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
@@ -240,7 +241,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 	private readonly _storageService: IStorageService;
 	private _showRemovedItems: boolean = false;
-	private _hideFinishedTickets: boolean = false;
+	/** Status categories hidden by the tree's status filter (UI-16). */
+	private _hiddenStatusCategories: ReadonlySet<CanonicalStatusCategory> = new Set();
+	private _statusFilterMenu?: IOpenContextView;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -269,12 +272,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IViewsService private readonly viewsService: IViewsService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
-		@ICustomModulesService private readonly customModulesService: ICustomModulesService
+		@ICustomModulesService private readonly customModulesService: ICustomModulesService,
+		@IContextViewService private readonly contextViewService: IContextViewService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
 		this._showRemovedItems = this._storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
-		this._hideFinishedTickets = this._storageService.getBoolean(HIDE_FINISHED_TICKETS_STORAGE_KEY, StorageScope.PROFILE, false);
+		this._hiddenStatusCategories = this._loadHiddenStatusCategories();
+		this._register(toDisposable(() => this._statusFilterMenu?.close()));
 		this._restoreViewState();
 		this._register(this._storageService.onWillSaveState(() => this._saveViewState()));
 
@@ -598,6 +603,136 @@ export class MainWorkspaceViewPane extends ViewPane {
 		await this.renderContent();
 	}
 
+	/** Reads the hidden status categories, migrating the UI-15 boolean "Hide Done & Removed" key once (UI-16). */
+	private _loadHiddenStatusCategories(): Set<CanonicalStatusCategory> {
+		const raw = this._storageService.get(HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, StorageScope.PROFILE);
+		const legacyRaw = this._storageService.get(LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, StorageScope.PROFILE);
+		const hidden = resolveHiddenCategories(raw, legacyRaw === undefined ? undefined : legacyRaw === 'true');
+		if (legacyRaw !== undefined) {
+			if (raw === undefined) {
+				this._storageService.store(HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, serializeHiddenCategories(hidden), StorageScope.PROFILE, StorageTarget.USER);
+			}
+			this._storageService.remove(LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, StorageScope.PROFILE);
+		}
+		return hidden;
+	}
+
+	private _setHiddenStatusCategories(hidden: ReadonlySet<CanonicalStatusCategory>, filterIcon: HTMLElement): void {
+		this._hiddenStatusCategories = hidden;
+		this._storageService.store(HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, serializeHiddenCategories(hidden), StorageScope.PROFILE, StorageTarget.USER);
+		this._updateStatusFilterIcon(filterIcon);
+		this.renderContent();
+	}
+
+	private _updateStatusFilterIcon(icon: HTMLElement): void {
+		const active = this._hiddenStatusCategories.size > 0;
+		icon.className = ThemeIcon.asClassName(active ? Codicon.filterFilled : Codicon.filter);
+		icon.style.opacity = active ? '1' : '0.7';
+		icon.style.color = active ? '#38bdf8' : '';
+		icon.title = describeStatusFilter(this._hiddenStatusCategories);
+	}
+
+	/** Multi-select status-category filter dropdown (UI-16). Stays open while toggling; closes on outside click / Escape. */
+	private _showStatusFilterMenu(anchor: HTMLElement): void {
+		this._statusFilterMenu = this.contextViewService.showContextView({
+			getAnchor: () => anchor,
+			render: (container) => {
+				const store = new DisposableStore();
+				const menu = append(container, $('.anyagent-status-filter-menu', {
+					style: 'min-width: 190px; padding: 4px 0; border-radius: 6px; font-size: 12px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35))); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);'
+				}));
+				menu.setAttribute('role', 'menu');
+
+				const addItem = (label: string, checked: boolean | undefined, dotColor: string | undefined, title: string, onSelect: () => void) => {
+					const row = append(menu, $('div', {
+						style: 'display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 6px; cursor: pointer; white-space: nowrap;'
+					}));
+					row.setAttribute('role', checked === undefined ? 'menuitem' : 'menuitemcheckbox');
+					if (checked !== undefined) {
+						row.setAttribute('aria-checked', String(checked));
+					}
+					row.tabIndex = 0;
+					row.title = title;
+					const check = append(row, $('span' + ThemeIcon.asCSSSelector(Codicon.check)));
+					check.style.visibility = checked ? 'visible' : 'hidden';
+					check.style.fontSize = '12px';
+					if (dotColor) {
+						append(row, $('span', { style: `width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: ${dotColor};` }));
+					}
+					append(row, $('span', {}, label));
+					store.add(addDisposableListener(row, EventType.MOUSE_OVER, () => {
+						row.style.background = 'var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground))';
+						row.style.color = 'var(--vscode-menu-selectionForeground, inherit)';
+					}));
+					store.add(addDisposableListener(row, EventType.MOUSE_OUT, () => {
+						row.style.background = '';
+						row.style.color = '';
+					}));
+					const select = (e: Event) => {
+						e.preventDefault();
+						e.stopPropagation();
+						onSelect();
+						rerender();
+					};
+					store.add(addDisposableListener(row, EventType.CLICK, select));
+					store.add(addDisposableListener(row, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+						if (e.key === 'Enter' || e.key === ' ') {
+							select(e);
+						}
+					}));
+				};
+
+				const addSeparator = () => {
+					append(menu, $('div', { style: 'height: 1px; margin: 4px 0; background: var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.35));' }));
+				};
+
+				const rerender = () => {
+					store.clear();
+					clearNode(menu);
+					renderItems();
+				};
+
+				const renderItems = () => {
+					const hidden = this._hiddenStatusCategories;
+					for (const category of STATUS_CATEGORIES) {
+						const isVisible = !hidden.has(category);
+						addItem(category, isVisible, STATUS_CATEGORY_COLORS[category].text, isVisible ? `Hide ${category} tickets` : `Show ${category} tickets`, () => {
+							this._setHiddenStatusCategories(toggleHiddenCategory(this._hiddenStatusCategories, category), anchor);
+						});
+					}
+					addSeparator();
+					addItem('Show All', undefined, undefined, 'Show tickets of every status', () => {
+						this._setHiddenStatusCategories(new Set(), anchor);
+					});
+					addItem('Hide Done & Removed', undefined, undefined, 'Show only Todo, In Progress and Blocked tickets', () => {
+						this._setHiddenStatusCategories(new Set(FINISHED_CATEGORIES), anchor);
+					});
+				};
+				renderItems();
+
+				// close on outside click / Escape (clicks on the funnel itself are handled by its toggle)
+				const win = getWindow(anchor);
+				const outer = new DisposableStore();
+				outer.add(store);
+				outer.add(addDisposableListener(win, EventType.MOUSE_DOWN, (e: MouseEvent) => {
+					const target = e.target as Node | null;
+					if (target && !menu.contains(target) && !anchor.contains(target)) {
+						this._statusFilterMenu?.close();
+					}
+				}, true));
+				outer.add(addDisposableListener(win, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+					if (e.key === 'Escape') {
+						this._statusFilterMenu?.close();
+					}
+				}, true));
+				return outer;
+			},
+			onHide: () => {
+				this._statusFilterMenu = undefined;
+			}
+		});
+	}
+
 	private _ensureStaticChrome(): void {
 		if (!this.containerEl || this.treeBoxEl) {
 			return;
@@ -623,23 +758,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 		append(titleLeft, $('span', {}, 'Managed Workspaces'));
 
 		const headerIcons = append(headerRow, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
-		const hideFinishedIcon = append(headerIcons, $('span' + ThemeIcon.asCSSSelector(this._hideFinishedTickets ? Codicon.filterFilled : Codicon.filter)));
-		hideFinishedIcon.style.cursor = 'pointer';
-		hideFinishedIcon.style.opacity = this._hideFinishedTickets ? '1' : '0.7';
-		hideFinishedIcon.style.color = this._hideFinishedTickets ? '#38bdf8' : '';
-		hideFinishedIcon.title = this._hideFinishedTickets
-			? 'Done & Removed tickets are hidden. Click to show all tickets'
-			: 'Hide Done & Removed tickets';
-		hideFinishedIcon.onclick = () => {
-			this._hideFinishedTickets = !this._hideFinishedTickets;
-			this._storageService.store(HIDE_FINISHED_TICKETS_STORAGE_KEY, this._hideFinishedTickets, StorageScope.PROFILE, StorageTarget.USER);
-			hideFinishedIcon.className = ThemeIcon.asClassName(this._hideFinishedTickets ? Codicon.filterFilled : Codicon.filter);
-			hideFinishedIcon.style.opacity = this._hideFinishedTickets ? '1' : '0.7';
-			hideFinishedIcon.style.color = this._hideFinishedTickets ? '#38bdf8' : '';
-			hideFinishedIcon.title = this._hideFinishedTickets
-				? 'Done & Removed tickets are hidden. Click to show all tickets'
-				: 'Hide Done & Removed tickets';
-			this.renderContent();
+		const statusFilterIcon = append(headerIcons, $('span'));
+		statusFilterIcon.style.cursor = 'pointer';
+		this._updateStatusFilterIcon(statusFilterIcon);
+		statusFilterIcon.onclick = (e) => {
+			e.stopPropagation();
+			if (this._statusFilterMenu) {
+				this._statusFilterMenu.close();
+				return;
+			}
+			this._showStatusFilterMenu(statusFilterIcon);
 		};
 
 		const addWsIcon = append(headerIcons, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
@@ -1235,13 +1363,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
-		// UI-15: optionally hide Done / Removed tickets (with their sub-tree)
+		// UI-15 / UI-16: hide tickets whose status category is filtered out (with their sub-tree)
 		const isTicketItem = (c: IWorkspaceChildItem) => c.type !== 'folder' && c.type !== 'file';
-		const { visible: children, hiddenCount } = applyFinishedFilter(page.items, this._hideFinishedTickets, c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined);
+		const { visible: children, hiddenCount } = applyStatusFilter(page.items, this._hiddenStatusCategories, c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined);
 		const hiddenText = describeHiddenTickets(hiddenCount);
 		const appendHiddenLine = () => {
 			if (hiddenText) {
-				const hiddenEl = append(parentContainer, $('div', { style: `font-size: 10px; opacity: 0.45; font-style: italic; padding: 2px 0 2px ${depth * 12 + 16}px;`, title: 'Turn off "Hide Done & Removed tickets" in the panel header to show them' }, hiddenText));
+				const hiddenEl = append(parentContainer, $('div', { style: `font-size: 10px; opacity: 0.45; font-style: italic; padding: 2px 0 2px ${depth * 12 + 16}px;`, title: `${describeStatusFilter(this._hiddenStatusCategories)}. Use the filter icon in the panel header to show them` }, hiddenText));
 				hiddenEl.setAttribute('data-sync-key', `hidden:${parentCanonicalKey}`);
 				hiddenEl.setAttribute('data-visual-sig', `hidden:${hiddenCount}:${depth}`);
 			}
