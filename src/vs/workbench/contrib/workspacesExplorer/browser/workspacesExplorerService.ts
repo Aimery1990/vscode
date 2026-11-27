@@ -5,6 +5,7 @@
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
+import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../common/ticketSubtreeCount.js';
 import { ITicketLabelDefinition, parseLabelDefinitions, renameTicketLabels, serializeLabelDefinitions, TICKET_LABELS_METADATA_KEY } from '../common/ticketLabels.js';
 import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, setTicketLabelsLine, setTicketStatusLine, STATUS_MAPPING_KEY, TICKET_STATUSES_KEY, upsertWorkspaceMetadata } from '../common/workspaceLifecycle.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -58,7 +59,67 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		timestamp: number;
 	}>();
 
+	/** UI-17: per folder, its direct child ticket folders with their raw status (ticket folders only). */
+	private readonly _subtreeLevelCache = new Map<string, { entries: readonly { uri: URI; status?: string }[]; timestamp: number }>();
+	private readonly _subtreeLevelInFlight = new Map<string, Promise<readonly { uri: URI; status?: string }[]>>();
+	/** UI-17: assembled sub-tree summaries; a stale entry is still served by peek (no flicker) until recomputed. */
+	private readonly _subtreeSummaryCache = new Map<string, { summary: ITicketSubtreeSummary; timestamp: number; stale: boolean }>();
+	private readonly _subtreeSummaryInFlight = new Map<string, Promise<ITicketSubtreeSummary>>();
+	/** Running level / summary computations; one hit by an invalidation is returned but not cached. */
+	private readonly _subtreeComputations = new Set<{ readonly key: string; readonly isSummary: boolean; dirty: boolean }>();
+	private static readonly SUBTREE_MAX_DEPTH = 12;
+	private static readonly SUBTREE_MAX_NODES = 5000;
+	private static readonly SUBTREE_CACHE_TTL = 300000;
+
+	/**
+	 * Drops the cached levels of `uri`, its ancestors and its descendants (a listing or a child status changed) and
+	 * marks the summaries of those folders stale.
+	 */
+	private _invalidateSubtreeCaches(uri: URI | string): void {
+		const key = this.normalizeUriString(uri);
+		const affects = (k: string) => key === k || key.startsWith(k + '/') || k.startsWith(key + '/');
+		for (const computation of this._subtreeComputations) {
+			if (affects(computation.key)) {
+				computation.dirty = true;
+			}
+		}
+		for (const k of Array.from(this._subtreeLevelCache.keys())) {
+			if (affects(k)) {
+				this._subtreeLevelCache.delete(k);
+			}
+		}
+		for (const [k, entry] of this._subtreeSummaryCache) {
+			if (affects(k)) {
+				entry.stale = true;
+			}
+		}
+		for (const k of Array.from(this._subtreeLevelInFlight.keys())) {
+			if (affects(k)) {
+				this._subtreeLevelInFlight.delete(k);
+			}
+		}
+		for (const k of Array.from(this._subtreeSummaryInFlight.keys())) {
+			if (affects(k)) {
+				this._subtreeSummaryInFlight.delete(k);
+			}
+		}
+	}
+
+	/** Status categories may have changed (workspace lifecycle edit): summaries are reassembled from the cached levels. */
+	private _markAllSubtreeSummariesStale(): void {
+		for (const computation of this._subtreeComputations) {
+			if (computation.isSummary) {
+				computation.dirty = true;
+			}
+		}
+		for (const entry of this._subtreeSummaryCache.values()) {
+			entry.stale = true;
+		}
+		this._subtreeSummaryInFlight.clear();
+	}
+
 	private _invalidateCacheForUri(uri: URI | string): void {
+		this._invalidateSubtreeCaches(uri);
 		const norm = this.normalizeUriString(uri);
 		this._childEntityMetaCache.delete(norm);
 		const uriObj = typeof uri === 'string' ? URI.parse(uri) : uri;
@@ -109,9 +170,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					this._invalidateCacheForUri(u);
 					if (u.path.endsWith('/ticket.md') || u.path.endsWith('/workspace.md')) {
 						this._workspaceStatusesCache.clear();
+						this._markAllSubtreeSummariesStale();
 					}
 				} else if (e.rawDeleted.includes(u)) {
 					this._invalidateCacheForUri(u);
+				}
+			}
+			// UI-17: a folder created / moved in changes the child lists of its ancestors
+			// (files inside a ticket's .agents folder never change child lists; ticket.md is handled above)
+			for (const u of e.rawAdded) {
+				if (!u.path.includes('/.agents/')) {
+					this._invalidateSubtreeCaches(u);
 				}
 			}
 			if (e.rawAdded.some(isRelevantMetaFile) || e.rawDeleted.some(isRelevantMetaFile) || e.rawDeleted.length > 0) {
@@ -986,14 +1055,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const childUri = child.resource;
 					const meta = await this._readChildEntityMetadataFast(childUri, child.name);
 					const childStatus = meta.status;
-					const isRemoved = childStatus && (
-						wsStatuses.getCategory(childStatus) === 'Removed' ||
-						childStatus.toLowerCase() === wsStatuses.removedStatus.toLowerCase() ||
-						childStatus.toLowerCase() === 'removed' ||
-						childStatus.toLowerCase() === 'canceled' ||
-						childStatus.toLowerCase() === 'cancelled' ||
-						childStatus.toLowerCase() === 'archived'
-					);
+					const isRemoved = this._isRemovedStatus(childStatus, wsStatuses);
 
 					if (isRemoved && !includeRemoved) {
 						return null;
@@ -1040,6 +1102,148 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		} catch {
 			return { items: [], totalCount: 0, hasMore: false };
 		}
+	}
+
+	/** Whether a ticket with `status` is hidden from the tree unless "show removed items" is on. */
+	private _isRemovedStatus(status: string | undefined, wsStatuses: IWorkspaceStatusesInfo): boolean {
+		if (!status) {
+			return false;
+		}
+		const lower = status.toLowerCase();
+		return wsStatuses.getCategory(status) === 'Removed' ||
+			lower === wsStatuses.removedStatus.toLowerCase() ||
+			lower === 'removed' ||
+			lower === 'canceled' ||
+			lower === 'cancelled' ||
+			lower === 'archived';
+	}
+
+	/** The direct child ticket folders of `folderUri` (cached; reuses the cached 8KB ticket.md metadata reads). */
+	private _loadSubtreeLevel(folderUri: URI): Promise<readonly { uri: URI; status?: string }[]> {
+		const key = this.normalizeUriString(folderUri);
+		const inFlight = this._subtreeLevelInFlight.get(key);
+		if (inFlight) {
+			return inFlight;
+		}
+		const computation = { key, isSummary: false, dirty: false };
+		this._subtreeComputations.add(computation);
+		const promise = (async () => {
+			let children;
+			try {
+				children = (await this.fileService.resolve(folderUri)).children || [];
+			} catch {
+				return [];
+			}
+			const dirs = children.filter(c => c.isDirectory && !c.name.startsWith('.') && !c.name.startsWith('~') && c.name !== 'node_modules' && c.name !== 'attachments');
+			const entries: { uri: URI; status?: string }[] = [];
+			const BATCH_SIZE = 25;
+			for (let i = 0; i < dirs.length; i += BATCH_SIZE) {
+				const slice = dirs.slice(i, i + BATCH_SIZE);
+				const metas = await Promise.all(slice.map(d => this._readChildEntityMetadataFast(d.resource, d.name)));
+				metas.forEach((meta, idx) => {
+					if (meta.type !== 'folder' && meta.type !== 'file') {
+						entries.push({ uri: slice[idx].resource, status: meta.status });
+					}
+				});
+			}
+			if (!computation.dirty) {
+				this._subtreeLevelCache.set(key, { entries, timestamp: Date.now() });
+			}
+			return entries;
+		})();
+		this._subtreeLevelInFlight.set(key, promise);
+		const done = () => {
+			this._subtreeComputations.delete(computation);
+			if (this._subtreeLevelInFlight.get(key) === promise) {
+				this._subtreeLevelInFlight.delete(key);
+			}
+		};
+		promise.then(done, done);
+		return promise;
+	}
+
+	private _subtreeBaseUri(folderUri: URI): URI {
+		return folderUri.path.endsWith('.code-workspace') ? dirname(folderUri) : folderUri;
+	}
+
+	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined {
+		return this._subtreeSummaryCache.get(this.normalizeUriString(this._subtreeBaseUri(folderUri)))?.summary;
+	}
+
+	getTicketSubtreeSummary(folderUri: URI): Promise<ITicketSubtreeSummary> {
+		const base = this._subtreeBaseUri(folderUri);
+		const key = this.normalizeUriString(base);
+		const cached = this._subtreeSummaryCache.get(key);
+		if (cached && !cached.stale && (Date.now() - cached.timestamp) < WorkspacesExplorerService.SUBTREE_CACHE_TTL) {
+			return Promise.resolve(cached.summary);
+		}
+		const inFlight = this._subtreeSummaryInFlight.get(key);
+		if (inFlight) {
+			return inFlight;
+		}
+		const computation = { key, isSummary: true, dirty: false };
+		this._subtreeComputations.add(computation);
+		const promise = (async (): Promise<ITicketSubtreeSummary> => {
+			const wsStatuses = await this.getWorkspaceStatuses(base);
+			const maxDepth = WorkspacesExplorerService.SUBTREE_MAX_DEPTH;
+			const maxNodes = WorkspacesExplorerService.SUBTREE_MAX_NODES;
+			let nodeCount = 0;
+			let truncated = false;
+			const visited = new Set<string>();
+			const levelOf = (uri: URI) => {
+				const level = this._subtreeLevelCache.get(this.normalizeUriString(uri));
+				return level && (Date.now() - level.timestamp) < WorkspacesExplorerService.SUBTREE_CACHE_TTL ? level.entries : this._loadSubtreeLevel(uri);
+			};
+			const build = async (uri: URI, depth: number): Promise<ITicketSubtreeNode[]> => {
+				const k = this.normalizeUriString(uri);
+				if (visited.has(k)) {
+					return [];
+				}
+				visited.add(k);
+				if (depth > 0 && nodeCount >= maxNodes) {
+					truncated = true;
+					return [];
+				}
+				const level = await levelOf(uri);
+				if (level.length === 0) {
+					return [];
+				}
+				if (depth >= maxDepth) {
+					truncated = true;
+					return [];
+				}
+				// the direct children of the requested folder are always complete; deeper levels share the size budget
+				let entries = level;
+				if (depth > 0) {
+					const room = Math.max(0, maxNodes - nodeCount);
+					if (entries.length > room) {
+						entries = entries.slice(0, room);
+						truncated = true;
+					}
+				}
+				nodeCount += entries.length;
+				const childLists = await Promise.all(entries.map(e => build(e.uri, depth + 1)));
+				return entries.map((e, i): ITicketSubtreeNode => ({
+					category: e.status ? wsStatuses.getCategory(e.status) : undefined,
+					removed: this._isRemovedStatus(e.status, wsStatuses),
+					children: childLists[i]
+				}));
+			};
+			const summary: ITicketSubtreeSummary = { children: await build(base, 0), truncated };
+			if (!computation.dirty) {
+				this._subtreeSummaryCache.set(key, { summary, timestamp: Date.now(), stale: false });
+			}
+			return summary;
+		})();
+		this._subtreeSummaryInFlight.set(key, promise);
+		const done = () => {
+			this._subtreeComputations.delete(computation);
+			if (this._subtreeSummaryInFlight.get(key) === promise) {
+				this._subtreeSummaryInFlight.delete(key);
+			}
+		};
+		promise.then(done, done);
+		return promise;
 	}
 
 	async getWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
@@ -1350,6 +1554,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		this._workspaceStatusesCache.clear();
 		this._childEntityMetaCache.clear();
+		this._subtreeLevelCache.clear();
+		this._markAllSubtreeSummariesStale();
 		this._onDidChangeWorkspaces.fire();
 		return { migratedTickets };
 	}

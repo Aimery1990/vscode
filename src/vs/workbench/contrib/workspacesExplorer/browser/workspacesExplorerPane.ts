@@ -27,7 +27,7 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
-import { Action } from '../../../../base/common/actions.js';
+import { Action, IAction, Separator, SubmenuAction, toAction } from '../../../../base/common/actions.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, CanonicalStatusCategory } from '../common/workspacesExplorer.js';
@@ -57,6 +57,7 @@ import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlo
 import { createDefaultCategoryMap, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
+import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
@@ -245,6 +246,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 	/** Status categories hidden by the tree's status filter (UI-16). */
 	private _hiddenStatusCategories: ReadonlySet<CanonicalStatusCategory> = new Set();
 	private _statusFilterMenu?: IOpenContextView;
+	/** Child-count pill mode, one global choice for the tree (UI-17). */
+	private _childCountMode: ChildCountMode;
+	/** Counts per sub-tree summary for the current filter, so re-renders do not walk unchanged sub-trees again. */
+	private readonly _childCountMemo = new WeakMap<ITicketSubtreeSummary, { key: string; counts: ITicketSubtreeCounts }>();
+	private _childCountRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -280,7 +286,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		this._storageService = storageService;
 		this._showRemovedItems = this._storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
 		this._hiddenStatusCategories = this._loadHiddenStatusCategories();
+		this._childCountMode = parseChildCountMode(this._storageService.get(CHILD_COUNT_MODE_STORAGE_KEY, StorageScope.PROFILE));
 		this._register(toDisposable(() => this._statusFilterMenu?.close()));
+		this._register(toDisposable(() => {
+			if (this._childCountRenderTimer) {
+				clearTimeout(this._childCountRenderTimer);
+				this._childCountRenderTimer = undefined;
+			}
+		}));
 		this._restoreViewState();
 		this._register(this._storageService.onWillSaveState(() => this._saveViewState()));
 
@@ -631,6 +644,67 @@ export class MainWorkspaceViewPane extends ViewPane {
 		icon.style.opacity = active ? '1' : '0.7';
 		icon.style.color = active ? '#38bdf8' : '';
 		icon.title = describeStatusFilter(this._hiddenStatusCategories);
+	}
+
+	/** "Child Count" submenu of the row / workspace context menus (UI-17); the choice applies to the whole tree. */
+	private _createChildCountMenu(): SubmenuAction {
+		return new SubmenuAction('child_count_mode', 'Child Count', CHILD_COUNT_MODES.map(({ mode, label }) => toAction({
+			id: `child_count_mode_${mode}`,
+			label,
+			checked: this._childCountMode === mode,
+			run: () => {
+				this._childCountMode = mode;
+				this._storageService.store(CHILD_COUNT_MODE_STORAGE_KEY, mode, StorageScope.PROFILE, StorageTarget.USER);
+				this.renderContent();
+			}
+		})));
+	}
+
+	/**
+	 * Appends the child-count pill for the ticket / workspace folder `folderUri` (UI-17) and returns its part of the
+	 * row's visual signature. Rendering never waits for the scan: a cached (possibly stale) summary is used right away,
+	 * and the tree re-renders once a newer summary is ready.
+	 */
+	private _appendChildCountPill(container: HTMLElement, folderUri: URI): string {
+		if (this._childCountMode === 'off') {
+			return 'off';
+		}
+		const summary = this.workspacesExplorerService.peekTicketSubtreeSummary(folderUri);
+		this.workspacesExplorerService.getTicketSubtreeSummary(folderUri).then(fresh => {
+			if (fresh !== summary) {
+				this._scheduleChildCountRender();
+			}
+		}, () => { /* unreadable folder: no pill */ });
+		if (!summary) {
+			return 'pending';
+		}
+		const filterKey = `${Array.from(this._hiddenStatusCategories).sort().join(',')}|${this._showRemovedItems ? '1' : '0'}`;
+		let memo = this._childCountMemo.get(summary);
+		if (!memo || memo.key !== filterKey) {
+			memo = { key: filterKey, counts: countSubtree(summary, this._hiddenStatusCategories, this._showRemovedItems) };
+			this._childCountMemo.set(summary, memo);
+		}
+		const pill = describeChildCountPill(memo.counts, this._childCountMode);
+		if (!pill) {
+			return 'none';
+		}
+		const pillEl = append(container, $('span.ticket-child-count', {
+			style: 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); background: rgba(128, 128, 128, 0.14); border: 1px solid rgba(128, 128, 128, 0.28);'
+		}, pill.text));
+		pillEl.title = pill.tooltip;
+		return `${this._childCountMode}:${pill.text}:${pill.tooltip}`;
+	}
+
+	private _scheduleChildCountRender(): void {
+		if (this._childCountRenderTimer) {
+			return;
+		}
+		this._childCountRenderTimer = setTimeout(() => {
+			this._childCountRenderTimer = undefined;
+			if (this.isBodyVisible()) {
+				this.renderContent();
+			}
+		}, 100);
 	}
 
 	/** Multi-select status-category filter dropdown (UI-16). Stays open while toggling; closes on outside click / Escape. */
@@ -1106,7 +1180,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 					this.contextMenuService.showContextMenu({
 						getAnchor: () => ({ x: e.clientX, y: e.clientY }),
-						getActions: () => actions
+						getActions: () => [...actions, new Separator(), this._createChildCountMenu()]
 					});
 				};
 
@@ -1220,6 +1294,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				wsTitleSpan.innerText = wsDisplayText;
 				wsTitleSpan.title = `${wsDisplayText} (${ws.uri.fsPath})`;
 
+				// UI-17: visible descendant tickets of the whole workspace
+				let wsChildCountSig = 'missing';
+				if (!ws.isMissing) {
+					wsChildCountSig = this._appendChildCountPill(headerLeft, ws.uri);
+					if (headerLeft.lastElementChild !== wsTitleSpan) {
+						wsTitleSpan.style.flex = '0 1 auto';
+					}
+				}
+
 				// Header Right Container (Badges + Actions)
 				const headerRight = append(cardHeader, $('.header-right'));
 				headerRight.style.display = 'flex';
@@ -1234,7 +1317,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				cardHeader.setAttribute(
 					'data-visual-sig',
-					`${isExpanded ? '1' : '0'}|${isPinned ? 'P' : ''}|${ws.detectedType || ''}|${wsDisplayText}|${badgeText}|${badgeBg}|${badgeFg}|${wsIcon.className}|${wsIcon.style.color}`
+					`${isExpanded ? '1' : '0'}|${isPinned ? 'P' : ''}|${ws.detectedType || ''}|${wsDisplayText}|${badgeText}|${badgeBg}|${badgeFg}|${wsIcon.className}|${wsIcon.style.color}|${wsChildCountSig}`
 				);
 
 				// Header Actions
@@ -1512,7 +1595,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const snapshot = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
 				const realTicketId = snapshot?.ticketId || child.code || child.name;
 
-				const childActions: Action[] = [];
+				const childActions: IAction[] = [];
 
 				if (selectedChildren.length > 1) {
 					childActions.push(
@@ -1657,6 +1740,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 						});
 					})
 				);
+
+				childActions.push(new Separator(), this._createChildCountMenu());
 
 				this.contextMenuService.showContextMenu({
 					getAnchor: () => ({ x: e.clientX, y: e.clientY }),
@@ -1805,6 +1890,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				? `${childDisplayText} [${childTicketId} · ${badgeText}] (${child.uri.fsPath})`
 				: `${childDisplayText} (${child.uri.fsPath})`;
 
+			// UI-17: visible descendant tickets of this ticket, as a muted pill right after the title
+			let childCountSig = '';
+			if (isTicketEntity && isDirectory) {
+				childCountSig = this._appendChildCountPill(childLeft, child.uri);
+				if (childLeft.lastElementChild !== childTitleSpan) {
+					childTitleSpan.style.flex = '0 1 auto';
+				}
+			}
+
 			// Ticket labels (UI-13): small colored chips after the title; the title keeps priority when space is short
 			const childLabels = isTicketEntity ? (child.labels || []) : [];
 			if (childLabels.length > 0) {
@@ -1869,7 +1963,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			childRow.setAttribute(
 				'data-visual-sig',
-				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}`
+				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}|${childCountSig}`
 			);
 
 			// Single Click / Cmd+Click (multi-select) / Shift+Click (range-select)

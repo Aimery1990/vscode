@@ -7,6 +7,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ITicketLabelDefinition } from './ticketLabels.js';
+import { ITicketSubtreeSummary } from './ticketSubtreeCount.js';
 
 export const WORKSPACES_EXPLORER_VIEWLET_ID = 'workbench.view.workspacesExplorer';
 export const WORKSPACE_PANE_VIEW_ID = 'workbench.workspacesExplorer.mainPane';
@@ -208,6 +209,13 @@ export interface IWorkspacesExplorerService {
 	 */
 	updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate, actor?: TicketChangeActorInput): Promise<{ migratedTickets: number }>;
 	getWorkspaceStatuses(targetUri: URI): Promise<IWorkspaceStatusesInfo>;
+	/**
+	 * The ticket sub-tree below `folderUri` (ticket folders only, all levels, depth / size capped) with each ticket's
+	 * status category, for the child-count pill (UI-17). Cached; invalidated by file changes under the folder.
+	 */
+	getTicketSubtreeSummary(folderUri: URI): Promise<ITicketSubtreeSummary>;
+	/** The cached summary of {@link getTicketSubtreeSummary}, or undefined when it is not (or no longer) cached. */
+	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;
