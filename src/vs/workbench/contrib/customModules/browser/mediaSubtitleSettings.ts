@@ -13,7 +13,7 @@ import { ICustomField } from '../../entityPersistence/common/entityPersistence.j
 import { IVoiceModelService, SUBTITLE_MODEL_CATALOG, VOICE_PROVIDER_CATALOG } from '../../voiceModels/common/voiceModel.js';
 import { checkMediaLimits, DEFAULT_MEDIA_MAX_UPLOAD_MB, describeMediaFacts, DICTATION_MODE_LABEL, dictationModeCheckboxText, dictationModeDescription, formatMediaDuration, IMediaFileFacts, resolveMediaSubtitlesConfig, SUBTITLE_DISPLAY_MODES } from '../../voiceModels/common/subtitleConfig.js';
 import { MIN_DICTATION_SECONDS } from '../../voiceModels/common/dictation.js';
-import { formatClock, ISubtitleDocument, matchSubtitleDocument } from '../../voiceModels/common/subtitles.js';
+import { formatClock, ISubtitleDocument, matchSubtitleDocument, toTimedText } from '../../voiceModels/common/subtitles.js';
 import { confirmLargeMediaDecode, confirmSubtitleReextract, extractMediaSubtitleDocument, IMediaSubtitleSource, IMediaSubtitleStore, resolveMediaUri } from '../../voiceModels/browser/mediaSubtitleJob.js';
 
 const LABEL_STYLE = 'font-size: 11px; color: rgba(255, 255, 255, 0.7); min-width: 150px;';
@@ -331,7 +331,38 @@ function renderExtractSection(details: HTMLElement, field: ICustomField, voiceMo
 	const progressFill = append(track, $('div', { style: 'height: 100%; width: 0%; background: linear-gradient(90deg, #d97706, #fbbf24); transition: width 0.2s ease;' }));
 	const progressText = append(progressWrap, $('span', { style: 'font-size: 10.5px; color: #fcd34d;' }));
 	const errorBox = append(section, $('div', { style: 'display: none; padding: 6px 10px; border-radius: 6px; background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.45); color: #fca5a5; font-size: 11px; line-height: 1.4; white-space: pre-wrap;' }));
-	const preview = append(section, $('div.media-subtitle-extract-preview', { style: 'display: none; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px; background: rgba(0, 0, 0, 0.25); font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, 0.8);' }));
+	// Full transcript: every line, scrollable, with a copy icon on top.
+	const previewWrap = append(section, $('div.media-subtitle-extract-preview-wrap', { style: 'display: none; flex-direction: column; border-radius: 4px; background: rgba(0, 0, 0, 0.25);' }));
+	const previewHead = append(previewWrap, $('div', { style: 'display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08);' }));
+	const previewCount = append(previewHead, $('span', { style: 'flex: 1; font-size: 10px; color: rgba(255, 255, 255, 0.5);' }));
+	const copyBtn = append(previewHead, $<HTMLButtonElement>('button.media-subtitle-copy-btn', { type: 'button', title: 'Copy all subtitles (with timestamps)', 'aria-label': 'Copy all subtitles', style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: transparent; border: 1px solid rgba(251, 191, 36, 0.35); color: #fcd34d;' }));
+	const copyIcon = append(copyBtn, $('span.codicon.codicon-copy', { style: 'font-size: 13px;' }));
+	const preview = append(previewWrap, $('div.media-subtitle-extract-preview', { style: 'display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; max-height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.45; color: rgba(255, 255, 255, 0.8); user-select: text;' }));
+	let previewDoc: ISubtitleDocument | undefined;
+	let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
+	store.add(toDisposable(() => { if (copyResetTimer) { clearTimeout(copyResetTimer); } }));
+	store.add(addDisposableListener(copyBtn, 'click', async e => {
+		e.preventDefault();
+		e.stopPropagation();
+		if (!previewDoc || !previewDoc.segments.length) {
+			return;
+		}
+		let ok = true;
+		try {
+			await navigator.clipboard.writeText(toTimedText(previewDoc.segments));
+		} catch {
+			ok = false;
+		}
+		copyIcon.className = ok ? 'codicon codicon-check' : 'codicon codicon-error';
+		copyBtn.title = ok ? `Copied ${previewDoc.segments.length} lines` : 'Copy failed';
+		if (copyResetTimer) {
+			clearTimeout(copyResetTimer);
+		}
+		copyResetTimer = setTimeout(() => {
+			copyIcon.className = 'codicon codicon-copy';
+			copyBtn.title = 'Copy all subtitles (with timestamps)';
+		}, 1500);
+	}));
 
 	let running: CancellationTokenSource | undefined;
 	let storedDoc: ISubtitleDocument | undefined;
@@ -351,17 +382,19 @@ function renderExtractSection(details: HTMLElement, field: ICustomField, voiceMo
 	};
 	const showPreview = (doc: ISubtitleDocument | undefined) => {
 		clearNode(preview);
-		const lines = doc ? doc.segments.slice(0, 3) : [];
-		preview.style.display = lines.length ? 'flex' : 'none';
-		for (const seg of lines) {
+		previewDoc = doc && doc.segments.length ? doc : undefined;
+		previewWrap.style.display = previewDoc ? 'flex' : 'none';
+		if (!previewDoc) {
+			return;
+		}
+		previewCount.textContent = `${previewDoc.segments.length} lines - scroll to read all`;
+		for (const seg of previewDoc.segments) {
 			append(preview, $('div', { style: 'display: flex; gap: 8px;' },
 				$('span', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; color: #fcd34d; opacity: 0.85; flex-shrink: 0; padding-top: 1px;' }, formatClock(seg.start)),
 				$('span', undefined, seg.text)
 			));
 		}
-		if (doc && doc.segments.length > lines.length) {
-			append(preview, $('div', { style: 'font-size: 10px; color: rgba(255, 255, 255, 0.45);' }, `... ${doc.segments.length - lines.length} more line(s); the card shows them all.`));
-		}
+		preview.scrollTop = 0;
 	};
 	const setEnabled = (enabled: boolean, title: string) => {
 		extractBtn.disabled = !enabled;
