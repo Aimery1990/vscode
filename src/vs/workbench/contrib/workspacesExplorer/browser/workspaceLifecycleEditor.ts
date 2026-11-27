@@ -10,20 +10,12 @@ import { URI } from '../../../../base/common/uri.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { CanonicalStatusCategory, IWorkspacesExplorerService } from '../common/workspacesExplorer.js';
 import { ITicketLabelDefinition, LABEL_COLOR_PALETTE, nextLabelColor, normalizeLabelDefinitions, sanitizeLabelName } from '../common/ticketLabels.js';
-import { buildStatusMigration, categoryMapFromLifecycle, cloneCategoryMap, IWorkspaceLifecycleConfig, lifecycleFromCategoryMap, planStatusMigration, recordStatusRename, STATUS_CATEGORIES, StatusCategoryMap, validateCategoryMap } from '../common/workspaceLifecycle.js';
+import { buildStatusMigration, categoryMapFromLifecycle, cloneCategoryMap, IWorkspaceLifecycleConfig, lifecycleFromCategoryMap, planStatusMigration, recordStatusRename, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS, StatusCategoryMap, validateCategoryMap } from '../common/workspaceLifecycle.js';
 
 /**
  * Shared editors for a workspace's status lifecycle (the 5-category matrix, UI-14) and its label definitions (UI-13),
  * used by the create-workspace dialog and the "Edit Lifecycle & Labels" dialog of the workspace page.
  */
-
-export const STATUS_CATEGORY_COLORS: { [cat in CanonicalStatusCategory]: { text: string; bg: string; border: string } } = {
-	'Todo': { text: '#818cf8', bg: 'rgba(129, 140, 248, 0.16)', border: 'rgba(129, 140, 248, 0.3)' },
-	'In Progress': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.3)' },
-	'Done': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.3)' },
-	'Blocked': { text: '#f87171', bg: 'rgba(248, 113, 113, 0.16)', border: 'rgba(248, 113, 113, 0.3)' },
-	'Removed': { text: '#94a3b8', bg: 'rgba(148, 163, 184, 0.16)', border: 'rgba(148, 163, 184, 0.3)' }
-};
 
 export const STATUS_LIFECYCLE_PRESETS: { readonly [name: string]: StatusCategoryMap } = {
 	'Default': {

@@ -53,7 +53,8 @@ import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/commo
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
-import { createDefaultCategoryMap } from '../common/workspaceLifecycle.js';
+import { createDefaultCategoryMap, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
+import { applyFinishedFilter, describeHiddenTickets, HIDE_FINISHED_TICKETS_STORAGE_KEY } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
@@ -239,6 +240,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 	private readonly _storageService: IStorageService;
 	private _showRemovedItems: boolean = false;
+	private _hideFinishedTickets: boolean = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -272,6 +274,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
 		this._showRemovedItems = this._storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
+		this._hideFinishedTickets = this._storageService.getBoolean(HIDE_FINISHED_TICKETS_STORAGE_KEY, StorageScope.PROFILE, false);
 		this._restoreViewState();
 		this._register(this._storageService.onWillSaveState(() => this._saveViewState()));
 
@@ -619,7 +622,27 @@ export class MainWorkspaceViewPane extends ViewPane {
 		append(titleLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
 		append(titleLeft, $('span', {}, 'Managed Workspaces'));
 
-		const addWsIcon = append(headerRow, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+		const headerIcons = append(headerRow, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+		const hideFinishedIcon = append(headerIcons, $('span' + ThemeIcon.asCSSSelector(this._hideFinishedTickets ? Codicon.filterFilled : Codicon.filter)));
+		hideFinishedIcon.style.cursor = 'pointer';
+		hideFinishedIcon.style.opacity = this._hideFinishedTickets ? '1' : '0.7';
+		hideFinishedIcon.style.color = this._hideFinishedTickets ? '#38bdf8' : '';
+		hideFinishedIcon.title = this._hideFinishedTickets
+			? 'Done & Removed tickets are hidden. Click to show all tickets'
+			: 'Hide Done & Removed tickets';
+		hideFinishedIcon.onclick = () => {
+			this._hideFinishedTickets = !this._hideFinishedTickets;
+			this._storageService.store(HIDE_FINISHED_TICKETS_STORAGE_KEY, this._hideFinishedTickets, StorageScope.PROFILE, StorageTarget.USER);
+			hideFinishedIcon.className = ThemeIcon.asClassName(this._hideFinishedTickets ? Codicon.filterFilled : Codicon.filter);
+			hideFinishedIcon.style.opacity = this._hideFinishedTickets ? '1' : '0.7';
+			hideFinishedIcon.style.color = this._hideFinishedTickets ? '#38bdf8' : '';
+			hideFinishedIcon.title = this._hideFinishedTickets
+				? 'Done & Removed tickets are hidden. Click to show all tickets'
+				: 'Hide Done & Removed tickets';
+			this.renderContent();
+		};
+
+		const addWsIcon = append(headerIcons, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
 		addWsIcon.style.cursor = 'pointer';
 		addWsIcon.style.opacity = '0.85';
 		addWsIcon.title = 'Create or Add Workspace...';
@@ -1208,8 +1231,24 @@ export class MainWorkspaceViewPane extends ViewPane {
 			: (this.nodeVisibleLimitMap.get(parentCanonicalKey) || MainWorkspaceViewPane.INITIAL_CHILDREN_BATCH_SIZE);
 
 		const page = await this.workspacesExplorerService.scanWorkspaceChildrenPaginated(folderUri, this._showRemovedItems, visibleLimit);
-		const children = page.items;
+		const wsLifecycle = await this.workspacesExplorerService.getWorkspaceStatuses(folderUri);
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
+			return;
+		}
+		// UI-15: optionally hide Done / Removed tickets (with their sub-tree)
+		const isTicketItem = (c: IWorkspaceChildItem) => c.type !== 'folder' && c.type !== 'file';
+		const { visible: children, hiddenCount } = applyFinishedFilter(page.items, this._hideFinishedTickets, c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined);
+		const hiddenText = describeHiddenTickets(hiddenCount);
+		const appendHiddenLine = () => {
+			if (hiddenText) {
+				const hiddenEl = append(parentContainer, $('div', { style: `font-size: 10px; opacity: 0.45; font-style: italic; padding: 2px 0 2px ${depth * 12 + 16}px;`, title: 'Turn off "Hide Done & Removed tickets" in the panel header to show them' }, hiddenText));
+				hiddenEl.setAttribute('data-sync-key', `hidden:${parentCanonicalKey}`);
+				hiddenEl.setAttribute('data-visual-sig', `hidden:${hiddenCount}:${depth}`);
+			}
+		};
+
+		if (children.length === 0 && hiddenCount > 0) {
+			appendHiddenLine();
 			return;
 		}
 
@@ -1221,11 +1260,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				emptyFolderEl.setAttribute('data-sync-key', `empty:${folderUri.toString()}`);
 				emptyFolderEl.setAttribute('data-visual-sig', `empty:${depth}`);
 			}
-			return;
-		}
-
-		const wsLifecycle = await this.workspacesExplorerService.getWorkspaceStatuses(folderUri);
-		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
 
@@ -1665,6 +1699,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childRight.style.gap = '4px';
 			childRight.style.flexShrink = '0';
 
+			// UI-15: the ticket's status as a compact chip colored by its category
+			const statusCategory = isTicketEntity && child.status ? wsLifecycle.getCategory(child.status) : undefined;
+			if (statusCategory && child.status) {
+				const catColor = STATUS_CATEGORY_COLORS[statusCategory];
+				const statusChip = append(childRight, $('span.ticket-status-chip', {
+					style: `display: inline-flex; align-items: center; gap: 3px; max-width: 76px; font-size: 8.5px; line-height: 12px; padding: 0 5px 0 4px; border-radius: 6px; color: ${catColor.text}; background: ${catColor.bg}; border: 1px solid ${catColor.border}; white-space: nowrap;`
+				}));
+				append(statusChip, $('span', { style: `width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; background: ${catColor.text};` }));
+				append(statusChip, $('span', { style: 'overflow: hidden; text-overflow: ellipsis;' }, child.status));
+				statusChip.title = `Status: ${child.status} (${statusCategory})`;
+			}
+
 			if (badgeText) {
 				const displayedBadgeText = isTicketEntity ? childTicketId : badgeText;
 				const badge = append(childRight, $('span', { style: `font-size: 8px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }, displayedBadgeText));
@@ -1673,7 +1719,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					: `Entity Type: ${badgeText}`;
 			}
 
-			if (isRemoved) {
+			if (isRemoved && !statusCategory) {
 				const removedBadge = append(childRight, $('span', {
 					style: 'font-size: 8px; padding: 1px 5px; border-radius: 3px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); font-weight: 600; text-transform: uppercase;'
 				}, 'REMOVED'));
@@ -1694,7 +1740,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			childRow.setAttribute(
 				'data-visual-sig',
-				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}`
+				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}`
 			);
 
 			// Single Click / Cmd+Click (multi-select) / Shift+Click (range-select)
@@ -1814,12 +1860,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		}
 
+		appendHiddenLine();
+
 		if (page.hasMore) {
-			const remainingCount = Math.max(1, page.totalCount - children.length);
+			const remainingCount = Math.max(1, page.totalCount - page.items.length);
 			const nextStep = Math.min(MainWorkspaceViewPane.LOAD_MORE_BATCH_SIZE, remainingCount);
 			const loadMoreRow = append(parentContainer, $('.load-more-children-row'));
 			loadMoreRow.setAttribute('data-sync-key', `load-more:${parentCanonicalKey}`);
-			loadMoreRow.setAttribute('data-visual-sig', `load-more:${children.length}:${page.totalCount}:${depth}`);
+			loadMoreRow.setAttribute('data-visual-sig', `load-more:${page.items.length}:${page.totalCount}:${depth}`);
 			loadMoreRow.style.display = 'flex';
 			loadMoreRow.style.alignItems = 'center';
 			loadMoreRow.style.justifyContent = 'space-between';
@@ -1834,7 +1882,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			const infoSpan = append(loadMoreRow, $('span', {
 				style: 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'
-			}, `Showing ${children.length} of ${page.totalCount}`));
+			}, `Showing ${page.items.length} of ${page.totalCount}`));
 
 			const actionsWrap = append(loadMoreRow, $('div', {
 				style: 'display: flex; align-items: center; gap: 6px; flex-shrink: 0;'

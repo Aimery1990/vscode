@@ -14,6 +14,15 @@ import { parseTicketLabels, serializeTicketLabels, TICKET_LABELS_FIELD_KEY } fro
 
 export const STATUS_CATEGORIES: readonly CanonicalStatusCategory[] = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
 
+/** Colors of the canonical status categories (lifecycle matrix, Workspaces tree status chips). */
+export const STATUS_CATEGORY_COLORS: { [cat in CanonicalStatusCategory]: { text: string; bg: string; border: string } } = {
+	'Todo': { text: '#818cf8', bg: 'rgba(129, 140, 248, 0.16)', border: 'rgba(129, 140, 248, 0.3)' },
+	'In Progress': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.3)' },
+	'Done': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.3)' },
+	'Blocked': { text: '#f87171', bg: 'rgba(248, 113, 113, 0.16)', border: 'rgba(248, 113, 113, 0.3)' },
+	'Removed': { text: '#94a3b8', bg: 'rgba(148, 163, 184, 0.16)', border: 'rgba(148, 163, 184, 0.3)' }
+};
+
 export const TICKET_STATUSES_KEY = 'Ticket Statuses';
 export const STATUS_MAPPING_KEY = 'Status Mapping';
 export const REMOVED_STATUS_KEY = 'Removed Status';
