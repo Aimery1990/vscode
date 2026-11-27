@@ -37,7 +37,7 @@ import { EntityDetailEditor } from './entityDetailEditor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { openSubWorkflowTicketCanvas } from '../../workflowsManager/browser/subWorkflowLiveView.js';
-import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
+import { getSubWorkflowTicketVisual, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
@@ -56,6 +56,10 @@ import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlo
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
+	const subWorkflowVisual = getSubWorkflowTicketVisual(t);
+	if (subWorkflowVisual) {
+		return { color: subWorkflowVisual.color, bg: hexToRgba(subWorkflowVisual.color, 0.18) };
+	}
 	if (customModulesMap) {
 		const customVisual = customModulesMap.get(t);
 		if (customVisual && customVisual.color) {
@@ -1007,7 +1011,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badgeBg = 'rgba(45, 212, 191, 0.2)';
 					badgeFg = '#2dd4bf';
 				} else if (ws.detectedType && ws.detectedType !== 'workspace' && ws.detectedType !== 'folder') {
-					const visual = customModulesMap.get(ws.detectedType.toLowerCase());
+					const visual = getSubWorkflowTicketVisual(ws.detectedType) || customModulesMap.get(ws.detectedType.toLowerCase());
 					const customIcon = visual?.icon || getCustomIconForName(ws.detectedType);
 					const customColor = visual?.color || getColorForName(ws.detectedType);
 					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(customIcon)));
@@ -1498,7 +1502,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				childIcon.style.opacity = '0.7';
 			} else {
 				const typeLower = (child.type || '').toLowerCase();
-				const configuredVisual = customModulesMap.get(typeLower);
+				const configuredVisual = getSubWorkflowTicketVisual(typeLower) || customModulesMap.get(typeLower);
 				if (configuredVisual) {
 					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(configuredVisual.icon)));
 					childIcon.style.color = configuredVisual.color;

@@ -2,6 +2,10 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+import { Codicon } from '../../../../base/common/codicons.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { WORKFLOW_TICKET_COLOR } from '../../entityPersistence/common/entityPersistence.js';
+
 /**
  * The `sub_workflow` ticket type (CI-23). A Sub-Workflow ticket is an independent workflow: it has its own canvas
  * (opened in the normal Workflow Editor), its definition is stored in `<ticket folder>/.agents/sub_workflow.json`, and
@@ -24,6 +28,18 @@ const NORMALIZED_SUB_WORKFLOW_TYPE = normalizeTypeName(SUB_WORKFLOW_TICKET_TYPE)
 /** True for the Sub-Workflow ticket type in any spelling (`sub_workflow`, `Sub Workflow`, `sub-workflow`, ...). */
 export function isSubWorkflowTicketType(ticketType: string | undefined | null): boolean {
 	return normalizeTypeName(ticketType) === NORMALIZED_SUB_WORKFLOW_TYPE;
+}
+
+/**
+ * The look of Sub-Workflow tickets (UI-10): the Workflow color with a sub-workflow icon. It follows from the ticket
+ * type alone (never stored per ticket), so every existing Sub-Workflow ticket shows it.
+ */
+export const SUB_WORKFLOW_TICKET_COLOR = WORKFLOW_TICKET_COLOR;
+export const SUB_WORKFLOW_TICKET_ICON: ThemeIcon = Codicon.typeHierarchySub;
+
+/** The Sub-Workflow look for a Sub-Workflow ticket type (any spelling); `undefined` for every other type. */
+export function getSubWorkflowTicketVisual(ticketType: string | undefined | null): { color: string; icon: ThemeIcon } | undefined {
+	return isSubWorkflowTicketType(ticketType) ? { color: SUB_WORKFLOW_TICKET_COLOR, icon: SUB_WORKFLOW_TICKET_ICON } : undefined;
 }
 
 /** True when a template's id or name spells the `sub_workflow` type: such a template would clash with it. */

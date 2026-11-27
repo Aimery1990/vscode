@@ -44,7 +44,7 @@ import { CustomModuleSchemaEditorInput } from '../../customModules/browser/custo
 import { CustomModuleSchemaEditor } from '../../customModules/browser/customModuleSchemaEditor.js';
 import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHelpGuide.js';
 import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
-import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
+import { SUB_WORKFLOW_TICKET_ICON, getSubWorkflowTicketVisual, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
@@ -7450,6 +7450,10 @@ export class EntityDetailEditor extends EditorPane {
 
 	private _getTypeColorInfo(typeStr: string | undefined): { text: string; bg: string; border: string } {
 		const typeLower = (typeStr || 'task').toLowerCase().trim();
+		const subWorkflowVisual = getSubWorkflowTicketVisual(typeLower);
+		if (subWorkflowVisual) {
+			return { text: subWorkflowVisual.color, bg: hexToRgba(subWorkflowVisual.color, 0.2), border: hexToRgba(subWorkflowVisual.color, 0.35) };
+		}
 		const typeColors: { [key: string]: { text: string; bg: string; border: string } } = {
 			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.2)', border: 'rgba(56, 189, 248, 0.35)' },
 			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.2)', border: 'rgba(251, 191, 36, 0.35)' },
@@ -19713,7 +19717,7 @@ ${interpolatedPrompt}`;
 
 		// 2. Type Colors
 		let colorSetting: { text: string; bg: string; border: string };
-		if (customModule && customModule.color) {
+		if (customModule && customModule.color && !isSubWorkflowTicketType(data.ticketType)) {
 			colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.2), border: hexToRgba(customModule.color, 0.35) };
 		} else {
 			colorSetting = this._getTypeColorInfo(data.ticketType || 'task');
@@ -22647,7 +22651,7 @@ ${interpolatedPrompt}`;
 						' ',
 						...(wfNode ? [] : [
 							$('span.ticket-type-badge-trigger', { 'data-ticket-type': textOf(data.ticketType || ''), style: `font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;`, title: isFreestyleTicket ? 'Freestyle ticket (no template): click to show or hide the component toolbox' : `Click to view '${typeUpper}' template preview and edit schema` },
-								$('span', { class: ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType)), style: `font-size: 9.5px; color: ${colorSetting.text};` }),
+								$('span', { class: ThemeIcon.asClassName(isSubWorkflowTicketType(data.ticketType) ? SUB_WORKFLOW_TICKET_ICON : resolveCustomModuleIcon(customModule?.icon, data.ticketType)), style: `font-size: 9.5px; color: ${colorSetting.text};` }),
 								$('span', undefined, typeUpper)
 							)
 						])

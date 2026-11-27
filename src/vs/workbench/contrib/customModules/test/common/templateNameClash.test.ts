@@ -3,9 +3,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { Codicon } from '../../../../../base/common/codicons.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { WORKFLOW_TICKET_COLOR } from '../../../entityPersistence/common/entityPersistence.js';
 import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, getProgrammaticTicketTypeError, isFreestyleTicketType } from '../../common/freestyleTicket.js';
-import { clashesWithSubWorkflowType, getSubWorkflowTemplateClashMessage, isSubWorkflowTicketType } from '../../common/subWorkflowType.js';
+import { clashesWithSubWorkflowType, getSubWorkflowTemplateClashMessage, getSubWorkflowTicketVisual, isSubWorkflowTicketType } from '../../common/subWorkflowType.js';
 import { clashesWithBuiltInTicketType, getTemplateCreateTypeError, getTemplateNameClashError, getTemplateNameClashMessage, isBuiltInTicketTypeName } from '../../common/templateNameClash.js';
 
 suite('subWorkflowType and templateNameClash', () => {
@@ -21,6 +23,15 @@ suite('subWorkflowType and templateNameClash', () => {
 			assert.strictEqual(isSubWorkflowTicketType(value), false, String(value));
 		}
 		assert.strictEqual(isBuiltInTicketTypeName('Freestyle'), true);
+	});
+
+	test('Sub-Workflow tickets look like workflows with a sub-workflow icon, whatever the spelling', () => {
+		for (const value of ['sub_workflow', 'Sub Workflow', 'SUB-WORKFLOW']) {
+			assert.deepStrictEqual(getSubWorkflowTicketVisual(value), { color: WORKFLOW_TICKET_COLOR, icon: Codicon.typeHierarchySub }, value);
+		}
+		for (const value of ['workflow', 'task', '', undefined, null]) {
+			assert.strictEqual(getSubWorkflowTicketVisual(value), undefined, String(value));
+		}
 	});
 
 	test('a template clashes when its id or name spells a built-in type', () => {

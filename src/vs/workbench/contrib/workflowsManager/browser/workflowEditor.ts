@@ -34,6 +34,7 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { IEntityPersistenceService, ICustomModule, ICustomField, IOutputSpec, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList, normalizeLegacyFieldTypes } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { getNodeComponentPalette } from '../../customModules/common/componentRegistry.js';
+import { getSubWorkflowTicketVisual } from '../../customModules/common/subWorkflowType.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
@@ -405,6 +406,10 @@ function getColorForName(name: string | undefined): string {
 
 function getEntityBadgeStyle(type?: string): { color: string; bg: string; icon: ThemeIcon } {
 	const t = (type || 'task').toLowerCase();
+	const subWorkflowVisual = getSubWorkflowTicketVisual(t);
+	if (subWorkflowVisual) {
+		return { color: subWorkflowVisual.color, bg: hexToRgba(subWorkflowVisual.color, 0.18), icon: subWorkflowVisual.icon };
+	}
 	switch (t) {
 		case 'job':
 			return { color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.18)', icon: Codicon.rocket };

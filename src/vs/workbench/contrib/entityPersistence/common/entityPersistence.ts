@@ -1095,6 +1095,9 @@ export const CUSTOM_MODULE_COLOR_PALETTE: string[] = [
 	'#f43f5e'  // Rose
 ];
 
+/** The color of Workflow tickets (also used by Sub-Workflow tickets). */
+export const WORKFLOW_TICKET_COLOR = '#0d9488';
+
 const SYSTEM_MODULE_DEFAULT_ICONS: Record<string, ThemeIcon> = {
 	'job': Codicon.rocket,
 	'project': Codicon.project,
