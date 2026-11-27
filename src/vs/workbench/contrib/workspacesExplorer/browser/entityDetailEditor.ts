@@ -2,8 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, addDisposableListener, append, clearNode, Dimension, EventType, h, isHTMLElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { $, append, clearNode, Dimension, h, isHTMLElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { Mutable } from '../../../../base/common/types.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
@@ -48,7 +47,7 @@ import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTi
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
+import { MASKED_SECRET, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
@@ -975,7 +974,6 @@ export class EntityDetailEditor extends EditorPane {
 	private readonly _outputPaginationState = new Map<string, { page: number; pageSize: number }>();
 	private readonly _sshPanelExpandedByFieldKey = new Map<string, boolean>();
 	/** Listeners of the credential editors of the browser cards (rebuilt with the page). */
-	private readonly _browserCredsDisposables = this._register(new DisposableStore());
 	private _isTicketRunning: boolean = false;
 	/** Not assigned anywhere in this editor (always undefined); read by the parameter-token chips and the Python runner. */
 	private readonly _parameterValues?: Record<string, unknown>;
@@ -2250,7 +2248,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				customMetadata[fLabel] = JSON.stringify(paramObj);
 			} else if (fType === 'browser') {
-				// The template's credentials are not copied: a run falls back to them while the ticket has none of its own
+				// The template's credentials are not copied: runs always use the template's
 				customMetadata[fLabel] = JSON.stringify({
 					url: f.defaultUrl || '',
 					credentials: [],
@@ -2442,7 +2440,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateMediaPlayerPrimitiveCards();
 		await this._hydrateTablePrimitiveCards();
 		await this._hydrateSshPrimitiveCards();
-		this._hydrateBrowserCredentialEditors();
+		this._renderBrowserCredentialNames();
 		this._appendWorkflowRuntimeBlocks(mod);
 		this._applySavedScrollPosition(scrollKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
@@ -2674,7 +2672,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateMediaPlayerPrimitiveCards();
 			await this._hydrateTablePrimitiveCards();
 			await this._hydrateSshPrimitiveCards();
-			this._hydrateBrowserCredentialEditors();
+			this._renderBrowserCredentialNames();
 			this._applySavedScrollPosition(scrollKey);
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
@@ -8177,9 +8175,15 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
+	/**
+	 * Fetches `rawUrl` and returns its readable text. `credentialHeaders` (secret values, never logged) are sent with the
+	 * request; the built-in extractor (IWebContentExtractorService) cannot send request headers, so when there are any
+	 * it is skipped and the direct HTTP request is used.
+	 */
 	private async _fetchUrlContent(
 		rawUrl: string,
-		maskText: (text: string) => string = text => text
+		maskText: (text: string) => string = text => text,
+		credentialHeaders: Readonly<Record<string, string>> = {}
 	): Promise<{ title: string; content: string; isAuthRequired?: boolean; rawError?: string }> {
 		let targetUrl = rawUrl.trim();
 		if (!/^https?:\/\//i.test(targetUrl)) {
@@ -8192,7 +8196,8 @@ export class EntityDetailEditor extends EditorPane {
 		// This uses the integrated browser's session partition ('persist:vscode-browser'),
 		// so logged-in cookies and JavaScript dynamic single-page applications (SPA) are executed seamlessly!
 		try {
-			const extractorService = this._instantiationService.invokeFunction(accessor => accessor.get(IWebContentExtractorService));
+			const hasCredentialHeaders = Object.keys(credentialHeaders).length > 0;
+			const extractorService = hasCredentialHeaders ? undefined : this._instantiationService.invokeFunction(accessor => accessor.get(IWebContentExtractorService));
 			if (extractorService) {
 				const uri = URI.parse(targetUrl);
 				const extractResults = await Promise.race([
@@ -8233,7 +8238,7 @@ export class EntityDetailEditor extends EditorPane {
 				// Fallback to renderer requestService
 			}
 
-			// Credentials are not sent as headers: they are used only where the URL references them as {name}
+			// Credentials not referenced in the URL are sent as headers named after them (values are never logged)
 			const requestOptions = {
 				type: 'GET',
 				url: targetUrl,
@@ -8243,7 +8248,8 @@ export class EntityDetailEditor extends EditorPane {
 					'Accept-Language': 'en-US,en;q=0.9',
 					'Sec-Fetch-Dest': 'document',
 					'Sec-Fetch-Mode': 'navigate',
-					'Sec-Fetch-Site': 'none'
+					'Sec-Fetch-Site': 'none',
+					...credentialHeaders
 				},
 				timeout: 20000,
 				callSite: 'browserPrimitive'
@@ -8457,7 +8463,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		try {
-			const result = await this._fetchUrlContent(finalUrl, mask);
+			const result = await this._fetchUrlContent(finalUrl, mask, resolved.headers);
 			if (result.isAuthRequired) {
 				throw new Error(result.rawError || 'Authentication Required');
 			}
@@ -8499,8 +8505,9 @@ ${rawErr}
 2. Interactive Login:
    Click the "Open in Tab" or "+ New Tab" button directly above this card to open a browser tab beside and log in.
 
-3. Credentials in the URL:
-   If the site accepts a token or key in the URL, add it under "Credentials" above and reference it in the URL as {name}.`;
+3. Credentials:
+   Credentials are set in the template. The template author can add a token or key there: referenced in the URL as
+   {name}, or sent as a request header named after it (e.g. Authorization or Cookie).`;
 
 				if (contentEl) {
 					contentEl.textContent = formattedNotice;
@@ -8553,17 +8560,19 @@ ${rawErr}
 		return this._lastCustomModule?.fields?.find(f => f.label?.toLowerCase() === lower || f.id?.toLowerCase() === lower || f.key?.toLowerCase() === lower);
 	}
 
-	/** Credentials a fetch of this card uses: the ticket's own when it has any, otherwise the template's. */
+	/**
+	 * Credentials a fetch of this card uses: always the template's. A credential list stored on the ticket (older
+	 * tickets carry stale copies) is ignored and left untouched.
+	 */
 	private _getBrowserCredentials(fieldKey: string): ICredentialPair[] {
 		return pickBrowserCredentials(this._readBrowserTicketValue(fieldKey)?.credentials, this._findTemplateBrowserField(fieldKey)?.credentials);
 	}
 
 	/**
-	 * Builds the credential editor of every browser card: any number of `name -> value` rows that can be added, edited
-	 * and removed. The URL references a credential as `{name}`. Changes are saved into the ticket's own value.
+	 * Shows the credential names of every browser card, read-only and with values always masked. Credentials are set
+	 * by the template author in the template designer; ticket users cannot see or change them.
 	 */
-	private _hydrateBrowserCredentialEditors(): void {
-		this._browserCredsDisposables.clear();
+	private _renderBrowserCredentialNames(): void {
 		const cards = (this._pageParts.browserPrimitiveCards ?? []) as HTMLElement[];
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
@@ -8572,117 +8581,31 @@ ${rawErr}
 				continue;
 			}
 			clearNode(mount);
-			const ownCreds = this._readBrowserTicketValue(fieldKey)?.credentials;
-			const fromTemplate = !(Array.isArray(ownCreds) && ownCreds.some(c => c && typeof c.key === 'string' && c.key.trim()));
-			const rows: ICredentialPair[] = this._getBrowserCredentials(fieldKey)
-				.filter(c => c && typeof c === 'object')
-				.map((c, idx) => ({ id: c.id || `cred_${Date.now()}_${idx + 1}`, key: String(c.key ?? ''), value: String(c.value ?? '') }));
-
-			const box = append(mount, $('div', { style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;' }));
+			const names = maskBrowserCredentials(this._getBrowserCredentials(fieldKey)).map(c => c.key);
+			mount.style.display = names.length > 0 ? '' : 'none';
+			if (names.length === 0) {
+				continue;
+			}
+			const note = localize('browserCreds.fromTemplate', "Credentials are set in the template");
+			const box = append(mount, $('div', {
+				title: note,
+				style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;'
+			}));
 			const header = append(box, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
 			append(header, $('span', { style: 'font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em;' }, localize('browserCreds.title', "Credentials")));
-			const hint = append(header, $('span', { style: 'font-size: 10px; opacity: 0.55; flex: 1;' }));
-			hint.textContent = fromTemplate && rows.length > 0
-				? localize('browserCreds.hintTemplate', "From the template. Use {name} in the URL; values are hidden in logs and outputs. Edits here apply to this ticket only.")
-				: localize('browserCreds.hint', "Use {name} in the URL; values are hidden in logs and outputs.");
-			const addBtn = append(header, $('button', {
-				type: 'button',
-				title: localize('browserCreds.add', "Add credential"),
-				'aria-label': localize('browserCreds.add', "Add credential"),
-				style: 'cursor: pointer; background: transparent; border: none; color: #a78bfa; padding: 2px 4px; display: inline-flex; align-items: center;'
-			})) as HTMLButtonElement;
-			append(addBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
-			const list = append(box, $('div', { style: 'display: flex; flex-direction: column; gap: 5px;' }));
-
-			const save = () => this._saveBrowserCredentials(card, fieldKey, rows.filter(r => r.key.trim() || r.value.trim()));
-			const rowStore = this._browserCredsDisposables.add(new DisposableStore());
-			const renderRows = () => {
-				rowStore.clear();
-				clearNode(list);
-				if (rows.length === 0) {
-					append(list, $('div', { style: 'font-size: 10.5px; opacity: 0.45; font-style: italic;' }, localize('browserCreds.empty', "No credentials. Add one and reference it in the URL as {name}.")));
-					return;
-				}
-				rows.forEach((row, idx) => {
-					const rowEl = append(list, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
-					const keyInp = append(rowEl, $('input', {
-						type: 'text',
-						value: row.key,
-						placeholder: localize('browserCreds.name', "name, e.g. user"),
-						'aria-label': localize('browserCreds.nameLabel', "Credential name"),
-						style: 'width: 150px; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
-					})) as HTMLInputElement;
-					append(rowEl, $('span', { style: 'opacity: 0.5; font-size: 11px;' }, '='));
-					const valInp = append(rowEl, $('input', {
-						type: 'password',
-						value: row.value,
-						placeholder: localize('browserCreds.value', "value or {VARIABLE}"),
-						'aria-label': localize('browserCreds.valueLabel', "Credential value"),
-						style: 'flex: 1; min-width: 100px; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
-					})) as HTMLInputElement;
-					const eyeBtn = append(rowEl, $('button', {
-						type: 'button',
-						title: localize('browserCreds.toggle', "Show / hide value"),
-						'aria-label': localize('browserCreds.toggle', "Show / hide value"),
-						style: 'cursor: pointer; background: transparent; border: none; color: inherit; opacity: 0.65; padding: 2px 4px; display: inline-flex; align-items: center;'
-					})) as HTMLButtonElement;
-					const eyeIcon = append(eyeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.eye)));
-					const delBtn = append(rowEl, $('button', {
-						type: 'button',
-						title: localize('browserCreds.remove', "Remove credential"),
-						'aria-label': localize('browserCreds.remove', "Remove credential"),
-						style: 'cursor: pointer; background: transparent; border: none; color: #ef4444; opacity: 0.75; padding: 2px 4px; display: inline-flex; align-items: center;'
-					})) as HTMLButtonElement;
-					append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-
-					rowStore.add(addDisposableListener(keyInp, EventType.INPUT, () => { row.key = keyInp.value; }));
-					rowStore.add(addDisposableListener(valInp, EventType.INPUT, () => { row.value = valInp.value; }));
-					rowStore.add(addDisposableListener(keyInp, EventType.CHANGE, () => save()));
-					rowStore.add(addDisposableListener(valInp, EventType.CHANGE, () => save()));
-					rowStore.add(addDisposableListener(eyeBtn, EventType.CLICK, e => {
-						e.preventDefault();
-						e.stopPropagation();
-						const show = valInp.type === 'password';
-						valInp.type = show ? 'text' : 'password';
-						eyeIcon.className = ThemeIcon.asClassName(show ? Codicon.eyeClosed : Codicon.eye);
-					}));
-					rowStore.add(addDisposableListener(delBtn, EventType.CLICK, e => {
-						e.preventDefault();
-						e.stopPropagation();
-						rows.splice(idx, 1);
-						renderRows();
-						save();
-					}));
-				});
-			};
-			this._browserCredsDisposables.add(addDisposableListener(addBtn, EventType.CLICK, e => {
-				e.preventDefault();
-				e.stopPropagation();
-				rows.push({ id: `cred_${Date.now()}_${rows.length + 1}`, key: '', value: '' });
-				renderRows();
-			}));
-			renderRows();
+			append(header, $('span', { style: 'font-size: 10px; opacity: 0.55; flex: 1;' }, note));
+			const list = append(box, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }));
+			for (const name of names) {
+				append(list, $('span', {
+					style: 'font-size: 11px; padding: 2px 7px; border-radius: 4px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); font-family: var(--vscode-editor-font-family, monospace);'
+				}, `${name} = ${MASKED_SECRET}`));
+			}
 		}
-	}
-
-	/** Saves the credential rows of a browser card into the ticket's own value (URL, content and fetch time are kept). */
-	private async _saveBrowserCredentials(card: HTMLElement, fieldKey: string, credentials: ICredentialPair[]): Promise<void> {
-		const stored = this._readBrowserTicketValue(fieldKey) ?? {};
-		const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
-		const bData: IStoredPrimitiveValue = {
-			...stored,
-			url: stored.url ?? urlInput?.value.trim() ?? '',
-			content: stored.content ?? '',
-			lastFetched: stored.lastFetched ?? '',
-			credentials
-		};
-		// Saved without reloading the page, so editing the next row keeps its focus
-		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(bData));
 	}
 
 	private async _saveBrowserPrimitiveData(fieldKey: string, url: string, content: string, lastFetched: string): Promise<void> {
 		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
-		// Only the ticket's own credentials are kept (the template's are not copied: a run falls back to them)
+		// A credential list already stored on the ticket (older tickets) is kept untouched; runs use the template's
 		let creds: ICredentialPair[] = [];
 		if (rawVal) {
 			try {
@@ -21051,7 +20974,6 @@ ${interpolatedPrompt}`;
 					))));
 				} else if (fType === 'browser') {
 					let browserUrl = fieldItem.defaultUrl || '';
-					let browserCreds: ICredentialPair[] = fieldItem.credentials || [];
 					let browserContent = '';
 					let lastFetchedText = '';
 
@@ -21062,7 +20984,6 @@ ${interpolatedPrompt}`;
 								try {
 									const parsedObj = JSON.parse(trimmed);
 									if (parsedObj.url !== undefined) { browserUrl = parsedObj.url; }
-									if (Array.isArray(parsedObj.credentials) && parsedObj.credentials.length > 0) { browserCreds = parsedObj.credentials; }
 									if (parsedObj.content) { browserContent = parsedObj.content; }
 									if (parsedObj.lastFetched) { lastFetchedText = parsedObj.lastFetched; }
 								} catch {
@@ -21074,7 +20995,6 @@ ${interpolatedPrompt}`;
 						} else if (typeof v === 'object' && v !== null) {
 							const stored = v as IStoredPrimitiveValue;
 							if (stored.url) { browserUrl = stored.url; }
-							if (Array.isArray(stored.credentials) && stored.credentials.length > 0) { browserCreds = stored.credentials; }
 							if (stored.content) { browserContent = stored.content; }
 							if (stored.lastFetched) { lastFetchedText = stored.lastFetched; }
 						}
@@ -21136,13 +21056,6 @@ ${interpolatedPrompt}`;
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;' },
 									'Browser'
 								),
-								...(browserCreds.length > 0 ? [
-									$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;' },
-										'\uD83D\uDD11 ',
-										String(browserCreds.length),
-										' Credentials'
-									)
-								] : [])
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 								...stepBadge(),
@@ -21184,7 +21097,7 @@ ${interpolatedPrompt}`;
 							)
 						),
 						' ',
-						// Credential editor (name -> value pairs referenced as {name} in the URL), built by _hydrateBrowserCredentialEditors
+						// Template credential names (values masked, read-only), built by _renderBrowserCredentialNames
 						part('browserCredsMount', $('div.browser-creds-mount', { style: 'margin-bottom: 10px;' })),
 						' ',
 						$('div.browser-content-container', { style: 'display: flex; flex-direction: column; gap: 6px;' },

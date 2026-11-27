@@ -47,6 +47,7 @@ import { ICustomModulesService } from '../../customModules/common/customModules.
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { stringifyYaml } from '../../customModules/browser/customModulesService.js';
 import { parseYaml } from '../../customModules/common/templateYaml.js';
+import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/common/browserCredentials.js';
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType, isReservedTemplate } from '../../customModules/common/freestyleTicket.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 
@@ -4581,86 +4582,28 @@ export class MainWorkspaceViewPane extends ViewPane {
 						};
 						renderUrlTokenized();
 
-						// Interactive Credentials Section (Editable Key-Value Pairs)
-						const credsList: Array<{ id: string; key: string; value: string }> = Array.isArray(field.credentials)
-							? field.credentials
-								.filter(c => c && typeof c === 'object')
-								.map((c, idx: number) => ({
-									id: c.id || `cred_${Date.now()}_${idx + 1}`,
-									key: typeof c.key === 'string' ? c.key : '',
-									value: typeof c.value === 'string' ? c.value : ''
-								}))
-							: [];
-
-						const credsSection = append(browserBox, $('div', {
-							style: 'display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);'
-						}));
-						const credsTop = append(credsSection, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-						append(credsTop, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #a78bfa;' }, 'Credentials (Optional):'));
-
-						const addCredBtn = append(credsTop, $('button.monaco-button', {
-							type: 'button',
-							style: 'padding: 2px 8px; font-size: 10px; border-radius: 4px; cursor: pointer; background: rgba(167, 139, 250, 0.14); border: 1px solid rgba(167, 139, 250, 0.32); color: #c084fc; font-weight: 500;'
-						}));
-						addCredBtn.textContent = '+ Add Credential';
-
-						const credsRowsBox = append(credsSection, $('div', { style: 'display: flex; flex-direction: column; gap: 5px;' }));
-
-						const renderCredRows = () => {
-							clearNode(credsRowsBox);
-							if (credsList.length === 0) {
-								append(credsRowsBox, $('div', {
-									style: 'font-size: 10.5px; opacity: 0.45; font-style: italic;'
-								}, 'No credentials set. Click "+ Add Credential" to enter login key/value pairs.'));
-								return;
+						// Credentials are set in the template and used at run time; the new ticket stores none. Only the
+						// names are shown, with values always masked.
+						const credNames = maskBrowserCredentials(field.credentials).map(c => c.key);
+						if (credNames.length > 0) {
+							const credsNote = 'Credentials are set in the template';
+							const credsSection = append(browserBox, $('div', {
+								title: credsNote,
+								style: 'display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);'
+							}));
+							append(credsSection, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #a78bfa;' }, 'Credentials:'));
+							for (const name of credNames) {
+								append(credsSection, $('span', {
+									style: 'font-size: 10.5px; padding: 1px 6px; border-radius: 3px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); font-family: var(--vscode-editor-font-family, monospace);'
+								}, `${name} = ${MASKED_SECRET}`));
 							}
-							credsList.forEach((c, cIdx) => {
-								const row = append(credsRowsBox, $('div', {
-									style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 5px; padding: 5px 7px;'
-								}));
-								append(row, $('span', {
-									style: 'font-size: 9.5px; font-weight: 700; color: #a78bfa; padding: 1px 5px; background: rgba(167, 139, 250, 0.12); border-radius: 3px;'
-								}, `#${cIdx + 1}`));
-								const keyInp = append(row, $('input.monaco-inputbox', {
-									placeholder: 'Key (e.g. username, token)',
-									value: c.key,
-									style: 'width: 130px; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff;'
-								})) as HTMLInputElement;
-								keyInp.oninput = () => { c.key = keyInp.value; };
-								append(row, $('span', { style: 'opacity: 0.5; font-size: 11px;' }, ':'));
-								const valInp = append(row, $('input.monaco-inputbox', {
-									placeholder: 'Value / Credential secret',
-									value: c.value,
-									style: 'flex: 1; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff;'
-								})) as HTMLInputElement;
-								valInp.oninput = () => { c.value = valInp.value; };
-								const delBtn = append(row, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-									title: 'Remove Credential',
-									style: 'cursor: pointer; opacity: 0.7; font-size: 11px; color: #ef4444; padding: 3px;'
-								}));
-								delBtn.onclick = () => {
-									credsList.splice(cIdx, 1);
-									renderCredRows();
-								};
-							});
-						};
-
-						addCredBtn.onclick = (e) => {
-							e.preventDefault();
-							credsList.push({
-								id: `cred_${Date.now()}_${credsList.length + 1}`,
-								key: '',
-								value: ''
-							});
-							renderCredRows();
-						};
-
-						renderCredRows();
+							append(credsSection, $('span', { style: 'font-size: 10px; opacity: 0.5; font-style: italic;' }, credsNote));
+						}
 
 						fieldParts.set(browserBox, {
 							getBrowserData: () => ({
 								url: urlInput.value.trim(),
-								credentials: credsList.filter(c => c.key.trim() || c.value.trim()),
+								credentials: [],
 								content: field.defaultContent || '',
 								lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
 							})
@@ -4986,7 +4929,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								sqlOutput: f.debugSqlOutput || ''
 							});
 						} else if (f.type === 'browser') {
-							// The template's credentials are not copied: a run falls back to them while the ticket has none of its own
+							// The template's credentials are not copied: runs always use the template's
 							customMetadata[fKey] = JSON.stringify({
 								url: f.defaultUrl || '',
 								credentials: [],
