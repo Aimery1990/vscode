@@ -35,11 +35,13 @@ import {
 	getSubWorkflowSourceFolder,
 	getUncoveredLegacySubWorkflows,
 	isLegacySubWorkflowId,
+	needsSourceCanvasCleanup,
 	parseLegacySubWorkflowLibrary,
 	parseMigratedLegacyIds,
 	parseSubWorkflowDefinition,
 	parseSubWorkflowTicketIndex,
 	planSubWorkflowMigration,
+	removeMigratedSubWorkflowNodesFromCanvas,
 	serializeSubWorkflowDefinition,
 	stripHeavyMediaFromSubWorkflow
 } from '../common/subWorkflowTicket.js';
@@ -979,6 +981,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const next = (this._flowchartOwnerCounts.get(key) || 1) - 1;
 				if (next <= 0) {
 					this._flowchartOwnerCounts.delete(key);
+					this._scheduleMigratedSourceCanvasCleanup(3000);
 				} else {
 					this._flowchartOwnerCounts.set(key, next);
 				}
@@ -1860,6 +1863,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			await this._ensureSubWorkflowTicketSnapshot(def);
 		}
 		this._onDidChangeSubWorkflows.fire();
+		this._scheduleMigratedSourceCanvasCleanup(0);
 	}
 
 	public async migrateLegacySubWorkflows(): Promise<void> {
@@ -1918,12 +1922,78 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						await this._ensureSubWorkflowTicketSnapshot(def);
 					}
 					this._onDidChangeSubWorkflows.fire();
+					this._scheduleMigratedSourceCanvasCleanup(0);
 				}
 				if (failed > 0) {
 					this._scheduleSubWorkflowMigrationRetry();
 				}
 			}).catch(err => this.logService.error('[WorkflowExecution] Sub-Workflow migration retry failed:', err));
 		}, delay);
+	}
+
+	private _sourceCanvasCleanupTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/** Runs _cleanupMigratedSourceCanvases after `delayMs` (serialized with loading / migration) when a cleanup is pending. */
+	private _scheduleMigratedSourceCanvasCleanup(delayMs: number): void {
+		if (this._sourceCanvasCleanupTimer || !(this._subWorkflowsCache || []).some(d => !!d.ticketFolderUri && needsSourceCanvasCleanup(d))) {
+			return;
+		}
+		this._sourceCanvasCleanupTimer = setTimeout(() => {
+			this._sourceCanvasCleanupTimer = undefined;
+			this._subWorkflowTicketSequencer.queue(() => this._cleanupMigratedSourceCanvases())
+				.catch(err => this.logService.error('[WorkflowExecution] Sub-Workflow migration: source canvas cleanup failed:', err));
+		}, delayMs);
+	}
+
+	/**
+	 * Migrated Sub-Workflows whose nodes still sit (formerly hidden) on their source workflow's canvas: drops those nodes
+	 * and every link touching them from `<source folder>/.agents/workflow_flowchart.json` (the canvas before the first
+	 * cleanup is kept as `workflow_flowchart.json.bak-subworkflow-migration`), then clears `isHiddenInSource` on the
+	 * ticket. A canvas open in an editor is left alone (the editor would write its copy back); it is cleaned once its
+	 * last editor closes, or on the next start.
+	 */
+	private async _cleanupMigratedSourceCanvases(): Promise<void> {
+		const byFolder = new Map<string, { folder: URI; defs: ISubWorkflowDefinition[] }>();
+		for (const def of this._subWorkflowsCache || []) {
+			const folder = def.ticketFolderUri && needsSourceCanvasCleanup(def) ? getSubWorkflowSourceFolder(def.sourceWorkflowUri) : undefined;
+			// A workflow stored as a single file has no workflow_flowchart.json of its own: never touch its parent folder
+			if (!folder || /\.(json|workflow)\/*$/i.test((def.sourceWorkflowUri || '').trim())) {
+				continue;
+			}
+			const entry = byFolder.get(folder.toString()) || { folder, defs: [] };
+			entry.defs.push(def);
+			byFolder.set(folder.toString(), entry);
+		}
+		for (const [key, { folder, defs }] of byFolder) {
+			if ((this._flowchartOwnerCounts.get(key) || 0) > 0 || defs.some(d => (this._flowchartOwnerCounts.get(d.sourceWorkflowUri || '') || 0) > 0)) {
+				continue;
+			}
+			const fileUri = URI.joinPath(folder, '.agents', 'workflow_flowchart.json');
+			try {
+				if (await this.fileService.exists(fileUri)) {
+					const text = (await this.fileService.readFile(fileUri)).value.toString();
+					const parsed: unknown = JSON.parse(text);
+					if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+						throw new Error('not a workflow canvas');
+					}
+					const result = removeMigratedSubWorkflowNodesFromCanvas(parsed as { nodes?: unknown; links?: unknown }, defs);
+					if (result) {
+						const backupUri = URI.joinPath(folder, '.agents', 'workflow_flowchart.json.bak-subworkflow-migration');
+						if (!await this.fileService.exists(backupUri)) {
+							await this.fileService.writeFile(backupUri, VSBuffer.fromString(text));
+						}
+						await this.fileService.writeFile(fileUri, VSBuffer.fromString(JSON.stringify(result.canvas)));
+						this.logService.info(`[WorkflowExecution] Sub-Workflow migration: removed ${result.removedNodeIds.length} node(s) and ${result.removedLinkCount} link(s) now held by ${defs.map(d => d.id).join(', ')} from ${fileUri.toString()}`);
+					}
+				}
+			} catch (err) {
+				this.logService.warn(`[WorkflowExecution] Sub-Workflow migration: could not clean the source canvas ${fileUri.toString()}; retrying on the next start:`, err);
+				continue;
+			}
+			for (const def of defs) {
+				this.saveSubWorkflow({ ...def, isHiddenInSource: false });
+			}
+		}
 	}
 
 	private _scheduleSubWorkflowSnapshotDiscovery(): void {

@@ -559,6 +559,56 @@ export function toMigratedSubWorkflowDefinition(legacy: ISubWorkflowDefinition, 
 }
 
 /**
+ * Before CI-23 the nodes of a Sub-Workflow stayed on the canvas of its source workflow, hidden there
+ * (`isHiddenInSource`). A migrated ticket holds those nodes itself, so the source canvas still has to drop them: true
+ * while that cleanup is pending for `def`.
+ */
+export function needsSourceCanvasCleanup(def: Pick<ISubWorkflowDefinition, 'legacyId' | 'isHiddenInSource' | 'sourceWorkflowUri'>): boolean {
+	return !!def.legacyId && def.isHiddenInSource === true && !!(def.sourceWorkflowUri || '').trim();
+}
+
+/**
+ * Removes from a source workflow canvas the nodes that migrated Sub-Workflow tickets now hold (a node goes only when
+ * its id is in a definition's `nodeIds` and among its `nodes`), and every link touching them. All other nodes and
+ * links are kept unchanged. Returns `undefined` when nothing has to be removed.
+ */
+export function removeMigratedSubWorkflowNodesFromCanvas<T extends { nodes?: unknown; links?: unknown }>(
+	canvas: T,
+	defs: ReadonlyArray<Pick<ISubWorkflowDefinition, 'nodeIds' | 'nodes'>>
+): { canvas: T; removedNodeIds: string[]; removedLinkCount: number } | undefined {
+	const members = new Set<string>();
+	for (const def of defs) {
+		const held = new Set((Array.isArray(def.nodes) ? def.nodes : []).map(n => isRecord(n) ? asString(n.id) : undefined));
+		for (const id of Array.isArray(def.nodeIds) ? def.nodeIds : []) {
+			if (typeof id === 'string' && id && held.has(id)) {
+				members.add(id);
+			}
+		}
+	}
+	const nodes = Array.isArray(canvas.nodes) ? canvas.nodes : [];
+	const removedNodeIds: string[] = [];
+	const keptNodes = nodes.filter(n => {
+		const id = isRecord(n) ? asString(n.id) : undefined;
+		if (id !== undefined && members.has(id)) {
+			removedNodeIds.push(id);
+			return false;
+		}
+		return true;
+	});
+	if (removedNodeIds.length === 0) {
+		return undefined;
+	}
+	const removed = new Set(removedNodeIds);
+	const links = Array.isArray(canvas.links) ? canvas.links : [];
+	const keptLinks = links.filter(l => !(isRecord(l) && ((typeof l.from === 'string' && removed.has(l.from)) || (typeof l.to === 'string' && removed.has(l.to)))));
+	const next: T = { ...canvas, nodes: keptNodes };
+	if (Array.isArray(canvas.links)) {
+		next.links = keptLinks;
+	}
+	return { canvas: next, removedNodeIds, removedLinkCount: links.length - keptLinks.length };
+}
+
+/**
  * Legacy definitions that no loaded Sub-Workflow ticket covers (their migration failed, or the migrated ticket folder
  * was not found). They stay usable under their legacy id; duplicates keep the first one.
  */

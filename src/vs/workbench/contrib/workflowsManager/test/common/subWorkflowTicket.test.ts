@@ -23,11 +23,13 @@ import {
 	getSubWorkflowSourceFolder,
 	getUncoveredLegacySubWorkflows,
 	isLegacySubWorkflowId,
+	needsSourceCanvasCleanup,
 	parseLegacySubWorkflowLibrary,
 	parseMigratedLegacyIds,
 	parseSubWorkflowDefinition,
 	parseSubWorkflowTicketIndex,
 	planSubWorkflowMigration,
+	removeMigratedSubWorkflowNodesFromCanvas,
 	resolveSubWorkflowReference,
 	serializeSubWorkflowDefinition,
 	stripHeavyMediaFromSubWorkflow,
@@ -324,5 +326,38 @@ suite('subWorkflowTicket', () => {
 		assert.ok(getSubWorkflowMigrationRetryDelay(1)! > getSubWorkflowMigrationRetryDelay(0)!);
 		assert.strictEqual(getSubWorkflowMigrationRetryDelay(SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS.length), undefined);
 		assert.strictEqual(getSubWorkflowMigrationRetryDelay(-1), undefined);
+	});
+
+	test('a migrated Sub-Workflow that was hidden in its source still has to be removed from the source canvas', () => {
+		assert.strictEqual(needsSourceCanvasCleanup(makeDef({ legacyId: 'subwf_1', isHiddenInSource: true })), true);
+		assert.strictEqual(needsSourceCanvasCleanup(makeDef({ legacyId: 'subwf_1', isHiddenInSource: false })), false);
+		assert.strictEqual(needsSourceCanvasCleanup(makeDef({ isHiddenInSource: true })), false);
+		assert.strictEqual(needsSourceCanvasCleanup(makeDef({ legacyId: 'subwf_1', isHiddenInSource: true, sourceWorkflowUri: '' })), false);
+	});
+
+	test('the source canvas drops the migrated nodes and their links, and keeps everything else', () => {
+		const canvas = {
+			nodes: [{ id: 'call', label: 'Call' }, { id: 'n1', label: 'A' }, { id: 'n2', label: 'B' }, { id: 'n3', label: 'C' }, { id: 'main', label: 'Main' }],
+			links: [
+				{ id: 'l1', from: 'n1', to: 'n2' },
+				{ id: 'l2', from: 'n2', to: 'n3' },
+				{ id: 'l3', from: 'call', to: 'main' },
+				{ id: 'l4', from: 'main', to: 'n1' }
+			],
+			routingMode: 'orthogonal'
+		};
+		const before = JSON.stringify(canvas);
+		// n3 is listed but not held by the ticket: no evidence, so it stays
+		const def = makeDef({ nodeIds: ['n1', 'n2', 'n3'], nodes: [{ id: 'n1' }, { id: 'n2' }] });
+		const result = removeMigratedSubWorkflowNodesFromCanvas(canvas, [def])!;
+		assert.deepStrictEqual(result.removedNodeIds, ['n1', 'n2']);
+		assert.strictEqual(result.removedLinkCount, 3);
+		assert.deepStrictEqual(result.canvas.nodes, [{ id: 'call', label: 'Call' }, { id: 'n3', label: 'C' }, { id: 'main', label: 'Main' }]);
+		assert.deepStrictEqual(result.canvas.links, [{ id: 'l3', from: 'call', to: 'main' }]);
+		assert.strictEqual(result.canvas.routingMode, 'orthogonal');
+		assert.strictEqual(JSON.stringify(canvas), before, 'the input is not modified');
+		// Already clean: nothing to write
+		assert.strictEqual(removeMigratedSubWorkflowNodesFromCanvas(result.canvas, [def]), undefined);
+		assert.strictEqual(removeMigratedSubWorkflowNodesFromCanvas({}, [def]), undefined);
 	});
 });
