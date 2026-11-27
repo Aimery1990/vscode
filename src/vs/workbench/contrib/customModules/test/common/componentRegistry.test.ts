@@ -13,8 +13,8 @@ import {
 } from '../../common/componentRegistry.js';
 import { validateComponentConfig } from '../../common/componentConfigSchema.js';
 
-/** Types that publish no `{var}` of their own (Inputs publish one variable per input; Display / buttons publish nothing). */
-const NO_VAR_OUTPUT = new Set(['parameters', 'output', 'display', 'button_group']);
+/** Types that publish no `{var}` of their own (Inputs publish one variable per input; Display publishes nothing). */
+const NO_VAR_OUTPUT = new Set(['parameters', 'output', 'display']);
 
 suite('componentRegistry', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();

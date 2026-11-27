@@ -63,6 +63,10 @@ export interface IWorkflowHumanPrompt {
 	options?: string[];
 	defaultOption?: string;
 	schema?: Record<string, 'string' | 'number' | 'boolean' | 'options'>;
+	/** Set when a Button Group gate waits (CI-25): `options` are its button labels; resume with one of them. */
+	decisionId?: string;
+	ticketId?: string;
+	ticketUri?: string;
 }
 
 export interface IWorkflowNodeExecutionState {

@@ -203,7 +203,7 @@ export class ResumeWorkflowStepTool implements IToolImpl {
 			toolReferenceName: 'resumeWorkflowStep',
 			displayName: localize('workflow.tool.resume.displayName', "Resume Workflow Step"),
 			userDescription: localize('workflow.tool.resume.userDescription', "Resume a paused or human-waiting workflow with optional input"),
-			modelDescription: 'Resume a workflow that is either paused in single-step mode or waiting for human interaction/approval. Pass user input or approval decision to continue.',
+			modelDescription: 'Resume a workflow that is either paused in single-step mode or waiting for human interaction/approval. Pass user input or approval decision to continue. When a Button Group gate waits (the node prompt lists its buttons), pass { label: "<button label>" } (or { buttonId }) to choose that button; only do this when the user told you which button to choose.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.debugContinue,
@@ -216,7 +216,7 @@ export class ResumeWorkflowStepTool implements IToolImpl {
 					},
 					user_input: {
 						type: 'object',
-						description: 'Optional user input, parameters, or approval payload (e.g. { approved: true, comment: \'LGTM\' }).'
+						description: 'Optional user input, parameters, or approval payload (e.g. { approved: true, comment: \'LGTM\' }); for a Button Group gate { label: \'Approve\' }.'
 					}
 				},
 				required: ['run_id']

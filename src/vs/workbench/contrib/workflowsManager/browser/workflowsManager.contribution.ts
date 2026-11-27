@@ -23,6 +23,8 @@ import { WorkflowsManagerService } from './workflowsManagerService.js';
 import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 import { WorkflowExecutionService } from './workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService, TicketWorkflowRuntime } from './ticketWorkflowRuntime.js';
+import { IHumanDecisionService } from '../common/humanDecision.js';
+import { HumanDecisionService } from './humanDecisionService.js';
 import { WorkflowsManagerPane } from './workflowsManagerPane.js';
 import { WorkflowEditor } from './workflowEditor.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
@@ -48,6 +50,7 @@ export const WORKFLOWS_MANAGER_VIEWLET_ID = 'workbench.view.workflowsManager';
 registerSingleton(IWorkflowsManagerService, WorkflowsManagerService, InstantiationType.Delayed);
 registerSingleton(IWorkflowExecutionService, WorkflowExecutionService, InstantiationType.Delayed);
 registerSingleton(ITicketWorkflowRuntimeService, TicketWorkflowRuntime, InstantiationType.Delayed);
+registerSingleton(IHumanDecisionService, HumanDecisionService, InstantiationType.Delayed);
 
 // 2. Register Icon (GithubAction is the unified Workflow Icon)
 const workflowsManagerIcon = registerIcon(

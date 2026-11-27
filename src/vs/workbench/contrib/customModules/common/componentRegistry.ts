@@ -1583,43 +1583,58 @@ export const COMPONENT_SPECS = {
 
 	button_group: {
 		type: 'button_group',
-		displayName: 'Action Buttons (Horizontal)',
+		displayName: 'Action Buttons (Approval Gate)',
 		icon: Codicon.run,
 		category: 'input',
-		usableIn: ['ticket'],
+		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
-		purpose: 'Buttons that move the ticket to another status when clicked.',
-		description: 'Horizontal row of action transition buttons. Each button can be customized with a label, theme color, and an optional target status transition. Clicking a button changes the ticket status; runs do NOT pause to wait for a click. Ticket only.',
-		runtime: 'Nothing to run: buttons act only when a person clicks them in the ticket (the ticket status changes to the target status).',
+		purpose: 'Human decision gate: a run waits until a person clicks one of the buttons; the clicked button is the output.',
+		description: 'Row of buttons [{id, label, color?, targetStatus?}] that acts as a human approval gate. When a ticket run or a workflow run (also a ticket run inside a workflow node, or the component directly in a node) reaches it, the run PAUSES until a person clicks one of the buttons: on the ticket page (the card shows "Waiting for your decision"), on the workflow canvas (the node shows the buttons), from the notification, or via resumeWorkflow with { label: "<button>" }. The clicked button\'s label is the output; a button\'s targetStatus becomes the ticket status when the run ends successfully. Stop cancels the wait (the step fails). Clicking a button outside a run changes the status (targetStatus) and records the choice as the component value.',
+		runtime: 'Waits for a click (no timeout, never decided automatically). Publishes {Label} = clicked label and {Label.id} / {Label.label} / {Label.at} / {Label.by}; stores {buttonId, label, at, by, targetStatus} as the ticket value; the ticket status at the end of a successful run is the clicked button\'s targetStatus (instead of Completed). A stopped run cancels the wait and fails the step. Pending waits are kept in memory: reloading the window ends the waiting run.',
 		props: [
-			{ name: 'buttons', kind: 'objectArray', role: 'structured', required: true, description: 'Buttons [{id, label*, color?, targetStatus?}].' }
+			{ name: 'buttons', kind: 'objectArray', role: 'structured', required: true, description: 'Buttons [{id, label*, color?, targetStatus?}]. Without buttons the card shows Approve (-> Done) and Reject (-> Blocked).' }
 		],
-		outputs: [],
+		outputs: [
+			{ name: '{var}', type: 'string', when: 'both', description: 'label of the clicked button', example: '"Approve"' },
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same label under the component label (link conditions: @review == \'Approve\')' },
+			{ name: '{Label.id}', type: 'string', when: 'both', description: 'id of the clicked button', example: '"btn_approve"' },
+			{ name: '{Label.label}', type: 'string', when: 'both', description: 'label of the clicked button' },
+			{ name: '{Label.at}', type: 'string', when: 'both', description: 'ISO time of the click', example: '"2026-11-27T15:04:05.000Z"' },
+			{ name: '{Label.by}', type: 'string', when: 'both', description: 'who decided ("User" for a click in the app)' },
+			{ name: '{Label}_result', type: 'object', when: 'both', description: '{id, label, at, by} as one dict (Python: TICKET_CONTEXT["review_result"]["label"]); also under {label_key}_result' }
+		],
 		example: {
 			id: 'review_actions',
-			label: 'Approval Actions',
+			label: 'Review',
 			type: 'button_group',
 			buttons: [
 				{ id: 'btn_approve', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
 				{ id: 'btn_reject', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
 			]
 		},
-		notes: ['Not a human-approval gate: a workflow does not wait for a click (CI-25).', 'Old data may use the legacy type id "button"; it is migrated to "button_group" on load.'],
+		notes: [
+			'A run that reaches the buttons waits for a person: only add it where a human decision is wanted.',
+			'Branch on the decision with a link condition such as @review == \'Approve\' (or {Review} == \'Approve\').',
+			'Old data may use the legacy type id "button"; it is migrated to "button_group" on load.'
+		],
 		help: {
-			badge: 'Interactive Actions & Transitions',
-			summary: 'Configures interactive action buttons that transition ticket lifecycle statuses (e.g. Approve, Reject, Restart).',
-			designerConfig: [{ name: 'Button Definitions', desc: 'Button title, color theme, and target status to transition to.' }],
-			headline: 'How RUN_TICKETS Handles Action Buttons',
+			badge: 'Human Approval Gate',
+			summary: 'Buttons such as Approve / Reject. A run that reaches them pauses until a person clicks one; the clicked button becomes the output and can set the ticket status.',
+			designerConfig: [{ name: 'Button Definitions', desc: 'Button label, color, and optional target status (set when the run ends after this choice, or immediately for a click outside a run).' }],
+			headline: 'How Runs Handle Action Buttons',
 			steps: [
-				{ step: '1. Manual use only', detail: 'Buttons act when a person clicks them in the ticket: the ticket status changes to the button\'s target status.' },
-				{ step: '2. No pause during runs', detail: 'Running the ticket or a workflow does NOT stop and wait for a button click. For a human approval step in a workflow, use a node whose label contains "Human Review" / "Approval".' }
+				{ step: '1. Pause', detail: 'The run stops at the buttons. The ticket card is highlighted "Waiting for your decision", the workflow node shows the buttons, and a notification offers to open the ticket.' },
+				{ step: '2. Decide', detail: 'A person clicks a button (ticket page, canvas or notification); an agent can resume the workflow with the button label when told to. Stop ends the wait and the run.' },
+				{ step: '3. Publish', detail: '{Label} = clicked label; {Label.id}, {Label.label}, {Label.at}, {Label.by}. The choice is stored on the ticket.' },
+				{ step: '4. Status', detail: 'The button\'s target status becomes the ticket status when the run finishes successfully.' }
 			],
-			variableResolution: '{status}',
-			downstreamPassing: 'Later steps can read the ticket status (e.g. via GET_TICKET) to see which button was clicked.',
-			syntaxExamples: ['{status}'],
-			tips: ['Buttons are a quick way for people to move a ticket between statuses (e.g. Approve → Done, Reject → Blocked).']
+			variableResolution: '{Field Label} (clicked label), {Field Label.at}, {Field Label.by}',
+			downstreamPassing: 'Later steps and link conditions read the decision, e.g. @review == \'Approve\'.',
+			syntaxExamples: ['{Review}', '{Review.by}', '@review == \'Approve\''],
+			tips: ['Outside a run, clicking a button still changes the ticket status and records the choice.']
 		},
-		templatePalette: { defaultName: 'Action Buttons' }
+		templatePalette: { defaultName: 'Action Buttons' },
+		nodePalette: { label: 'Approval Buttons', accent: '#fbbf24', tooltip: 'Human approval gate: the workflow waits until a person clicks one of the buttons; the clicked label is the output.' }
 	},
 
 	ssh: {
@@ -1762,7 +1777,7 @@ export const TEMPLATE_PALETTE_ORDER: readonly ComponentType[] = [
 /** Order of the workflow editor "Node Components" palette. Every entry needs `nodePalette`. */
 export const NODE_PALETTE_ORDER: readonly ComponentType[] = [
 	'parameters', 'output', 'python', 'create_tickets', 'run_tickets', 'get_outputs', 'get_tickets', 'display',
-	'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'http_request', 'git'
+	'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'http_request', 'git', 'button_group'
 ];
 
 /** Help of a Reusable Class instance (a Container bound to a composite class); not a component type of its own. */

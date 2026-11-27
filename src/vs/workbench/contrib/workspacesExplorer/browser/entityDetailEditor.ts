@@ -61,6 +61,7 @@ import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlo
 import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
 import { GIT_CONFIG_KEYS, IGitComponentConfig, buildGitTicketValue, effectiveGitConfig, gitMainOutput, gitOutputFields, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig } from '../../customModules/common/gitComponent.js';
 import { renderGitConfigForm, renderGitResultView } from '../../customModules/browser/gitComponentView.js';
+import { IHumanDecisionService, IPendingHumanDecision, buildHumanDecision, parseButtonGroupValue } from '../../workflowsManager/common/humanDecision.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -1036,9 +1037,13 @@ export class EntityDetailEditor extends EditorPane {
 		@IRequestService private readonly _requestService: IRequestService,
 		@ICustomModulesService private readonly _customModulesService: ICustomModulesService,
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
-		@ILayoutService private readonly _layoutService: ILayoutService
+		@ILayoutService private readonly _layoutService: ILayoutService,
+		@IHumanDecisionService private readonly _humanDecisionService: IHumanDecisionService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
+
+		// Button Group gates waiting for a decision (CI-25) are highlighted on their card
+		this._register(this._humanDecisionService.onDidChange(() => this._syncButtonGroupDecisionState()));
 
 		this._register(this._customModulesService.onDidChangeModules(() => {
 			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) { return; }
@@ -2468,6 +2473,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateTablePrimitiveCards();
 		await this._hydrateSshPrimitiveCards();
 		this._hydrateGitPrimitiveCards();
+		this._syncButtonGroupDecisionState();
 		this._renderBrowserCredentialNames();
 		this._appendWorkflowRuntimeBlocks(mod);
 		this._applySavedScrollPosition(scrollKey);
@@ -2702,6 +2708,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateTablePrimitiveCards();
 			await this._hydrateSshPrimitiveCards();
 			this._hydrateGitPrimitiveCards();
+			this._syncButtonGroupDecisionState();
 			this._renderBrowserCredentialNames();
 			this._applyAttachmentTamperMarks();
 			this._checkAttachmentIntegrity(this._entityUri, loadSeq);
@@ -3275,6 +3282,23 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const btnLabel = actionTransitionBtn.getAttribute('data-action-label') || 'Action';
 				const targetStatus = actionTransitionBtn.getAttribute('data-target-status') || '';
+				const actionId = actionTransitionBtn.getAttribute('data-action-id') || '';
+				const groupCard = actionTransitionBtn.closest('.action-button-group-card') as HTMLElement | null;
+				const pendingDecision = groupCard ? this._pendingDecisionForCard(groupCard) : undefined;
+				if (pendingDecision) {
+					// A run waits at this gate (CI-25): the run records the choice and sets the target status
+					const decision = this._humanDecisionService.resolve(pendingDecision.id, { buttonId: actionId, label: btnLabel }, 'User');
+					if (decision) {
+						this._notificationService.info(`'${decision.label}' chosen for ${pendingDecision.fieldLabel}; the run continues.`);
+					}
+					return;
+				}
+				// Outside a run: record the choice as the component's value (CI-25), then change the status as before
+				const decisionFieldKey = actionTransitionBtn.getAttribute('data-field-key') || '';
+				if (decisionFieldKey && !this._isPreviewMode) {
+					const manualDecision = buildHumanDecision({ id: actionId || btnLabel, label: btnLabel, ...(targetStatus ? { targetStatus } : {}) }, 'User');
+					await this._persistCustomFieldQuietly(decisionFieldKey, JSON.stringify(manualDecision));
+				}
 				await this._executeActionTransition(targetStatus, btnLabel);
 				return;
 			}
@@ -16571,6 +16595,42 @@ ${rawErr}
 		}
 	}
 
+	/** Pending Button Group decision (CI-25) of a button group card on this ticket. */
+	private _pendingDecisionForCard(card: HTMLElement): IPendingHumanDecision | undefined {
+		return this._humanDecisionService.findForTicketField(
+			{ uri: this._entityUri?.toString(), ticketId: this._lastParsedData?.ticketId },
+			{ id: card.getAttribute('data-field-id') || undefined, label: card.getAttribute('data-field-label') || undefined }
+		);
+	}
+
+	private readonly _decisionBanners = new WeakMap<HTMLElement, HTMLElement>();
+
+	/** Highlights the button group cards a run is waiting at: "Waiting for your decision" (CI-25). */
+	private _syncButtonGroupDecisionState(): void {
+		if (!this._container) {
+			return;
+		}
+		const cards = (this._pageParts.sectionCards ?? []).filter(card => card.classList.contains('action-button-group-card'));
+		for (const card of cards) {
+			const pending = this._pendingDecisionForCard(card);
+			card.classList.toggle('human-decision-waiting', !!pending);
+			card.style.boxShadow = pending ? '0 0 0 2px #fbbf24' : '';
+			let banner = this._decisionBanners.get(card);
+			if (pending && !banner?.isConnected) {
+				banner = $('div.human-decision-banner', { style: 'display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; padding: 5px 10px; border-radius: 5px; font-size: 12px; font-weight: 600; background: rgba(251, 191, 36, 0.14); color: #fbbf24;' },
+					$('span.codicon.codicon-bell', { style: 'font-size: 13px;' }),
+					'Waiting for your decision: click one of the buttons to continue the run.'
+				);
+				const title = partsOf(card).sectionTitle;
+				card.insertBefore(banner, title?.nextSibling ?? card.firstChild);
+				this._decisionBanners.set(card, banner);
+			} else if (!pending && banner) {
+				banner.remove();
+				this._decisionBanners.delete(card);
+			}
+		}
+	}
+
 	/** Git component cards (CI-24): settings form (ticket values win over the template), Run button, last result. */
 	private _hydrateGitPrimitiveCards(): void {
 		if (!this._container) { return; }
@@ -20961,6 +21021,7 @@ ${interpolatedPrompt}`;
 							{ id: 'btn_2', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
 						];
 
+					const lastDecision = parseButtonGroupValue(v);
 					const buttonsNodes = buttonsList.map(btn => {
 						const btnColor = btn.color || '#3b82f6';
 						const targetStatus = btn.targetStatus || '';
@@ -20980,7 +21041,11 @@ ${interpolatedPrompt}`;
 							...stepBadge()
 						))),
 						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 6px 0;' },
-							$('div.action-buttons-group-row', undefined, ...buttonsNodes)
+							$('div.action-buttons-group-row', undefined, ...buttonsNodes),
+							...(lastDecision ? [$('div.button-group-last-decision', { style: 'margin-top: 6px; font-size: 11.5px; opacity: 0.75;', title: 'Last choice (the component\'s value)' },
+								$('span.codicon.codicon-pass', { style: 'font-size: 11px; margin-right: 4px;' }),
+								`${lastDecision.label} · ${lastDecision.by || 'User'}${lastDecision.at && !isNaN(new Date(lastDecision.at).getTime()) ? ` · ${new Date(lastDecision.at).toLocaleString()}` : ''}`
+							)] : [])
 						))
 					))));
 				} else if (fType === 'number') {

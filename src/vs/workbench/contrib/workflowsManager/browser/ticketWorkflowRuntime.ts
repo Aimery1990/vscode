@@ -43,6 +43,7 @@ import { ILocalGitService } from '../../../../platform/git/common/localGitServic
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { env as processEnv } from '../../../../base/common/process.js';
+import { IHumanDecisionContext, IHumanDecisionService, normalizeDecisionButtons, publishButtonGroupOutputs } from '../common/humanDecision.js';
 import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -211,6 +212,8 @@ export interface ITicketRunOptions {
 	onStepMessage?: (info: { fieldId: string; fieldLabel: string; fieldType: string; message: string }) => void;
 	/** Set when the ticket runs inside a workflow / Sub-Workflow run: who called whom (CI-38 recursion guard). */
 	callChain?: ISubWorkflowCallChain;
+	/** Workflow run / node that waits when the ticket reaches a Button Group gate (CI-25). */
+	humanDecisionContext?: IHumanDecisionContext;
 }
 
 export interface IPrimitiveExecutionStepResult {
@@ -522,7 +525,8 @@ export interface ITicketWorkflowRuntimeService {
 		workspaceUri: string | URI,
 		workingDirUri: string | URI,
 		field: IRuntimeCustomField,
-		contextVariables: Record<string, unknown>
+		contextVariables: Record<string, unknown>,
+		humanDecisionContext?: IHumanDecisionContext
 	): Promise<IPrimitiveExecutionStepResult>;
 
 	/**
@@ -1466,6 +1470,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const isCancelled = () => this._cancelEpoch !== startEpoch || Boolean(options.isCancelled?.());
 		const stepResults: IPrimitiveExecutionStepResult[] = [];
 		const contextVariables: Record<string, unknown> = {};
+		/** Target status of the button chosen at a Button Group gate (CI-25); replaces "Completed" at the end. */
+		let decidedStatus: string | undefined;
 
 		try {
 			if (isCancelled()) {
@@ -2511,6 +2517,37 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'button_group': {
+							// Human approval gate (CI-25): wait until a person clicks one of the buttons
+							const buttons = normalizeDecisionButtons(field.buttons);
+							const decisions = this._getHumanDecisionService();
+							if (!decisions) {
+								throw new Error(`'${fieldLabel}' needs a decision but the decision service is not available.`);
+							}
+							try { options.onStepMessage?.({ fieldId: field.id, fieldLabel, fieldType, message: 'Waiting for your decision' }); } catch { }
+							const decision = await decisions.request({
+								fieldId: field.id,
+								fieldLabel,
+								buttons,
+								ticketUri: ticketResult.entityUri,
+								ticketId: ticketResult.ticketId,
+								ticketTitle: ticketResult.title,
+								workflowRunId: options.humanDecisionContext?.workflowRunId,
+								workflowNodeId: options.humanDecisionContext?.workflowNodeId,
+								workflowNodeLabel: options.humanDecisionContext?.workflowNodeLabel
+							}, isCancelled);
+							if (!decision) {
+								throw new Error(`Run stopped while '${fieldLabel}' was waiting for a decision.`);
+							}
+							customMetadata[fieldLabel] = JSON.stringify(decision);
+							if (decision.targetStatus) {
+								decidedStatus = decision.targetStatus;
+							}
+							stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision);
+							stepDetails = { ...decision, buttons: buttons.map(b => b.label) };
+							break;
+						}
+
 						case 'git': {
 							// Git component (CI-24): the ticket's own settings win over the template
 							const rawGitMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
@@ -3079,7 +3116,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								workspaceUri: wsUri,
 								ticketIdOrPath: String(resolvedTarget || ''),
 								inputParams: resolvedParams,
-								callChain: ticketCallChain
+								callChain: ticketCallChain,
+								humanDecisionContext: options.humanDecisionContext
 							});
 							stepOutput = runRes;
 							contextVariables[fieldLabel] = runRes;
@@ -3291,7 +3329,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const runActor: ITicketChangeActor = { kind: 'Workflow', name: callerWorkflow?.label || 'Ticket Run' };
 			// UI-20: run outcome for the Workspaces tree's failure markers (before ticket.md, whose change triggers the rescan)
 			await writeTicketLastRunRecord(this.fileService, ticketUri.path.endsWith('.md') ? ticketFolderOfFile(ticketUri) : ticketUri, ticketLastRunRecordFromSteps(stepResults, new Date()));
-			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor);
+			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor, hasFailedSteps ? undefined : decidedStatus);
 
 			const totalDuration = Date.now() - startTime;
 			this.logService.info(`[TicketWorkflowRuntime] Finished running ticket '${ticketResult.ticketId}' in ${totalDuration}ms (status: ${executionStatus})`);
@@ -3346,6 +3384,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				durationMs: Date.now() - startTime,
 				error: err.message || String(err)
 			};
+		}
+	}
+
+	/** Pending human decisions of Button Group gates (CI-25), resolved lazily. */
+	private _getHumanDecisionService(): IHumanDecisionService | undefined {
+		try {
+			return this.instantiationService.invokeFunction(accessor => accessor.get(IHumanDecisionService));
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -3437,7 +3484,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		workspaceUri: string | URI,
 		workingDirUri: string | URI,
 		field: IRuntimeCustomField,
-		contextVariables: Record<string, unknown>
+		contextVariables: Record<string, unknown>,
+		humanDecisionContext?: IHumanDecisionContext
 	): Promise<IPrimitiveExecutionStepResult> {
 		const stepStart = Date.now();
 		const executedAt = new Date().toLocaleTimeString();
@@ -3982,6 +4030,30 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					};
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+					break;
+				}
+				case 'button_group': {
+					// Human approval gate (CI-25): the workflow waits until a person clicks one of the buttons
+					const buttons = normalizeDecisionButtons(field.buttons);
+					const decisions = this._getHumanDecisionService();
+					if (!decisions) {
+						throw new Error(`'${fieldLabel}' needs a decision but the decision service is not available.`);
+					}
+					const decision = await decisions.request({
+						fieldId: field.id,
+						fieldLabel,
+						buttons,
+						workflowRunId: humanDecisionContext?.workflowRunId,
+						workflowNodeId: humanDecisionContext?.workflowNodeId,
+						workflowNodeLabel: humanDecisionContext?.workflowNodeLabel
+					}, () => this._cancelEpoch !== startEpoch);
+					if (!decision) {
+						throw new Error(`Run stopped while '${fieldLabel}' was waiting for a decision.`);
+					}
+					stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision);
+					stepDetails = { ...decision };
+					field.lastExecutionLog = `>>> ${fieldLabel}: '${decision.label}' chosen by ${decision.by} at ${decision.at}`;
+					field.lastExecutionOutput = decision;
 					break;
 				}
 				case 'git': {
@@ -6240,7 +6312,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return fields;
 	}
 
-	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed', actor: ITicketChangeActor = { kind: 'Workflow' }): Promise<void> {
+	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed', actor: ITicketChangeActor = { kind: 'Workflow' }, statusOverride?: string): Promise<void> {
+		// A Button Group decision with a target status sets the ticket status instead of "Completed" (CI-25)
+		const ticketStatus = statusOverride || executionStatus;
 		try {
 			// Ensure Output field is populated in customMetadata even if schema didn't explicitly run an output step
 			if (finalOutput !== undefined && customMetadata['Output'] === undefined && customMetadata['output'] === undefined) {
@@ -6258,11 +6332,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				ticketId: ticket.ticketId,
 				entityCode: ticket.ticketId,
 				entityType: ticket.ticketType,
-				status: executionStatus,
+				status: ticketStatus,
 				description: ticket.description
 			};
 			snapshot.customMetadata = customMetadata;
-			snapshot.status = executionStatus;
+			snapshot.status = ticketStatus;
 			await this.entityPersistenceService.saveSnapshot(snapshot);
 
 			// 2. Persist updated customMetadata & Status directly to .agents/ticket.md (and root ticket.md if present)
@@ -6291,7 +6365,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						for (let i = 0; i < lines.length; i++) {
 							const line = lines[i];
 							if (/^\s*-\s+\*\*Status\*\*:/i.test(line) && !inSelfDefined) {
-								newLines.push(line.replace(/(^\s*-\s+\*\*Status\*\*:\s*)([^\r\n]*)/i, (_, p1) => `${p1}${executionStatus}`));
+								newLines.push(line.replace(/(^\s*-\s+\*\*Status\*\*:\s*)([^\r\n]*)/i, (_, p1) => `${p1}${ticketStatus}`));
 								continue;
 							}
 							if (line.startsWith('### Self Defined Data')) {

@@ -15,6 +15,7 @@ import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutput
 import { ISubWorkflowCallChain, SubWorkflowCallGraphRoot, checkSubWorkflowCall, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain, findSubWorkflowCallCycle, findTemplateByTicketType, formatSubWorkflowCycleError, subWorkflowCallFrame, withSubWorkflowCallParentRun } from '../common/subWorkflowCallGraph.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { ITicketCreateOptions, ITicketGetResult, ITicketRunResult, ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
+import { IHumanDecisionService } from '../common/humanDecision.js';
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
@@ -1047,9 +1048,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		@IStorageService private readonly storageService: IStorageService,
 		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
 		@IPathService private readonly pathService: IPathService,
-		@ICustomModulesService private readonly customModulesService: ICustomModulesService
+		@ICustomModulesService private readonly customModulesService: ICustomModulesService,
+		@IHumanDecisionService private readonly humanDecisionService: IHumanDecisionService
 	) {
 		this._cleanupStaleKernelDirsOnStartup().catch(() => { });
+		// Button Group gates (CI-25): mirror pending decisions as the existing waiting_human run / node state
+		this.humanDecisionService.onDidChange(() => this._syncHumanDecisionStates());
 		this.workspacesExplorerService.onDidCreateSubWorkflowTicket(folderUri => {
 			this._onSubWorkflowTicketCreated(folderUri).catch(err => this.logService.warn('[WorkflowExecution] Could not load the new Sub-Workflow ticket:', err));
 		});
@@ -3351,6 +3355,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		if (run.status === 'waiting_human') {
+			// A Button Group gate (CI-25): the input names the clicked button (label, id, or { approved })
+			const pendingDecision = this.humanDecisionService.findForWorkflowRun(runId);
+			if (pendingDecision) {
+				const by = userInput && typeof userInput === 'object' && typeof (userInput as { by?: unknown }).by === 'string' ? (userInput as { by: string }).by : 'User';
+				const decision = this.humanDecisionService.resolve(pendingDecision.id, userInput, by);
+				if (decision) {
+					this._emitLog(run, 'info', `Decision for '${pendingDecision.fieldLabel}': '${decision.label}' (by ${decision.by})`, { nodeId: pendingDecision.workflowNodeId });
+				} else {
+					this._emitLog(run, 'warn', `'${pendingDecision.fieldLabel}' is still waiting: the input does not name one of its buttons (${pendingDecision.buttons.map(b => b.label).join(', ')}).`, { nodeId: pendingDecision.workflowNodeId });
+				}
+				return;
+			}
 			const waiter = this._humanWaiters.get(runId);
 			if (waiter) {
 				this._humanWaiters.delete(runId);
@@ -3414,6 +3430,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this._humanWaiters.delete(runId);
 			humanWaiter(null);
 		}
+		this.humanDecisionService.cancelForWorkflowRun(runId);
 		const stepWaiter = this._stepWaiters.get(runId);
 		if (stepWaiter) {
 			this._stepWaiters.delete(runId);
@@ -4510,6 +4527,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					inputParams: { ...run.contextVariables, ...inputParams },
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					callChain: this._ticketCallChainOf(run),
+					humanDecisionContext: { workflowRunId: run.runId, workflowNodeId: node.id, workflowNodeLabel: node.label },
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  \u25B6 [${ticketName}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
@@ -4627,8 +4645,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));
 
 				const isSubWorkflowStep = stepComp?.type === 'sub_workflow';
-				// A git command (commit, push, clone ...) is never retried automatically (CI-24)
-				const isTicketSideEffectStep = isSubWorkflowStep || stepComp?.type === 'git' || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
+				// A git command (commit, push, clone ...) or a human decision (CI-25) is never retried automatically
+				const isTicketSideEffectStep = isSubWorkflowStep || stepComp?.type === 'git' || stepComp?.type === 'button_group' || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
 				const maxStepAttempts = isTicketSideEffectStep ? 1 : 3;
 				let stepAttempt = 0;
 
@@ -4693,7 +4711,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								wsUri,
 								wsUri,
 								stepComp,
-								run.contextVariables
+								run.contextVariables,
+								{ workflowRunId: run.runId, workflowNodeId: node.id, workflowNodeLabel: node.label }
 							);
 							if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 								throw new Error('Workflow execution was stopped');
@@ -5226,6 +5245,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					inputParams: inputParams,
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					callChain: this._ticketCallChainOf(run),
+					humanDecisionContext: { workflowRunId: run.runId, workflowNodeId: node.id, workflowNodeLabel: node.label },
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  \u25B6 [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
@@ -6617,6 +6637,54 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._onDidEmitLog.fire({ runId: run.runId, log });
 	}
 
+	/**
+	 * A Button Group gate waiting inside a run shows as the existing human-in-the-loop state: the run and the node are
+	 * `waiting_human` and the node's prompt lists the gate's buttons (CI-25). When the decision is made (or cancelled)
+	 * the run and node return to `running`.
+	 */
+	private _syncHumanDecisionStates(): void {
+		for (const run of this._runs.values()) {
+			if (run.status !== 'running' && run.status !== 'waiting_human' && run.status !== 'paused') {
+				continue;
+			}
+			const pending = this.humanDecisionService.findForWorkflowRun(run.runId);
+			let changed = false;
+			for (const state of Object.values(run.nodeStates || {})) {
+				if (!state) {
+					continue;
+				}
+				const isGateNode = !!pending && state.nodeId === pending.workflowNodeId;
+				if (isGateNode && pending && state.waitingHumanPrompt?.decisionId !== pending.id) {
+					state.status = 'waiting_human';
+					state.waitingHumanPrompt = {
+						nodeId: state.nodeId,
+						prompt: pending.prompt,
+						options: pending.buttons.map(b => b.label),
+						decisionId: pending.id,
+						ticketId: pending.ticketId,
+						ticketUri: pending.ticketUri
+					};
+					run.status = 'waiting_human';
+					changed = true;
+					this._emitLog(run, 'warn', `[Human Decision] ${pending.prompt}`, { nodeId: state.nodeId });
+				} else if (!isGateNode && state.waitingHumanPrompt?.decisionId) {
+					state.waitingHumanPrompt = undefined;
+					if (state.status === 'waiting_human') {
+						state.status = 'running';
+					}
+					if (run.status === 'waiting_human' && !this._humanWaiters.has(run.runId)) {
+						run.status = 'running';
+					}
+					changed = true;
+				}
+			}
+			if (changed) {
+				run.updatedAt = Date.now();
+				this._notifyRunChanged(run);
+			}
+		}
+	}
+
 	private _notifyRunChanged(run: IWorkflowExecutionRun): void {
 		run.updatedAt = Date.now();
 		if (run.isSubWorkflowRun) {
@@ -7681,6 +7749,7 @@ finally:
 					inputParams: { ...cleanCtxParams, ...inputParams },
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					callChain: this._ticketCallChainOf(run),
+					humanDecisionContext: { workflowRunId: run.runId, workflowNodeId: node.id, workflowNodeLabel: node.label },
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  \u25B6 [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);

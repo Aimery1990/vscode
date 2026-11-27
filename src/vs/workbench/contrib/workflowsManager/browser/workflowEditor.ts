@@ -11485,15 +11485,33 @@ export class WorkflowEditor extends EditorPane {
 				} else if (nodeRunState.status === 'waiting_human' && isActiveRunLive) {
 					nodeEl.classList.add('status-waiting-human');
 
-					// Human Approval Interactive Card
-					const humanCard = append(nodeEl, $('.node-human-approval-card'));
-					humanCard.textContent = '\u23F8 Waiting Approval [Approve]';
-					humanCard.title = 'Click to approve and continue workflow execution';
-					humanCard.onmousedown = (e) => e.stopPropagation();
-					humanCard.onclick = (e) => {
-						e.stopPropagation();
-						this._workflowExecutionService.resumeWorkflow(activeRun!.runId, { approved: true, action: 'approved', timestamp: Date.now() });
-					};
+					const humanPrompt = nodeRunState.waitingHumanPrompt;
+					if (humanPrompt?.decisionId && humanPrompt.options?.length) {
+						// Button Group gate (CI-25): offer the gate's own buttons
+						const decisionCard = append(nodeEl, $('.node-human-approval-card.node-human-decision-card', { style: 'display: flex; flex-direction: column; gap: 4px; cursor: default;' }));
+						decisionCard.title = humanPrompt.prompt;
+						decisionCard.onmousedown = (e) => e.stopPropagation();
+						append(decisionCard, $('span', undefined, '\u23F8 Waiting for your decision'));
+						const btnRow = append(decisionCard, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 4px;' }));
+						for (const option of humanPrompt.options) {
+							const optBtn = append(btnRow, $('button', { type: 'button', title: `Choose '${option}' and continue`, style: 'font-size: 10.5px; padding: 1px 8px; border-radius: 4px; border: 1px solid rgba(251, 191, 36, 0.6); background: rgba(251, 191, 36, 0.15); color: inherit; cursor: pointer;' }, option));
+							optBtn.onmousedown = (e) => e.stopPropagation();
+							optBtn.onclick = (e) => {
+								e.stopPropagation();
+								this._workflowExecutionService.resumeWorkflow(activeRun!.runId, { label: option, by: 'User' });
+							};
+						}
+					} else {
+						// Human Approval Interactive Card
+						const humanCard = append(nodeEl, $('.node-human-approval-card'));
+						humanCard.textContent = '\u23F8 Waiting Approval [Approve]';
+						humanCard.title = 'Click to approve and continue workflow execution';
+						humanCard.onmousedown = (e) => e.stopPropagation();
+						humanCard.onclick = (e) => {
+							e.stopPropagation();
+							this._workflowExecutionService.resumeWorkflow(activeRun!.runId, { approved: true, action: 'approved', timestamp: Date.now() });
+						};
+					}
 				}
 			}
 
@@ -20675,7 +20693,8 @@ export class WorkflowEditor extends EditorPane {
 			voice_note: 'Voice Note',
 			ssh: 'SSH Terminal',
 			http_request: 'API Request',
-			git: 'Git Repo',
+			git: 'Git',
+			button_group: 'Review',
 			python: 'Python Script'
 		};
 
@@ -20725,6 +20744,7 @@ export class WorkflowEditor extends EditorPane {
 			sshOutputLines: compType === 'ssh' ? 50 : undefined,
 			sshQuickCommands: compType === 'ssh' ? SSH_DEFAULT_QUICK_COMMANDS.map(c => ({ ...c })) : undefined,
 			gitCommand: compType === 'git' ? 'status' : undefined,
+			buttons: compType === 'button_group' ? [{ id: `btn_${ts}_1`, label: 'Approve', color: '#10b981' }, { id: `btn_${ts}_2`, label: 'Reject', color: '#ef4444' }] : undefined,
 			gitRepoPath: compType === 'git' ? '' : undefined,
 			httpUrl: compType === 'http_request' ? '' : undefined,
 			httpMethod: compType === 'http_request' ? 'GET' : undefined,
