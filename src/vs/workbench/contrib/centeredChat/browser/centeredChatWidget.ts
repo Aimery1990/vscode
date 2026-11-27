@@ -3295,7 +3295,6 @@ Always explain the result clearly to the user once tool execution completes.`;
 		try {
 			const workspaces = (await this.workspacesExplorerService.getWorkspaces()) || [];
 			const activeTicketId = this.activeContextLocator?.ticketId;
-			const activeWorkspaceId = (this.activeContextLocator?.workspaceId || '').trim();
 			const wsBlocks: string[] = [];
 
 			for (const w of workspaces) {
@@ -3314,35 +3313,15 @@ Always explain the result clearly to the user once tool execution completes.`;
 				wsBlocks.push(block);
 			}
 
-			// Also include Global Workspaces (GFLOW-0000 -> /Users/aimery/Documents/workflows, GAGENT-0000 -> /Users/aimery/Documents/agents)
-			const globalWorkspaces = [
-				{ name: 'Global Workflows', code: 'GFLOW-0000', uri: URI.file('/Users/aimery/Documents/workflows') },
-				{ name: 'Global Agents', code: 'GAGENT-0000', uri: URI.file('/Users/aimery/Documents/agents') }
-			];
-			for (const gw of globalWorkspaces) {
-				try {
-					if (await this.fileService.exists(gw.uri)) {
-						const isFocusWs = activeWorkspaceId.toUpperCase() === gw.code ||
-							activeWorkspaceId.toUpperCase() === gw.code.replace('-0000', '') ||
-							(activeTicketId && activeTicketId.toUpperCase().startsWith(gw.code.replace('-0000', '') + '-'));
-						const activeStr = isFocusWs ? ' [CURRENT ACTIVE GLOBAL WORKSPACE]' : '';
-						let block = `\uD83C\uDF10 Global Workspace "${gw.name}" (Code: ${gw.code}, Path: ${gw.uri.fsPath})${activeStr}`;
-						const treeView = await this.ticketDataEngine.buildCompactWorkspaceTree(gw.uri, activeTicketId, 2);
-						block += `\n${treeView}`;
-						wsBlocks.push(block);
-					}
-				} catch { }
-			}
-
 			if (wsBlocks.length > 0) {
 				prompt += `\n\n=== ACCESSIBLE WORKSPACES & COMPACT HIERARCHICAL TREES ===
 ${wsBlocks.join('\n\n')}
 
 CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
-1. Workspace Resolution: When calling tools such as 'anyagent_get_ticket_data', 'anyagent_create_ticket', 'anyagent_update_ticket', or 'anyagent_delete_ticket', specify a valid 'workspace_id' matching one of the accessible workspaces or global workspaces above (e.g. 'GFLOW-0000' for Global Workflows, 'GAGENT-0000' for Global Agents, or a user workspace Name/Code). Global workspaces ('GFLOW-0000', 'GAGENT-0000', 'GLOBAL-0000') resolve directly to their global directories without needing to appear in the user Workspaces Explorer sidebar.
+1. Workspace Resolution: When calling tools such as 'anyagent_get_ticket_data', 'anyagent_create_ticket', 'anyagent_update_ticket', or 'anyagent_delete_ticket', specify a valid 'workspace_id' matching one of the accessible workspaces above (its Name or Code). There are no global workspaces: every workflow, agent and ticket lives inside one of these workspaces.
 2. Parent Ticket Resolution: When a user asks to perform CRUD (create, update, delete, view, link) under or on an existing entity:
-   - Match against the hierarchical tree above! For example, "job 0001", "job 1", or "0001" corresponds to the job ticket whose ID ends with "-0001" (e.g. "NEOWO-0001" or "GFLOW-0004").
-   - Set 'parent_path' to the exact Ticket ID (e.g. "NEOWO-0001" or "/GFLOW-0004").
+   - Match against the hierarchical tree above! For example, "job 0001", "job 1", or "0001" corresponds to the job ticket whose ID ends with "-0001" (e.g. "NEOWO-0001").
+   - Set 'parent_path' to the exact Ticket ID (e.g. "NEOWO-0001" or "/NEOWO-0001/NEOWO-0004").
    - NEVER pass an arbitrary folder string like "/job 0001"!
    - If creating at the workspace root, pass "/".
 3. On-Demand Tree Exploration: If a branch is deep or collapsed, or if you need to find a ticket by keyword/content, invoke 'anyagent_query_workspace_tree' to search and retrieve the updated sub-tree before acting.

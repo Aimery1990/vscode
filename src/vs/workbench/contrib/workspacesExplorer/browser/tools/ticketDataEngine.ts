@@ -16,6 +16,9 @@ import { getProgrammaticTicketTypeError, isFreestyleTicketType, isSubWorkflowTic
 import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
+import { IPathService } from '../../../../services/path/common/pathService.js';
+import { IStorageService } from '../../../../../platform/storage/common/storage.js';
+import { expandHomePath, getAnyAgentGlobalFolders, getRetiredGlobalWorkspaceCode, getRetiredGlobalWorkspaceMessage } from '../../../customModules/common/anyagentGlobalPaths.js';
 
 /** Loosely-typed JSON object (tool parameters, parsed ticket values). */
 type IJsonObject = { [key: string]: unknown };
@@ -162,16 +165,14 @@ export class TicketDataEngine {
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
 		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
-		@IInstantiationService private readonly instantiationService: IInstantiationService
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IPathService private readonly pathService: IPathService,
+		@IStorageService private readonly storageService: IStorageService
 	) { }
 
-	private _resolveGlobalWorkspaceUri(workspaceId?: string, ticketId?: string): URI | undefined {
+	/** A workspace given directly as a path: `file://...`, an absolute path, or `~/...` (expanded with the real user home). */
+	private _resolveDirectWorkspacePath(workspaceId?: string): URI | undefined {
 		const trimmedId = (workspaceId || '').trim();
-		const lowerId = trimmedId.toLowerCase();
-		const normId = lowerId.replace(/[\s_\-]+/g, '');
-		const cleanCodeFromWsId = lowerId.replace(/-0000$/i, '').replace(/[\s_\-]+/g, '');
-
-		// 1. Direct filesystem path or file:// URI
 		if (trimmedId.startsWith('file://')) {
 			try {
 				return URI.parse(trimmedId);
@@ -181,60 +182,8 @@ export class TicketDataEngine {
 			return URI.file(trimmedId);
 		}
 		if (trimmedId.startsWith('~/')) {
-			return URI.file('/Users/aimery/' + trimmedId.slice(2));
+			return URI.file(expandHomePath(trimmedId, this.pathService.userHome({ preferLocal: true }).fsPath));
 		}
-
-		// 2. Global Workflows Directory (/Users/aimery/Documents/workflows -> GFLOW / GFLOW-0000)
-		if (
-			cleanCodeFromWsId === 'gflow' ||
-			normId === 'gflow' ||
-			normId === 'gflow0000' ||
-			normId === 'globalworkflow' ||
-			normId === 'globalworkflows' ||
-			normId === 'independent' ||
-			normId === 'independentflow' ||
-			normId === 'independentworkflow' ||
-			normId === 'workflows'
-		) {
-			return URI.file('/Users/aimery/Documents/workflows');
-		}
-
-		// 3. Global Agents Directory (/Users/aimery/Documents/agents -> GAGENT / GAGENT-0000)
-		if (
-			cleanCodeFromWsId === 'gagent' ||
-			normId === 'gagent' ||
-			normId === 'gagent0000' ||
-			normId === 'globalagent' ||
-			normId === 'globalagents' ||
-			normId === 'agents'
-		) {
-			return URI.file('/Users/aimery/Documents/agents');
-		}
-
-		// 4. Global Jobs Directory (/Users/aimery/repos/jobs -> GLOBAL / GLOBAL-0000)
-		if (
-			cleanCodeFromWsId === 'global' ||
-			normId === 'global' ||
-			normId === 'global0000' ||
-			normId === 'globaljobs'
-		) {
-			return URI.file('/Users/aimery/repos/jobs');
-		}
-
-		// 5. Infer from ticketId prefix (GFLOW-xxxx, GAGENT-xxxx, GLOBAL-xxxx)
-		if (ticketId) {
-			const cleanTicket = ticketId.trim().replace(/^[/\\]+/, '');
-			if (/^gflow[-_]\d+/i.test(cleanTicket)) {
-				return URI.file('/Users/aimery/Documents/workflows');
-			}
-			if (/^gagent[-_]\d+/i.test(cleanTicket)) {
-				return URI.file('/Users/aimery/Documents/agents');
-			}
-			if (/^global[-_]\d+/i.test(cleanTicket)) {
-				return URI.file('/Users/aimery/repos/jobs');
-			}
-		}
-
 		return undefined;
 	}
 
@@ -242,11 +191,11 @@ export class TicketDataEngine {
 	 * Find the workspace root URI from workspace_id or active workspaces with smart matching
 	 */
 	public async findWorkspaceUri(workspaceId?: string, ticketId?: string): Promise<URI | undefined> {
-		// 0. Check Global Workspaces (GFLOW-0000, GAGENT-0000, GLOBAL-0000) or direct path first
-		const globalUri = this._resolveGlobalWorkspaceUri(workspaceId, ticketId);
-		if (globalUri) {
-			if (await this.fileService.exists(globalUri)) {
-				return globalUri;
+		// 0. A direct path (absolute, file:// or ~/) first
+		const directUri = this._resolveDirectWorkspacePath(workspaceId);
+		if (directUri) {
+			if (await this.fileService.exists(directUri)) {
+				return directUri;
 			}
 		}
 
@@ -258,6 +207,15 @@ export class TicketDataEngine {
 				try {
 					w.code = await this.workspacesExplorerService.resolveEntityCode(w.uri);
 				} catch { }
+			}
+		}
+
+		// 0.5 The global GFLOW / GAGENT / GLOBAL workspaces were removed (CI-26). Old references to them fail with a
+		// clear "not found" error, unless the user opened such a folder as a normal workspace with that code.
+		for (const ref of [workspaceId, ticketId]) {
+			const retiredCode = getRetiredGlobalWorkspaceCode(ref);
+			if (ref && retiredCode && !workspaces.some(w => (w.code || '').replace(/-0000$/i, '').toUpperCase() === retiredCode)) {
+				throw new Error(getRetiredGlobalWorkspaceMessage(ref, retiredCode));
 			}
 		}
 
@@ -392,7 +350,7 @@ export class TicketDataEngine {
 			return bestMatch.uri;
 		}
 
-		// 6.5 If ticketId is provided, scan all workspaces and global directories to see which one physically contains this ticket
+		// 6.5 If ticketId is provided, scan all workspaces to see which one physically contains this ticket
 		if (ticketId) {
 			for (const w of workspaces) {
 				try {
@@ -402,30 +360,11 @@ export class TicketDataEngine {
 					}
 				} catch { }
 			}
-			const globalCandidateDirs = [
-				URI.file('/Users/aimery/Documents/workflows'),
-				URI.file('/Users/aimery/Documents/agents'),
-				URI.file('/Users/aimery/repos/jobs')
-			];
-			for (const gDir of globalCandidateDirs) {
-				try {
-					if (await this.fileService.exists(gDir)) {
-						const found = await this.resolveTicketPaths(gDir, ticketId);
-						if (found) {
-							return gDir;
-						}
-					}
-				} catch { }
-			}
 		}
 
 		// 7. SAFETY: DO NOT silently fall back to workspaces[0]!
 		// Throw an informative error listing all available workspaces so AI and user know exactly what exists
-		const availableList = [
-			...workspaces.map(w => `"${w.name}" (Code: ${w.code || 'N/A'})${w.isCurrent ? ' [Active]' : ''}`),
-			'"Global Workflows" (Code: GFLOW-0000)',
-			'"Global Agents" (Code: GAGENT-0000)'
-		].join(', ');
+		const availableList = workspaces.map(w => `"${w.name}" (Code: ${w.code || 'N/A'})${w.isCurrent ? ' [Active]' : ''}`).join(', ');
 		throw new Error(`Workspace '${workspaceId}' was not found. Currently available workspaces in AnyAgent are: [${availableList}]. Please specify one of these valid workspace names, or ask the user to clarify if unsure.`);
 	}
 
@@ -1216,7 +1155,7 @@ export class TicketDataEngine {
 		const typeYamlCandidates = [
 			URI.joinPath(folderUri, '.agents', 'entity_type', `${ticketType}.yaml`),
 			...(wsUri ? [URI.joinPath(wsUri, '.agents', 'entity_type', `${ticketType}.yaml`)] : []),
-			URI.file(`/Users/aimery/.anyagent/entity_type/${ticketType}.yaml`)
+			URI.joinPath(getAnyAgentGlobalFolders(this.storageService, this.pathService.userHome({ preferLocal: true })).entityType, `${ticketType}.yaml`)
 		];
 		for (const typeYamlUri of typeYamlCandidates) {
 			if (await this.fileService.exists(typeYamlUri)) {
@@ -1368,6 +1307,7 @@ export class TicketDataEngine {
 			}
 		}
 
+		const missingAttachments: string[] = [];
 		if (filesToSync.length > 0) {
 			const attachmentsDir = URI.joinPath(paths.folderUri, 'attachments');
 			if (!(await this.fileService.exists(attachmentsDir))) {
@@ -1375,21 +1315,11 @@ export class TicketDataEngine {
 			}
 			for (const fileName of filesToSync) {
 				const destUri = URI.joinPath(attachmentsDir, fileName);
+				// No guessing (CI-26): the file must already be in the ticket's attachments/ folder. A missing file is
+				// reported back instead of being searched for in Desktop / Downloads / Documents.
 				if (!(await this.fileService.exists(destUri))) {
-					const userHome = '/Users/aimery';
-					const candidates = [
-						URI.file(`${userHome}/Desktop/${fileName}`),
-						URI.file(`${userHome}/Downloads/${fileName}`),
-						URI.file(`${userHome}/Documents/${fileName}`)
-					];
-					for (const cand of candidates) {
-						if (await this.fileService.exists(cand)) {
-							try {
-								await this.fileService.copy(cand, destUri, true);
-								break;
-							} catch { }
-						}
-					}
+					missingAttachments.push(fileName);
+					continue;
 				}
 
 				// Also ensure ### Attachments Links in ticket.md reflects this file
@@ -1477,7 +1407,11 @@ export class TicketDataEngine {
 				instructionModified ? 'instruction.md' : null,
 				'worklog.md'
 			].filter(Boolean),
-			applied_updates: options.updates
+			applied_updates: options.updates,
+			...(missingAttachments.length > 0 ? {
+				missing_attachments: missingAttachments,
+				warning: `Attachment file(s) not found in the ticket's attachments/ folder and NOT linked: ${missingAttachments.join(', ')}. Ask the user to add the file(s) to the ticket (e.g. by uploading them in the ticket view); do not guess other locations.`
+			} : {})
 		};
 	}
 

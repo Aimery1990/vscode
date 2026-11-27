@@ -23,6 +23,7 @@ import { EditorsOrder } from '../../../common/editor.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 import { IDebugService } from '../../debug/common/debug.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { toFolderAccessError } from '../../customModules/common/anyagentGlobalPaths.js';
 
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
 const REMOVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.removedWorkspaces';
@@ -532,9 +533,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	async createWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
-		const rootPath = options.targetParentUri ? options.targetParentUri.fsPath : '/Users/aimery/repos/jobs';
-
-		const parentFolderUri = URI.file(rootPath);
+		// A workspace is only created where the user chose (CI-26): there is no default location
+		if (!options.targetParentUri) {
+			throw new Error('No location was chosen for the new workspace. Pick the parent folder with the folder picker and try again.');
+		}
+		const parentFolderUri = URI.file(options.targetParentUri.fsPath);
 		const sanitizedName = options.name.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const targetBaseUri = URI.joinPath(parentFolderUri, sanitizedName);
 
@@ -547,7 +550,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this.ensureGitRepositoryReady(targetBaseUri, options.gitRepoUrl, options.gitBranch);
 		} else {
 			if (!alreadyExists) {
-				await this.fileService.createFolder(targetBaseUri);
+				try {
+					await this.fileService.createFolder(targetBaseUri);
+				} catch (err) {
+					// Permission denied (e.g. macOS privacy): stop with a clear error, never fall back to another folder
+					throw toFolderAccessError(err, targetBaseUri);
+				}
 			}
 		}
 
@@ -1216,17 +1224,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			if (sanitized) { return sanitized; }
 		}
 
-		const pathLower = targetParentUri.path.toLowerCase();
-		if (pathLower === '/users/aimery/repos/jobs' || pathLower.endsWith('/repos/jobs')) {
-			return 'GLOBAL';
-		}
-		if (pathLower === '/users/aimery/documents/workflows' || pathLower.endsWith('/documents/workflows')) {
-			return 'GFLOW';
-		}
-		if (pathLower === '/users/aimery/documents/agents' || pathLower.endsWith('/documents/agents')) {
-			return 'GAGENT';
-		}
-
 		// Look up snapshot hierarchy or .agents/*.md on disk
 		let curr: URI | undefined = targetParentUri;
 		while (curr) {
@@ -1489,7 +1486,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (isFreestyleTicketType(options.type) && !options.allowFreestyle) {
 			throw new Error(FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
 		}
-		const targetFolderUri = options.targetParentUri || options.workspaceUri || URI.file('/Users/aimery/repos/jobs');
+		const targetFolderUri = options.targetParentUri || options.workspaceUri;
+		if (!targetFolderUri) {
+			throw new Error('No workspace or parent folder was given. Tickets are always created inside a workspace.');
+		}
 		let workspaceRootUri: URI;
 		if (options.workspaceUri && !options.targetParentUri) {
 			workspaceRootUri = await this.findWorkspaceRootUri(options.workspaceUri);
@@ -1625,8 +1625,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this.ensureGitRepositoryReady(entityFolderUri, options.gitRepoUrl, options.gitBranch);
 		}
 
-		const isIndependentAgent = type === 'agent' && activeCode === 'GAGENT';
-		const isIndependentWorkflow = type === 'workflow' && activeCode === 'GFLOW';
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
@@ -1640,13 +1638,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			description: description || (subWorkflowDraft ? buildSubWorkflowTicketDescription(subWorkflowDraft) : (options.title ? options.title : `${parentType} ${type}`)),
-			belongsToWorkspaceUri: (isIndependentAgent || isIndependentWorkflow) ? undefined : workspaceRootUri.toString(),
+			belongsToWorkspaceUri: workspaceRootUri.toString(),
 			role: description || `${parentType} Agent`,
 			modelName: finalModel.modelId,
 			systemPrompt: finalSystemPrompt,
-			scopeType: isIndependentAgent ? 'none' : parentType,
-			scopeId: isIndependentAgent ? 'none' : targetFolderUri.toString(),
-			scopeName: (isIndependentAgent || isIndependentWorkflow) ? 'Independent' : parentName,
+			scopeType: parentType,
+			scopeId: targetFolderUri.toString(),
+			scopeName: parentName,
 			typeDefinition: (options.typeDefinition && options.typeDefinition !== 'Built-in (System)' && options.typeDefinition !== 'None') ? options.typeDefinition : undefined,
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt || options.agentRulePrompt,
@@ -1655,7 +1653,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			attachments: attachmentNames,
 			git: (options.gitRepoUrl || options.gitBranch) ? { remoteUrl: options.gitRepoUrl, branch: options.gitBranch } : undefined,
 			customMetadata: subWorkflowDraft ? { ...(options.customMetadata || {}), ...buildSubWorkflowTicketMetadata(subWorkflowDraft) } : options.customMetadata
-		}, targetFolderUri, true);
+		}, targetFolderUri, true).catch(err => {
+			// Permission denied (e.g. macOS privacy): stop with a clear error, never fall back to another folder
+			throw toFolderAccessError(err, entityFolderUri);
+		});
 
 		if (type === 'agent' && this.agentsManagerService) {
 			await this.agentsManagerService.addAgent({
@@ -1667,9 +1668,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				systemPrompt: finalSystemPrompt,
 				model: finalModel,
 				avatarIcon: 'robot',
-				scopeType: (isIndependentAgent ? 'none' : parentType) as AgentScopeType,
-				scopeId: isIndependentAgent ? 'none' : targetFolderUri.toString(),
-				scopeName: isIndependentAgent ? 'Independent' : parentName,
+				scopeType: parentType as AgentScopeType,
+				scopeId: targetFolderUri.toString(),
+				scopeName: parentName,
 				folderPath: entityFolderUri.fsPath,
 				status: 'idle'
 			}, targetFolderUri);

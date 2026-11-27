@@ -26,8 +26,6 @@ import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 
-const DEFAULT_WORKFLOWS_DIR = '/Users/aimery/Documents/workflows';
-
 interface IWorkflowProbeResult {
 	isExisting: boolean;
 	name?: string;
@@ -275,7 +273,7 @@ export async function createWorkflowDialog(
 				selectDest.remove(0);
 			}
 
-			const rootOpt = append(selectDest, $('option', {}, 'Independent Flow (Global Workflows Directory)')) as HTMLOptionElement;
+			const rootOpt = append(selectDest, $('option', {}, 'No workspace (open an existing workflow folder only)')) as HTMLOptionElement;
 			rootOpt.value = 'independent';
 
 			let matchedOption = false;
@@ -317,7 +315,7 @@ export async function createWorkflowDialog(
 		});
 
 		// 6. Workflow Storage Location (Browse / Path input)
-		let initialPath = DEFAULT_WORKFLOWS_DIR;
+		let initialPath = '';
 		if (defaultTargetFolderUri) {
 			initialPath = defaultTargetFolderUri.fsPath;
 		} else if (selectDest.value !== 'independent') {
@@ -440,8 +438,7 @@ export async function createWorkflowDialog(
 		const renderWorkflowTemplateFields = async () => {
 			try {
 				const rawPath = locationInput.value.trim();
-				const locUri = rawPath ? URI.file(rawPath) : URI.file(DEFAULT_WORKFLOWS_DIR);
-				const matchedWs = resolveTargetWorkspace(locUri);
+				const matchedWs = resolveTargetWorkspace(rawPath ? URI.file(rawPath) : undefined);
 				const modules = await customModulesService.getCustomModules(matchedWs?.uri);
 				const matchingModule = modules.find(m => m.id.toLowerCase() === 'workflow' && !m.isDeprecated);
 				activeWorkflowModule = matchingModule;
@@ -1016,14 +1013,12 @@ export async function createWorkflowDialog(
 		const refreshTicketIdPreview = async () => {
 			try {
 				const rawPath = locationInput.value.trim();
-				const locUri = rawPath ? URI.file(rawPath) : URI.file(DEFAULT_WORKFLOWS_DIR);
-				const matchedWs = resolveTargetWorkspace(locUri);
+				const matchedWs = resolveTargetWorkspace(rawPath ? URI.file(rawPath) : undefined);
 				if (matchedWs) {
 					const seq = await workspacesExplorerService.generateNextSequentialName(matchedWs.uri, 'workflow');
 					previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Workspace Code: ${seq.code})`;
 				} else {
-					const seq = await workspacesExplorerService.generateNextSequentialName(locUri, 'workflow', 'GFLOW');
-					previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Independent Flow)`;
+					previewBadge.innerText = 'No Ticket ID: choose a folder inside a workspace to create a workflow';
 				}
 			} catch {
 				previewBadge.innerText = 'Generated Ticket ID: AUTO';
@@ -1068,7 +1063,7 @@ export async function createWorkflowDialog(
 		// Scope change listener
 		selectDest.onchange = () => {
 			if (selectDest.value === 'independent') {
-				locationInput.value = DEFAULT_WORKFLOWS_DIR;
+				locationInput.value = '';
 			} else {
 				const wsUri = URI.parse(selectDest.value);
 				locationInput.value = wsUri.fsPath;
@@ -1082,7 +1077,7 @@ export async function createWorkflowDialog(
 				canSelectFolders: true,
 				canSelectFiles: false,
 				canSelectMany: false,
-				defaultUri: locationInput.value.trim() ? URI.file(locationInput.value.trim()) : URI.file(DEFAULT_WORKFLOWS_DIR),
+				defaultUri: locationInput.value.trim() ? URI.file(locationInput.value.trim()) : await fileDialogService.defaultFolderPath(),
 				title: 'Select Workflow Storage Location or Existing Workflow Folder'
 			});
 			if (res && res.length > 0) {
@@ -1166,6 +1161,11 @@ export async function createWorkflowDialog(
 
 			const description = descInput.value.trim();
 			const matchedWs = resolveTargetWorkspace(locationUri);
+			if (!matchedWs) {
+				// No global workflows (CI-26): a new workflow always lives inside a workspace
+				notificationService.warn('A new workflow must be created inside a workspace. Choose a workspace, or a folder inside one, as the storage location.');
+				return;
+			}
 
 			let initialStatusOverride = '';
 			const customMetadata: { [key: string]: string } = {};
@@ -1198,74 +1198,41 @@ export async function createWorkflowDialog(
 				: 'A workflow executes automated nodes, transitions, and AI pipelines.';
 
 			try {
-				let targetFolderUri: URI;
-				let belongsToWsUri: string | undefined = undefined;
-				let scopeName = 'Independent';
+				const wsRootUri = matchedWs.uri;
+				const belongsToWsUri = wsRootUri.toString();
+				const scopeName = matchedWs.name;
 
-				if (matchedWs) {
-					const wsRootUri = matchedWs.uri;
-					belongsToWsUri = wsRootUri.toString();
-					scopeName = matchedWs.name;
-
-					if (activeWorkflowModule && hasCustomSchema) {
-						const localYamlUri = URI.joinPath(wsRootUri, '.agents', 'entity_type', 'workflow.yaml');
-						const yamlContent = stringifyYaml({ ...activeWorkflowModule, storageScope: 'workspace' });
-						await fileService.writeFile(localYamlUri, VSBuffer.fromString(yamlContent));
-					}
-
-					const normLoc = locationUri.path.replace(/\/+$/, '');
-					const normWs = wsRootUri.path.replace(/\/+$/, '');
-					const isSubFolder = normLoc !== normWs && normLoc.startsWith(normWs + '/');
-
-					const wsStatuses = await workspacesExplorerService.getWorkspaceStatuses(wsRootUri);
-					const initialStatus = initialStatusOverride || (wsStatuses.statuses[0] || 'Todo');
-
-					const createRes = await workspacesExplorerService.createResourceUnderWorkspace({
-						workspaceUri: wsRootUri,
-						targetParentUri: isSubFolder ? locationUri : undefined,
-						type: 'workflow',
-						name: 'AUTO',
-						title: name,
-						status: initialStatus,
-						description: description || `Workflow: ${name}`,
-						typeDefinition: resolvedTypeDef,
-						typePrompt: resolvedTypePrompt,
-						gitRepoUrl,
-						gitBranch,
-						customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined
-					});
-
-					targetFolderUri = createRes.uri.path.endsWith('/.agents/ticket.md')
-						? dirname(dirname(createRes.uri))
-						: createRes.uri;
-				} else {
-					if (activeWorkflowModule && hasCustomSchema) {
-						const localYamlUri = URI.joinPath(locationUri, '.agents', 'entity_type', 'workflow.yaml');
-						const yamlContent = stringifyYaml({ ...activeWorkflowModule, storageScope: 'workspace' });
-						await fileService.writeFile(localYamlUri, VSBuffer.fromString(yamlContent));
-					}
-
-					const seq = await workspacesExplorerService.generateNextSequentialName(locationUri, 'workflow', 'GFLOW');
-					const createRes = await workspacesExplorerService.createResourceUnderWorkspace({
-						workspaceUri: locationUri,
-						targetParentUri: locationUri,
-						type: 'workflow',
-						name: seq.name,
-						code: seq.code,
-						title: name,
-						status: initialStatusOverride || 'Todo',
-						description: description || `Workflow: ${name}`,
-						typeDefinition: resolvedTypeDef,
-						typePrompt: resolvedTypePrompt,
-						gitRepoUrl,
-						gitBranch,
-						customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined
-					});
-
-					targetFolderUri = createRes.uri.path.endsWith('/.agents/ticket.md')
-						? dirname(dirname(createRes.uri))
-						: createRes.uri;
+				if (activeWorkflowModule && hasCustomSchema) {
+					const localYamlUri = URI.joinPath(wsRootUri, '.agents', 'entity_type', 'workflow.yaml');
+					const yamlContent = stringifyYaml({ ...activeWorkflowModule, storageScope: 'workspace' });
+					await fileService.writeFile(localYamlUri, VSBuffer.fromString(yamlContent));
 				}
+
+				const normLoc = locationUri.path.replace(/\/+$/, '');
+				const normWs = wsRootUri.path.replace(/\/+$/, '');
+				const isSubFolder = normLoc !== normWs && normLoc.startsWith(normWs + '/');
+
+				const wsStatuses = await workspacesExplorerService.getWorkspaceStatuses(wsRootUri);
+				const initialStatus = initialStatusOverride || (wsStatuses.statuses[0] || 'Todo');
+
+				const createRes = await workspacesExplorerService.createResourceUnderWorkspace({
+					workspaceUri: wsRootUri,
+					targetParentUri: isSubFolder ? locationUri : undefined,
+					type: 'workflow',
+					name: 'AUTO',
+					title: name,
+					status: initialStatus,
+					description: description || `Workflow: ${name}`,
+					typeDefinition: resolvedTypeDef,
+					typePrompt: resolvedTypePrompt,
+					gitRepoUrl,
+					gitBranch,
+					customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined
+				});
+
+				const targetFolderUri = createRes.uri.path.endsWith('/.agents/ticket.md')
+					? dirname(dirname(createRes.uri))
+					: createRes.uri;
 
 				// Write any uploaded field attachments to targetFolderUri/attachments/
 				if (allPendingFieldAttachments.length > 0) {
@@ -1318,9 +1285,7 @@ export async function createWorkflowDialog(
 				});
 
 				notificationService.info(`Workflow '${name}' created successfully!`);
-				workflowsManagerService.notifyPaneExpanded(
-					matchedWs ? 'workbench.view.workflowsManager.workspace' : 'workbench.view.workflowsManager.independent'
-				);
+				workflowsManagerService.notifyPaneExpanded('workbench.view.workflowsManager.workspace');
 				closeModal();
 				await editorService.openEditor(new WorkflowEditorInput(targetFolderUri, name), { pinned: true });
 			} catch (err) {

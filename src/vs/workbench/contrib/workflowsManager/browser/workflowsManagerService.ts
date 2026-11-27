@@ -232,9 +232,6 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			const resolvedTicketId = ticketId || snap?.ticketId || name;
 			const resolvedTitle = title || snap?.title || name;
 			const rawWsUri = wsUri || snap?.belongsToWorkspaceUri || '';
-			const isIndependentPath = uri.path.toLowerCase().startsWith('/users/aimery/documents/workflows/') ||
-				rawWsUri.toLowerCase().endsWith('/documents/workflows') ||
-				rawWsUri.toLowerCase().endsWith('/repos/jobs');
 			if (!seenUris.has(norm)) {
 				seenUris.add(norm);
 				workflows.push({
@@ -244,8 +241,8 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 					title: resolvedTitle,
 					description: description || snap?.description,
 					createdAt: createdAt || snap?.createdAt || '',
-					belongsToWorkspaceUri: isIndependentPath ? '' : rawWsUri,
-					belongsToWorkspaceName: isIndependentPath ? 'Independent' : (wsName || snap?.scopeName || ''),
+					belongsToWorkspaceUri: rawWsUri,
+					belongsToWorkspaceName: wsName || snap?.scopeName || '',
 					isMissing: false
 				});
 			}

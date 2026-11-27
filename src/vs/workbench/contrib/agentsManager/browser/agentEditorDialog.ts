@@ -28,7 +28,6 @@ import { AccountManagementDialog } from '../../accountManagement/browser/account
 import { ILanguageModelsService } from '../../chat/common/languageModels.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 
-const DEFAULT_AGENTS_DIR = '/Users/aimery/Documents/agents';
 
 interface IPendingFieldAttachment {
 	name: string;
@@ -230,7 +229,7 @@ export async function createOrEditAgentDialog(
 				selectDest.remove(0);
 			}
 
-			const rootOpt = append(selectDest, $('option', {}, 'Independent Agent (Global Agents Directory)')) as HTMLOptionElement;
+			const rootOpt = append(selectDest, $('option', {}, 'No workspace (choose a workspace to create an agent)')) as HTMLOptionElement;
 			rootOpt.value = 'independent';
 
 			let matchedOption = false;
@@ -283,7 +282,7 @@ export async function createOrEditAgentDialog(
 			populateWorkspaceOptions(prevValue);
 		});
 
-		let initialPath = DEFAULT_AGENTS_DIR;
+		let initialPath = '';
 		if (existingAgent?.folderPath) {
 			initialPath = existingAgent.folderPath;
 		} else if (targetFolderUri) {
@@ -739,8 +738,7 @@ export async function createOrEditAgentDialog(
 					return;
 				}
 				const rawPath = locationInput.value.trim();
-				const locUri = rawPath ? URI.file(rawPath) : URI.file(DEFAULT_AGENTS_DIR);
-				const matchedWs = resolveTargetWorkspace(locUri);
+				const matchedWs = resolveTargetWorkspace(rawPath ? URI.file(rawPath) : undefined);
 				const modules = await customModulesService.getCustomModules(matchedWs?.uri);
 				const matchingModule = modules.find(m => m.id.toLowerCase() === 'agent' && !m.isDeprecated);
 				activeAgentModule = matchingModule;
@@ -1259,14 +1257,12 @@ export async function createOrEditAgentDialog(
 			}
 			try {
 				const rawPath = locationInput.value.trim();
-				const locUri = rawPath ? URI.file(rawPath) : URI.file(DEFAULT_AGENTS_DIR);
-				const matchedWs = resolveTargetWorkspace(locUri);
+				const matchedWs = resolveTargetWorkspace(rawPath ? URI.file(rawPath) : undefined);
 				if (matchedWs) {
 					const seq = await workspacesExplorerService.generateNextSequentialName(matchedWs.uri, 'agent');
 					previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Workspace Code: ${seq.code})`;
 				} else {
-					const seq = await workspacesExplorerService.generateNextSequentialName(locUri, 'agent', 'GAGENT');
-					previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Independent Agent)`;
+					previewBadge.innerText = 'No Ticket ID: choose a folder inside a workspace to create an agent';
 				}
 			} catch {
 				previewBadge.innerText = 'Generated Ticket ID: AUTO';
@@ -1280,7 +1276,7 @@ export async function createOrEditAgentDialog(
 
 		selectDest.onchange = () => {
 			if (selectDest.value === 'independent') {
-				locationInput.value = DEFAULT_AGENTS_DIR;
+				locationInput.value = '';
 			} else {
 				const wsUri = URI.parse(selectDest.value);
 				locationInput.value = wsUri.fsPath;
@@ -1293,7 +1289,7 @@ export async function createOrEditAgentDialog(
 				canSelectFolders: true,
 				canSelectFiles: false,
 				canSelectMany: false,
-				defaultUri: locationInput.value.trim() ? URI.file(locationInput.value.trim()) : URI.file(DEFAULT_AGENTS_DIR),
+				defaultUri: locationInput.value.trim() ? URI.file(locationInput.value.trim()) : await fileDialogService.defaultFolderPath(),
 				title: 'Select Storage Location for AI Agent'
 			});
 			if (res && res.length > 0) {
@@ -1435,9 +1431,14 @@ export async function createOrEditAgentDialog(
 			}
 
 			// Creating a new AI Agent using the unified Ticket ID / sequence / 4-MD pipeline
-			const rawPath = locationInput.value.trim() || DEFAULT_AGENTS_DIR;
-			const locationUri = URI.file(rawPath);
+			const rawPath = locationInput.value.trim();
+			const locationUri = rawPath ? URI.file(rawPath) : undefined;
 			const matchedWs = resolveTargetWorkspace(locationUri);
+			if (!locationUri || !matchedWs) {
+				// No global agents (CI-26): a new agent always lives inside a workspace
+				notificationService.warn('A new AI Agent must be created inside a workspace. Choose a workspace, or a folder inside one, as the storage location.');
+				return;
+			}
 
 			let initialStatusOverride = '';
 			const customMetadata: { [key: string]: string } = {};
@@ -1539,76 +1540,41 @@ export async function createOrEditAgentDialog(
 				: 'An AI Agent is a specialized autonomous assistant with a dedicated role, LLM model, and system prompt.';
 
 			try {
-				let createdFolderUri: URI;
-				let resolvedTicketId = '';
-
-				if (matchedWs) {
-					const wsRootUri = matchedWs.uri;
-					if (activeAgentModule && hasCustomSchema) {
-						const localYamlUri = URI.joinPath(wsRootUri, '.agents', 'entity_type', 'agent.yaml');
-						const yamlContent = stringifyYaml({ ...activeAgentModule, storageScope: 'workspace' });
-						await fileService.writeFile(localYamlUri, VSBuffer.fromString(yamlContent));
-					}
-
-					const normLoc = locationUri.path.replace(/\/+$/, '');
-					const normWs = wsRootUri.path.replace(/\/+$/, '');
-					const isSubFolder = normLoc !== normWs && normLoc.startsWith(normWs + '/');
-
-					const wsStatuses = await workspacesExplorerService.getWorkspaceStatuses(wsRootUri);
-					const initialStatus = initialStatusOverride || (wsStatuses.statuses[0] || 'Todo');
-
-					const createRes = await workspacesExplorerService.createResourceUnderWorkspace({
-						workspaceUri: wsRootUri,
-						targetParentUri: isSubFolder ? locationUri : undefined,
-						type: 'agent',
-						name: 'AUTO',
-						title: nameVal,
-						status: initialStatus,
-						description: roleVal,
-						agentModel: modelRef,
-						agentSystemPrompt: promptVal,
-						typeDefinition: resolvedTypeDef,
-						typePrompt: resolvedTypePrompt,
-						gitRepoUrl,
-						gitBranch,
-						customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined
-					});
-
-					createdFolderUri = createRes.uri.path.endsWith('/.agents/ticket.md')
-						? dirname(dirname(createRes.uri))
-						: createRes.uri;
-					resolvedTicketId = createdFolderUri.path.split('/').filter(Boolean).pop() || nameVal;
-				} else {
-					if (activeAgentModule && hasCustomSchema) {
-						const localYamlUri = URI.joinPath(locationUri, '.agents', 'entity_type', 'agent.yaml');
-						const yamlContent = stringifyYaml({ ...activeAgentModule, storageScope: 'workspace' });
-						await fileService.writeFile(localYamlUri, VSBuffer.fromString(yamlContent));
-					}
-
-					const seq = await workspacesExplorerService.generateNextSequentialName(locationUri, 'agent', 'GAGENT');
-					const createRes = await workspacesExplorerService.createResourceUnderWorkspace({
-						workspaceUri: locationUri,
-						targetParentUri: locationUri,
-						type: 'agent',
-						name: seq.name,
-						code: seq.code,
-						title: nameVal,
-						status: initialStatusOverride || 'Todo',
-						description: roleVal,
-						agentModel: modelRef,
-						agentSystemPrompt: promptVal,
-						typeDefinition: resolvedTypeDef,
-						typePrompt: resolvedTypePrompt,
-						gitRepoUrl,
-						gitBranch,
-						customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined
-					});
-
-					createdFolderUri = createRes.uri.path.endsWith('/.agents/ticket.md')
-						? dirname(dirname(createRes.uri))
-						: createRes.uri;
-					resolvedTicketId = seq.name;
+				const wsRootUri = matchedWs.uri;
+				if (activeAgentModule && hasCustomSchema) {
+					const localYamlUri = URI.joinPath(wsRootUri, '.agents', 'entity_type', 'agent.yaml');
+					const yamlContent = stringifyYaml({ ...activeAgentModule, storageScope: 'workspace' });
+					await fileService.writeFile(localYamlUri, VSBuffer.fromString(yamlContent));
 				}
+
+				const normLoc = locationUri.path.replace(/\/+$/, '');
+				const normWs = wsRootUri.path.replace(/\/+$/, '');
+				const isSubFolder = normLoc !== normWs && normLoc.startsWith(normWs + '/');
+
+				const wsStatuses = await workspacesExplorerService.getWorkspaceStatuses(wsRootUri);
+				const initialStatus = initialStatusOverride || (wsStatuses.statuses[0] || 'Todo');
+
+				const createRes = await workspacesExplorerService.createResourceUnderWorkspace({
+					workspaceUri: wsRootUri,
+					targetParentUri: isSubFolder ? locationUri : undefined,
+					type: 'agent',
+					name: 'AUTO',
+					title: nameVal,
+					status: initialStatus,
+					description: roleVal,
+					agentModel: modelRef,
+					agentSystemPrompt: promptVal,
+					typeDefinition: resolvedTypeDef,
+					typePrompt: resolvedTypePrompt,
+					gitRepoUrl,
+					gitBranch,
+					customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined
+				});
+
+				const createdFolderUri = createRes.uri.path.endsWith('/.agents/ticket.md')
+					? dirname(dirname(createRes.uri))
+					: createRes.uri;
+				const resolvedTicketId = createdFolderUri.path.split('/').filter(Boolean).pop() || nameVal;
 
 				if (allPendingFieldAttachments.length > 0) {
 					const attachmentsDirUri = URI.joinPath(createdFolderUri, 'attachments');
@@ -1635,7 +1601,7 @@ export async function createOrEditAgentDialog(
 
 				const allAgents = await agentsService.getAgents();
 				const createdAgent = allAgents.find(a => a.folderPath === createdFolderUri.fsPath) || allAgents.find(a => a.ticketId === resolvedTicketId);
-				const finalScopeType: AgentScopeType = createdAgent ? createdAgent.scopeType : (matchedWs ? 'workspace' : 'none');
+				const finalScopeType: AgentScopeType = createdAgent ? createdAgent.scopeType : 'workspace';
 
 				notificationService.info(`AI Agent '${nameVal}' (${resolvedTicketId}) created successfully!`);
 				focusTargetPane(finalScopeType);

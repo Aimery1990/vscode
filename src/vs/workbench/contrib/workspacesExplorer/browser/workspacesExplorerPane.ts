@@ -48,6 +48,7 @@ import { isCommentKeybinding, togglePythonComment } from '../../customModules/br
 import { stringifyYaml } from '../../customModules/browser/customModulesService.js';
 import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType, isReservedTemplate } from '../../customModules/common/freestyleTicket.js';
+import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
@@ -2777,18 +2778,28 @@ export class MainWorkspaceViewPane extends ViewPane {
 	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder
 	 */
 	public showCreateResourceModal(target?: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void, initialType?: string): void {
+		// No target location: use the current workspace (tickets always live inside a workspace); without one, refuse (CI-26)
+		if (!target) {
+			this.workspacesExplorerService.getWorkspaces().then(workspaces => {
+				const current = workspaces.find(w => w.isCurrent) || workspaces[0];
+				if (!current) {
+					this.notificationService.warn('There is no workspace to create this in. Create or open a workspace first (choose its folder with the folder picker), then create the item inside it.');
+					return;
+				}
+				this.showCreateResourceModal(current, parentName, onSuccess, initialType);
+			}, err => this.notificationService.error(`Failed to load workspaces: ${(err as Error | undefined)?.message || err}`));
+			return;
+		}
+
 		let targetUri: URI;
 		let targetName: string;
 
-		if (target && typeof target === 'object' && isWorkspaceItemTarget(target)) {
+		if (typeof target === 'object' && isWorkspaceItemTarget(target)) {
 			targetUri = (target as IWorkspaceItem).uri;
 			targetName = (target as IWorkspaceItem).name;
-		} else if (target) {
+		} else {
 			targetUri = target as URI;
 			targetName = parentName || targetUri.path.split('/').filter(Boolean).pop() || 'Workspace';
-		} else {
-			targetUri = URI.file('/Users/aimery/Documents');
-			targetName = parentName || 'Workspace';
 		}
 
 		MainWorkspaceViewPane.createResourceModalOverlay?.remove();
@@ -5318,17 +5329,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	}
 
 	private _getGlobalEntityTypeDir(): URI {
-		let savedPath = '~/.anyagent/entity_type';
-		try {
-			if (this._storageService) {
-				savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-			}
-		} catch (e) {
-			console.error('Failed to read globalEntityTypePath setting:', e);
-		}
-		const userHome = this.environmentService.userHome.fsPath;
-		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type');
-		return URI.file(resolvedPath);
+		return getAnyAgentGlobalFolders(this._storageService, this.environmentService.userHome).entityType;
 	}
 
 	private async _getCustomModules(workspaceUri: URI): Promise<ICustomModule[]> {

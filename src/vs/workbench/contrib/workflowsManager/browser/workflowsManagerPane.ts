@@ -141,16 +141,9 @@ export class WorkflowsManagerPane extends ViewPane {
 		return 'all';
 	}
 
+	/** A workflow that does not belong to any workspace (e.g. a workflow folder opened directly). */
 	private isIndependentWorkflow(w: IWorkflowItem): boolean {
-		const wsUriLower = (w.belongsToWorkspaceUri || '').toLowerCase();
-		const idLower = (w.id || '').toLowerCase();
-		if (idLower.includes('/documents/workflows/') || wsUriLower.endsWith('/documents/workflows') || wsUriLower.endsWith('/repos/jobs')) {
-			return true;
-		}
-		if (!w.belongsToWorkspaceUri || w.belongsToWorkspaceName === 'Independent') {
-			return true;
-		}
-		return false;
+		return !w.belongsToWorkspaceUri || w.belongsToWorkspaceName === 'Independent';
 	}
 
 	private async updatePaneTitle(): Promise<void> {
@@ -466,7 +459,7 @@ export class WorkflowsManagerPane extends ViewPane {
 	}
 
 	private async createNewWorkflow(): Promise<void> {
-		const defaultUri = this.getTargetScope() === 'independent' ? URI.file('/Users/aimery/Documents/workflows') : undefined;
-		this.instantiationService.invokeFunction(accessor => createWorkflowDialog(accessor, defaultUri));
+		// New workflows are created inside a workspace: the dialog defaults to the current one
+		this.instantiationService.invokeFunction(accessor => createWorkflowDialog(accessor, undefined));
 	}
 }

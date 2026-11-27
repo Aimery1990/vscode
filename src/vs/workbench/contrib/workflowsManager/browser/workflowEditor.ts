@@ -19377,21 +19377,6 @@ export class WorkflowEditor extends EditorPane {
 			candidateWorkflowBases.push(URI.file(`${parentPath}/${lastSegment.replace(/\s+/g, '-')}`));
 		}
 
-		// Also discover all folders in /Users/aimery/Documents/workflows
-		const rootWorkflowsDir = URI.file('/Users/aimery/Documents/workflows');
-		try {
-			if (await this._fileService.exists(rootWorkflowsDir)) {
-				const res = await this._fileService.resolve(rootWorkflowsDir);
-				if (res.children) {
-					for (const child of res.children) {
-						if (child.isDirectory) {
-							candidateWorkflowBases.push(child.resource);
-						}
-					}
-				}
-			}
-		} catch { }
-
 		// Check all candidate workflow bases for sub-entities or sub-files
 		for (const base of candidateWorkflowBases) {
 			const candidateWorkflowPaths = [
@@ -19442,29 +19427,13 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// 5. Common global directories
-		const commonDirs = [
-			URI.file(`/Users/aimery/Documents/workflows/${cleanName}`),
-			URI.file(`/Users/aimery/Documents/workflows/${cleanName}.md`),
-			URI.file(`/Users/aimery/repos/${cleanName}`),
-			URI.file(`/Users/aimery/repos/jobs/${cleanName}`),
-			URI.file(`/Users/aimery/repos/jobs/any_agent_202607/${cleanName}`)
-		];
-		for (const cand of commonDirs) {
-			try {
-				if (await this._fileService.exists(cand)) {
-					return cand;
-				}
-			} catch { }
-		}
-
 		return undefined;
 	}
 
 	private async _openModuleInEditor(imp: { type: string; name: string; uri?: string }): Promise<void> {
 		const targetUri = await this._resolveModuleUri(imp);
 		if (!targetUri) {
-			this._notificationService.warn(`Could not locate resource directory or file for ${imp.type} '${imp.name}'.`);
+			this._notificationService.error(`Could not find ${imp.type} '${imp.name}': it is not registered and is not next to this workflow or in an open workspace folder. Open its folder (or its workspace) first, then try again.`);
 			return;
 		}
 

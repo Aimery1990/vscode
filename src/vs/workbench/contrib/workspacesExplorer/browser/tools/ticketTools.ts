@@ -395,7 +395,10 @@ export class UpdateTicketTool implements IToolImpl {
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
 			const res = await this.ticketEngine.updateTicket(invocation.parameters as IUpdateTicketToolOptions);
-			return toolResult(res, `Ticket '${res.ticket_id}' updated successfully.`);
+			const missing = res.missing_attachments;
+			return toolResult(res, missing && missing.length > 0
+				? `Ticket '${res.ticket_id}' updated, but attachment file(s) are missing: ${missing.join(', ')}.`
+				: `Ticket '${res.ticket_id}' updated successfully.`);
 		} catch (err) {
 			return toolError(errorText(err));
 		}
@@ -575,7 +578,7 @@ export class OperateTicketTableTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: 'The root workspace ID (e.g. \'FNDJ1-0000\' or \'GFLOW-0000\').'
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
 					},
 					ticket_id: {
 						type: 'string',

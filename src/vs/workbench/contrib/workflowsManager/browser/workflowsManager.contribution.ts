@@ -127,8 +127,8 @@ for (const vd of viewDescriptors) {
 		}
 
 		async run(accessor: ServicesAccessor): Promise<void> {
-			const defaultUri = vd.id.endsWith('.independent') ? URI.file('/Users/aimery/Documents/workflows') : undefined;
-			await createWorkflowDialog(accessor, defaultUri);
+			// New workflows are created inside a workspace: the dialog defaults to the current one
+			await createWorkflowDialog(accessor, undefined);
 		}
 	});
 
@@ -154,7 +154,7 @@ for (const vd of viewDescriptors) {
 				canSelectFolders: true,
 				canSelectFiles: false,
 				canSelectMany: false,
-				defaultUri: URI.file('/Users/aimery/Documents/workflows'),
+				defaultUri: await fileDialogService.defaultFolderPath(),
 				title: 'Open Existing Workflow Directory'
 			});
 			if (res && res.length > 0) {
