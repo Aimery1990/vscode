@@ -61,7 +61,6 @@ import { MediaSubtitlesPanel } from './mediaSubtitles/mediaSubtitlesPanel.js';
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
 
-/** Text for a DOM text node / attribute value: `undefined` / `null` become an empty string. */
 /** The subtitle settings of a media player field, passed to the ticket card as JSON (CI-45). */
 function mediaSubtitleFieldProps(field: IMediaSubtitleFieldProps): IMediaSubtitleFieldProps {
 	return {
@@ -77,6 +76,26 @@ function mediaSubtitleFieldProps(field: IMediaSubtitleFieldProps): IMediaSubtitl
 	};
 }
 
+/** Which media file a player shows: a ticket's value, or the default file of the component. */
+interface ITicketMediaValue {
+	mediaFilePath: string;
+	mediaFileName: string;
+	mediaKind: 'audio' | 'video';
+	mediaMimeType: string;
+}
+
+const TICKET_MEDIA_KEYS = ['mediaFilePath', 'mediaFileName', 'mediaKind', 'mediaMimeType'] as const;
+
+function pickTicketMedia(field: ICustomField): ITicketMediaValue {
+	return {
+		mediaFilePath: field.mediaFilePath || '',
+		mediaFileName: field.mediaFileName || '',
+		mediaKind: field.mediaKind === 'video' ? 'video' : 'audio',
+		mediaMimeType: field.mediaMimeType || ''
+	};
+}
+
+/** Text for a DOM text node / attribute value: `undefined` / `null` become an empty string. */
 function textOf(value: unknown): string {
 	return value === undefined || value === null ? '' : String(value);
 }
@@ -1266,6 +1285,8 @@ export class EntityDetailEditor extends EditorPane {
 	private _mediaCleanupFns: Array<() => void> = [];
 	/** Subtitle panels of the media player cards currently on the page (CI-45). */
 	private readonly _mediaSubtitlePanels = new WeakMap<HTMLElement, MediaSubtitlesPanel>();
+	/** Pauses the audio / video of an MP3 / MP4 Player card (used while its configuration dialog plays the same file). */
+	private readonly _mediaPlayerCardPausers = new WeakMap<HTMLElement, () => void>();
 
 	private _disposeMediaCleanupFns(): void {
 		while (this._mediaCleanupFns.length > 0) {
@@ -1660,6 +1681,17 @@ export class EntityDetailEditor extends EditorPane {
 		const input = new CustomModuleSchemaEditorInput(`freestyle-component::${ticketUri.toString()}::${field.id}`, label, workspaceUri);
 		input.embeddedFieldId = field.id;
 		input.draftModule = JSON.parse(JSON.stringify(schema));
+		const findDraftField = (module: ICustomModule | undefined) => module?.fields?.find(f => (f.id || '').toLowerCase() === fieldId.toLowerCase());
+
+		// The player in the dialog shows the media loaded in this ticket (its value), not the structure's default file
+		const mediaCard = field.type === 'media_player' ? this._findMediaPlayerCard(label) : undefined;
+		const ticketMedia = mediaCard ? this._ticketMediaOfCard(mediaCard) : undefined;
+		const draftMediaField = findDraftField(input.draftModule);
+		if (mediaCard && ticketMedia && draftMediaField) {
+			Object.assign(draftMediaField, ticketMedia);
+			input.embeddedTicketMedia = true;
+			this._mediaPlayerCardPausers.get(mediaCard)?.();
+		}
 
 		const closeBtn = $<HTMLButtonElement>('button.component-toolbox-icon-btn', { type: 'button', title: 'Cancel (Escape)', 'aria-label': 'Cancel' },
 			$(`span${ThemeIcon.asCSSSelector(Codicon.close)}`)
@@ -1705,6 +1737,22 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		};
 		saveBtn.onclick = () => {
+			// The structure keeps its own default media; a file changed in the dialog goes into the ticket's value
+			const draftField = findDraftField(input.draftModule);
+			let changedTicketMedia: ITicketMediaValue | undefined;
+			if (ticketMedia && draftField) {
+				const dialogMedia = pickTicketMedia(draftField);
+				if (dialogMedia.mediaFilePath !== ticketMedia.mediaFilePath || dialogMedia.mediaFileName !== ticketMedia.mediaFileName) {
+					changedTicketMedia = dialogMedia;
+				}
+				for (const key of TICKET_MEDIA_KEYS) {
+					if (field[key] === undefined) {
+						delete draftField[key];
+					} else {
+						draftField[key] = field[key];
+					}
+				}
+			}
 			const edited = input.draftModule ? normalizeFreestyleSchema(input.draftModule) : undefined;
 			if (!edited) {
 				close();
@@ -1724,7 +1772,17 @@ export class EntityDetailEditor extends EditorPane {
 				rename = { oldLabel: label, newLabel };
 			}
 			close();
-			this._queueFreestyleStructureEdit(() => ({ next: edited, rename, revealFieldId: fieldId }));
+			this._queueFreestyleStructureEdit(async () => {
+				if (changedTicketMedia && mediaCard && this._entityUri?.toString() === ticketUri.toString()) {
+					// Stored under the current name; a rename of this edit then moves the value
+					mediaCard.setAttribute('data-media-path', changedTicketMedia.mediaFilePath);
+					mediaCard.setAttribute('data-media-name', changedTicketMedia.mediaFileName);
+					mediaCard.setAttribute('data-media-kind', changedTicketMedia.mediaKind);
+					mediaCard.setAttribute('data-media-mime', changedTicketMedia.mediaMimeType);
+					await this._saveMediaPlayerDataFromCard(mediaCard, mediaCard.getAttribute('data-field-key') || label);
+				}
+				return { next: edited, rename, revealFieldId: fieldId };
+			});
 		};
 
 		try {
@@ -1735,6 +1793,29 @@ export class EntityDetailEditor extends EditorPane {
 			close();
 			this._notificationService.error(`Failed to open the component configuration: ${err}`);
 		}
+	}
+
+	/** The rendered MP3 / MP4 Player card of the component named `label` (names compare like stored value keys). */
+	private _findMediaPlayerCard(label: string): HTMLElement | undefined {
+		const norm = (s: string) => s.toLowerCase().replace(/_/g, ' ').trim();
+		const target = norm(label);
+		const cards = Array.from((this._pageParts.mediaPlayerPrimitiveCards ?? [])) as HTMLElement[];
+		return cards.find(c => c.isConnected && norm(c.getAttribute('data-field-key') || '') === target);
+	}
+
+	/** The media currently loaded in a player card (the ticket's value, or the structure default it fell back to), with an absolute path. */
+	private _ticketMediaOfCard(card: HTMLElement): ITicketMediaValue {
+		let path = (card.getAttribute('data-media-path') || '').trim();
+		const isAbsolute = path.startsWith('file://') || path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path);
+		if (path && !isAbsolute && this._entityUri) {
+			path = URI.joinPath(this._entityUri, path).fsPath;
+		}
+		return {
+			mediaFilePath: path,
+			mediaFileName: card.getAttribute('data-media-name') || '',
+			mediaKind: card.getAttribute('data-media-kind') === 'video' ? 'video' : 'audio',
+			mediaMimeType: card.getAttribute('data-media-mime') || ''
+		};
 	}
 
 	private _closeComponentSettingsDialog(): void {
@@ -12333,6 +12414,10 @@ ${rawErr}
 			};
 
 			const getActiveEl = (): HTMLMediaElement => activeKind === 'video' ? videoEl : audioEl;
+			this._mediaPlayerCardPausers.set(card, () => {
+				audioEl.pause();
+				videoEl.pause();
+			});
 
 			const fmtSec = (sec: number): string => {
 				if (!Number.isFinite(sec) || sec < 0) { return '0:00'; }
