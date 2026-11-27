@@ -15,6 +15,7 @@ import { dirname } from '../../../../base/common/resources.js';
 import { FREESTYLE_TYPE_DEFINITION, FREESTYLE_TYPE_PROMPT } from '../../customModules/common/freestyleTicket.js';
 import { SUB_WORKFLOW_TYPE_DEFINITION, SUB_WORKFLOW_TYPE_PROMPT } from '../../customModules/common/subWorkflowType.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
+import { normalizeTicketLabels } from '../../workspacesExplorer/common/ticketLabels.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
 export const SYSTEM_CONFIG_DIR_NAME = '.agents';
@@ -350,6 +351,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			mainMdContent += `- **Ticket Statuses**: ${statusesVal}\n`;
 			mainMdContent += `- **Status Mapping**: ${mappingVal}\n`;
 			mainMdContent += `- **Removed Status**: ${removedVal}\n`;
+			if (snapshot.customMetadata && snapshot.customMetadata['Ticket Labels']) {
+				mainMdContent += `- **Ticket Labels**: ${snapshot.customMetadata['Ticket Labels']}\n`;
+			}
 		}
 		mainMdContent += `- **Last Updated At**: ${dateTimeFormatted}\n`;
 		mainMdContent += `- **Last Updated By**: User\n\n`;
@@ -377,6 +381,10 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Current AI Agent**: ${snapshot.assignedAgentName || 'None'}\n`;
 		mainMdContent += `- **Status**: ${statusStr}\n`;
 		mainMdContent += `- **Priority**: ${snapshot.priority || 'Medium'}\n`;
+		const labelNames = normalizeTicketLabels(snapshot.labels || []);
+		if (labelNames.length > 0) {
+			mainMdContent += `- **Labels**: ${labelNames.join(', ')}\n`;
+		}
 		mainMdContent += `- **Parent Path**: ${parentRelPath}\n`;
 		mainMdContent += `- **Ego MDs Paths**:\n`;
 		mainMdContent += `  - [instruction.md](${instructionRel})\n`;

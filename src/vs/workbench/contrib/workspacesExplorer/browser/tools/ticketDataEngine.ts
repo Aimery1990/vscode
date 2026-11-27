@@ -18,6 +18,8 @@ import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
 import { IPathService } from '../../../../services/path/common/pathService.js';
+import { coerceTicketLabelsInput, hasTicketLabel, isDefinedLabel, ITicketLabelDefinition } from '../../common/ticketLabels.js';
+import { readTicketLabels, setTicketLabelsLine } from '../../common/workspaceLifecycle.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { expandHomePath, getAnyAgentGlobalFolders, getRetiredGlobalWorkspaceCode, getRetiredGlobalWorkspaceMessage } from '../../../customModules/common/anyagentGlobalPaths.js';
 
@@ -31,6 +33,7 @@ interface IParsedTicketMd {
 	attachments: string[];
 	status?: string;
 	priority?: string;
+	labels: string[];
 	currentAiAgent?: string;
 	parentPath?: string;
 	linkTo?: string;
@@ -70,6 +73,8 @@ export interface ICreateTicketToolOptions {
 	description?: string;
 	status?: string;
 	priority?: string;
+	/** Label names (workspace labels; unknown names are kept and shown neutral). */
+	labels?: string[];
 	ticket_prompt?: string;
 	assigned_agent?: string;
 	link_to?: string;
@@ -92,7 +97,9 @@ export interface IUpdateTicketToolOptions {
 	workspace_id: string;
 	ticket_id: string;
 	parent_path?: string;
-	updates: Record<string, unknown>;
+	updates?: Record<string, unknown>;
+	/** Replaces the ticket's labels (array of label names; [] clears them). */
+	labels?: string[];
 	worklog_record: IWorklogRecord;
 }
 
@@ -108,6 +115,8 @@ export interface IQueryWorkspaceTreeToolOptions {
 	workspace_id: string;
 	parent_ticket_id?: string;
 	query?: string;
+	/** Only tickets carrying this label (case-insensitive). */
+	label?: string;
 	max_depth?: number;
 }
 
@@ -635,6 +644,7 @@ export class TicketDataEngine {
 		ticket_type: string;
 		status: string;
 		priority: string;
+		labels: string[];
 		created_at?: string;
 		parent_path: string;
 		relative_path: string;
@@ -646,6 +656,7 @@ export class TicketDataEngine {
 			ticket_type: string;
 			status: string;
 			priority: string;
+			labels: string[];
 			created_at?: string;
 			parent_path: string;
 			relative_path: string;
@@ -682,6 +693,7 @@ export class TicketDataEngine {
 						ticket_type: childPaths.ticketType,
 						status: childParsedTicket.status || 'Todo',
 						priority: childParsedTicket.priority || 'Medium',
+						labels: childParsedTicket.labels,
 						created_at: childParsedTicket.profileData?.['Created At'] || '',
 						parent_path: parentPathStr,
 						relative_path: child.name,
@@ -869,6 +881,16 @@ export class TicketDataEngine {
 
 		const allTickets = await this._collectAllWorkspaceTickets(baseUri);
 		let matches = allTickets;
+		const labelFilter = (options.label || '').trim();
+		const labelsByTicket = new Map<string, string[]>();
+		if (labelFilter) {
+			const withLabels = await Promise.all(matches.map(async t => {
+				const labels = readTicketLabels(await this._safeRead(t.paths.ticketMdUri));
+				labelsByTicket.set(t.paths.ticketMdUri.toString(), labels);
+				return { t, ok: hasTicketLabel(labels, labelFilter) };
+			}));
+			matches = withLabels.filter(x => x.ok).map(x => x.t);
+		}
 		if (query) {
 			matches = allTickets.filter(t =>
 				t.ticketId.toLowerCase().includes(query) ||
@@ -883,11 +905,13 @@ export class TicketDataEngine {
 		return {
 			workspace_id: options.workspace_id,
 			base_ticket_or_folder: targetParentId || '/',
+			...(labelFilter ? { label_filter: labelFilter } : {}),
 			total_matching: matches.length,
 			matching_tickets: matches.slice(0, 30).map(t => ({
 				ticket_id: t.ticketId,
 				ticket_type: t.ticketType,
 				title: t.title,
+				...(labelFilter ? { labels: labelsByTicket.get(t.paths.ticketMdUri.toString()) || [] } : {}),
 				folder_path: t.paths.folderUri.fsPath
 			})),
 			tree_view: treeView
@@ -959,6 +983,7 @@ export class TicketDataEngine {
 			description: parsedReadme.description || '',
 			status: parsedTicket.status || 'Todo',
 			priority: parsedTicket.priority || 'Medium',
+			labels: parsedTicket.labels,
 			current_ai_agent: parsedTicket.currentAiAgent || 'None',
 			parent_path: parsedTicket.parentPath || '/',
 			children: discoveredChildren,
@@ -979,6 +1004,7 @@ export class TicketDataEngine {
 				initial_status: wsStatuses.initialStatus,
 				removed_status: wsStatuses.removedStatus
 			},
+			workspace_labels: (wsStatuses.labels || []).map(l => ({ name: l.name, color: l.color })),
 			schema_definition: schemaDefinition
 		};
 		return fullData;
@@ -1016,6 +1042,7 @@ export class TicketDataEngine {
 		// 3. Workspace statuses
 		const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(wsUri);
 		const initialStatus = options.status || wsStatuses.initialStatus || 'Todo';
+		const labels = coerceTicketLabelsInput(options.labels);
 
 		// 4. Create resource (a sub_workflow ticket must be inside a workflow folder; its definition is validated there)
 		const isSubWorkflow = isSubWorkflowTicketType(options.ticket_type);
@@ -1028,6 +1055,7 @@ export class TicketDataEngine {
 			description: options.description || '',
 			status: initialStatus,
 			priority: options.priority || 'Medium',
+			labels,
 			assignedAgentName: options.assigned_agent || 'None',
 			linkTo: options.link_to || 'None',
 			ticketPrompt: options.ticket_prompt,
@@ -1055,8 +1083,20 @@ export class TicketDataEngine {
 			ticket_code: code,
 			folder_path: result.uri.fsPath,
 			title: options.title,
-			status: initialStatus
+			status: initialStatus,
+			labels,
+			...this._undefinedLabelsWarning(labels, wsStatuses.labels)
 		};
+	}
+
+	/** A note for labels the workspace does not define (they are still stored and shown with a neutral color). */
+	private _undefinedLabelsWarning(labels: readonly string[], defs: readonly ITicketLabelDefinition[] | undefined): { label_warning?: string } {
+		const unknown = labels.filter(l => !isDefinedLabel(defs, l));
+		if (unknown.length === 0) {
+			return {};
+		}
+		const known = (defs || []).map(d => d.name);
+		return { label_warning: `Label(s) not defined in the workspace (stored anyway, shown in a neutral color): ${unknown.join(', ')}. Workspace labels: ${known.length > 0 ? known.join(', ') : 'none defined'}.` };
 	}
 
 	/**
@@ -1203,8 +1243,26 @@ export class TicketDataEngine {
 		let readmeModified = false;
 		let instructionModified = false;
 		let schemaFields: ICustomField[] | undefined = undefined;
+		const updates: Record<string, unknown> = { ...(options.updates || {}) };
+		let newLabels: string[] | undefined;
+		for (const labelsPath of ['/Labels', 'Labels', '/Attributes/Labels']) {
+			if (Object.keys(updates).includes(labelsPath)) {
+				newLabels = coerceTicketLabelsInput(updates[labelsPath]);
+				delete updates[labelsPath];
+			}
+		}
+		if (options.labels !== undefined) {
+			newLabels = coerceTicketLabelsInput(options.labels);
+		}
+		if (Object.keys(updates).length === 0 && newLabels === undefined) {
+			throw new Error('Nothing to update: pass `updates` (path -> value) and / or `labels`.');
+		}
+		if (newLabels !== undefined) {
+			ticketContent = setTicketLabelsLine(ticketContent, newLabels);
+			ticketModified = true;
+		}
 
-		for (const [rawPath, rawVal] of Object.entries(options.updates)) {
+		for (const [rawPath, rawVal] of Object.entries(updates)) {
 			const path = rawPath.trim();
 
 			// 1. Title
@@ -1295,7 +1353,7 @@ export class TicketDataEngine {
 
 		// 8. Auto-sync physical attachment files if any attachment fields or file objects were updated
 		const filesToSync: string[] = [];
-		for (const [k, v] of Object.entries(options.updates)) {
+		for (const [k, v] of Object.entries(updates)) {
 			if (k.toLowerCase().includes('attachment') || Array.isArray(v) || (typeof v === 'object' && v && hasKey(v, { name: true }))) {
 				const items = Array.isArray(v) ? v : [v];
 				for (const item of items) {
@@ -1368,7 +1426,7 @@ export class TicketDataEngine {
 					if (!snapObj.customMetadata || typeof snapObj.customMetadata !== 'object') {
 						snapObj.customMetadata = {};
 					}
-					for (const [rawPath, rawVal] of Object.entries(options.updates)) {
+					for (const [rawPath, rawVal] of Object.entries(updates)) {
 						const p = rawPath.trim();
 						if (p === '/Title' || p === 'Title' || p === '/README/Title') {
 							if (rawVal) { snapObj.title = String(rawVal); snapModified = true; }
@@ -1408,7 +1466,8 @@ export class TicketDataEngine {
 				instructionModified ? 'instruction.md' : null,
 				'worklog.md'
 			].filter(Boolean),
-			applied_updates: options.updates,
+			applied_updates: updates,
+			...(newLabels !== undefined ? { labels: newLabels, ...this._undefinedLabelsWarning(newLabels, (await this.workspacesExplorerService.getWorkspaceStatuses(paths.folderUri)).labels) } : {}),
 			...(missingAttachments.length > 0 ? {
 				missing_attachments: missingAttachments,
 				warning: `Attachment file(s) not found in the ticket's attachments/ folder and NOT linked: ${missingAttachments.join(', ')}. Ask the user to add the file(s) to the ticket (e.g. by uploading them in the ticket view); do not guess other locations.`
@@ -1538,7 +1597,8 @@ export class TicketDataEngine {
 		const result: IParsedTicketMd = {
 			profileData: {},
 			selfDefinedData: {},
-			attachments: []
+			attachments: [],
+			labels: readTicketLabels(content)
 		};
 		const lines = content.split(/\r?\n/);
 		let currentSection = 'overview';
@@ -1556,6 +1616,9 @@ export class TicketDataEngine {
 			if (match) {
 				const k = match[1].trim();
 				const v = match[2].trim();
+				if (k === 'Labels' && !/^\s/.test(line)) {
+					continue;
+				}
 				if (currentSection === 'profile') {
 					result.profileData[k] = v;
 				} else if (currentSection === 'self_defined') {

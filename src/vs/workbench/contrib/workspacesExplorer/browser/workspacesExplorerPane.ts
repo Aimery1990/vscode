@@ -29,7 +29,7 @@ import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, CanonicalStatusCategory } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentCredential, IAgentItem, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
@@ -53,6 +53,9 @@ import { MASKED_SECRET, maskBrowserCredentials } from '../../customModules/commo
 import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
+import { createDefaultCategoryMap } from '../common/workspaceLifecycle.js';
+import { getLabelColor } from '../common/ticketLabels.js';
+import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
@@ -1221,6 +1224,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 			return;
 		}
 
+		const wsLifecycle = await this.workspacesExplorerService.getWorkspaceStatuses(folderUri);
+		if (this.renderVersion !== currentVersion || !this.containerEl) {
+			return;
+		}
+
 		for (const child of children) {
 			const canonicalChildId = this.getCanonicalId(child.id);
 			const isDirectory = child.type !== 'file';
@@ -1634,6 +1642,22 @@ export class MainWorkspaceViewPane extends ViewPane {
 				? `${childDisplayText} [${childTicketId} · ${badgeText}] (${child.uri.fsPath})`
 				: `${childDisplayText} (${child.uri.fsPath})`;
 
+			// Ticket labels (UI-13): small colored chips after the title; the title keeps priority when space is short
+			const childLabels = isTicketEntity ? (child.labels || []) : [];
+			if (childLabels.length > 0) {
+				childTitleSpan.style.flex = '0 1 auto';
+				const labelsEl = append(childLeft, $('span.ticket-label-chips', {
+					style: 'display: inline-flex; align-items: center; gap: 3px; flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;'
+				}));
+				labelsEl.title = `Labels: ${childLabels.join(', ')}`;
+				for (const label of childLabels) {
+					const color = getLabelColor(wsLifecycle.labels, label);
+					append(labelsEl, $('span', {
+						style: `flex-shrink: 1; min-width: 14px; max-width: 72px; overflow: hidden; text-overflow: ellipsis; font-size: 8.5px; line-height: 12px; padding: 0 4px; border-radius: 6px; color: ${color}; background: ${hexToRgba(color, 0.16)}; border: 1px solid ${hexToRgba(color, 0.4)};`
+					}, label));
+				}
+			}
+
 			// Right-Aligned Badges & Actions Group
 			const childRight = append(childRow, $('.child-right'));
 			childRight.style.display = 'flex';
@@ -1670,7 +1694,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			childRow.setAttribute(
 				'data-visual-sig',
-				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}`
+				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}`
 			);
 
 			// Single Click / Cmd+Click (multi-select) / Shift+Click (range-select)
@@ -2067,173 +2091,23 @@ export class MainWorkspaceViewPane extends ViewPane {
 			toggleAccordion();
 		};
 
-		// Presets Row
-		const presetsRow = append(statusBody, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
-		append(presetsRow, $('span', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, 'Preset:'));
-
-		type CategoryMap = { [cat in CanonicalStatusCategory]: string[] };
-
-		const defaultPresets: { [name: string]: CategoryMap } = {
-			'Default': {
-				'Todo': ['Todo'],
-				'In Progress': ['In Progress'],
-				'Done': ['Done'],
-				'Blocked': ['Blocked'],
-				'Removed': ['Removed']
-			},
-			'Agile / Scrum': {
-				'Todo': ['Backlog', 'Ready'],
-				'In Progress': ['Developing', 'Testing', 'Reviewing', 'Deploying'],
-				'Done': ['Done', 'Released'],
-				'Blocked': ['Blocked', 'On Hold'],
-				'Removed': ['Canceled']
-			},
-			'Kanban': {
-				'Todo': ['To Do'],
-				'In Progress': ['Doing'],
-				'Done': ['Done'],
-				'Blocked': ['Blocked'],
-				'Removed': ['Archived']
+		const statusMatrix = renderStatusLifecycleMatrix(statusBody, createDefaultCategoryMap(), {
+			onChange: () => {
+				summarySpan.innerText = `(${summarizeCategoryMap(statusMatrix.getCategoryMap())})`;
 			}
-		};
-
-		let currentCategoryMap: CategoryMap = {
-			'Todo': ['Todo'],
-			'In Progress': ['In Progress'],
-			'Done': ['Done'],
-			'Blocked': ['Blocked'],
-			'Removed': ['Removed']
-		};
-
-		const categoryColors: { [cat in CanonicalStatusCategory]: { text: string; bg: string; border: string } } = {
-			'Todo': { text: '#818cf8', bg: 'rgba(129, 140, 248, 0.16)', border: 'rgba(129, 140, 248, 0.3)' },
-			'In Progress': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.3)' },
-			'Done': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.3)' },
-			'Blocked': { text: '#f87171', bg: 'rgba(248, 113, 113, 0.16)', border: 'rgba(248, 113, 113, 0.3)' },
-			'Removed': { text: '#94a3b8', bg: 'rgba(148, 163, 184, 0.16)', border: 'rgba(148, 163, 184, 0.3)' }
-		};
-
-		const categoriesList: CanonicalStatusCategory[] = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
-
-		const updateSummaryText = () => {
-			const allSt: string[] = [];
-			for (const cat of categoriesList) {
-				allSt.push(...currentCategoryMap[cat]);
-			}
-			summarySpan.innerText = `(${allSt.join(', ')})`;
-		};
-
-		const matrixContainer = append(statusBody, $('.category-matrix-container', {
-			style: 'display: flex; flex-direction: column; gap: 5px;'
-		}));
-
-		const renderMatrix = () => {
-			clearNode(matrixContainer);
-			for (const cat of categoriesList) {
-				const color = categoryColors[cat];
-				const catRow = append(matrixContainer, $('.category-row', {
-					style: `background: rgba(0,0,0,0.18); border: 1px solid ${color.border}; border-radius: 5px; padding: 4px 8px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px;`
-				}));
-
-				// Left group: Category badge + chips
-				const leftGroup = append(catRow, $('div', {
-					style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0;'
-				}));
-
-				// Category Badge
-				append(leftGroup, $('span', {
-					style: `font-size: 9px; font-weight: 700; color: ${color.text}; background: ${color.bg}; border: 1px solid ${color.border}; padding: 1.5px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0; min-width: 72px; text-align: center;`
-				}, cat));
-
-				// Chips
-				for (let idx = 0; idx < currentCategoryMap[cat].length; idx++) {
-					const stName = currentCategoryMap[cat][idx];
-					const chip = append(leftGroup, $('.status-chip', {
-						style: `display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); padding: 1.5px 6px; border-radius: 3px; font-size: 10px; color: ${color.text}; font-weight: 500;`
-					}));
-					append(chip, $('span', {}, stName));
-					if (currentCategoryMap[cat].length > 1 || cat !== 'Removed') {
-						const removeChipBtn = append(chip, $('span', {
-							style: 'cursor: pointer; opacity: 0.55; font-size: 9px; margin-left: 2px; line-height: 1;',
-							title: 'Remove status'
-						}, '\u2715'));
-						removeChipBtn.onclick = () => {
-							currentCategoryMap[cat].splice(idx, 1);
-							renderMatrix();
-							updateSummaryText();
-						};
-					}
-				}
-
-				// Right aligned Inline Add Status Input Form
-				const addForm = append(catRow, $('div', {
-					style: 'display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; margin-left: auto;'
-				}));
-				const addInput = append(addForm, $('input.monaco-inputbox', {
-					placeholder: `+ Add status...`,
-					style: 'padding: 1.5px 5px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; width: 105px; height: 20px; box-sizing: border-box;'
-				})) as HTMLInputElement;
-
-				const doAdd = () => {
-					const val = addInput.value.trim();
-					if (val && !currentCategoryMap[cat].includes(val)) {
-						currentCategoryMap[cat].push(val);
-						renderMatrix();
-						updateSummaryText();
-					}
-				};
-
-				addInput.onkeydown = (e) => {
-					if (e.key === 'Enter') {
-						e.preventDefault();
-						doAdd();
-					}
-				};
-
-				const addBtn = append(addForm, $('button.monaco-button', {
-					style: 'padding: 1px 5px; font-size: 9.5px; border-radius: 3px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit; height: 20px; line-height: 16px;'
-				}));
-				addBtn.innerText = 'Add';
-				addBtn.onclick = (e) => {
-					e.preventDefault();
-					doAdd();
-				};
-			}
-		};
-
-		renderMatrix();
-
-		for (const [pName, pMap] of Object.entries(defaultPresets)) {
-			const prBtn = append(presetsRow, $('button.monaco-button', {
-				style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: inherit;'
-			}));
-			prBtn.innerText = pName;
-			prBtn.onclick = (e) => {
-				e.preventDefault();
-				currentCategoryMap = JSON.parse(JSON.stringify(pMap));
-				renderMatrix();
-				updateSummaryText();
-			};
-		}
+		});
 
 		const getCustomStatusesConfig = () => {
-			const customStatuses: string[] = [];
-			const statusMapping: { [st: string]: CanonicalStatusCategory } = {};
-
-			for (const cat of categoriesList) {
-				for (const st of currentCategoryMap[cat]) {
-					if (!customStatuses.includes(st)) {
-						customStatuses.push(st);
-					}
-					statusMapping[st] = cat;
-				}
-			}
-
-			const initialStatus = currentCategoryMap['Todo'][0] || customStatuses[0] || 'Todo';
-			const removedStatus = currentCategoryMap['Removed'][0] || 'Removed';
-
-			return { customStatuses, statusMapping, initialStatus, removedStatus };
+			const config = statusMatrix.getConfig();
+			return { customStatuses: config.statuses, statusMapping: config.mapping, initialStatus: config.initialStatus, removedStatus: config.removedStatus };
 		};
+
+		// Ticket Labels (UI-13): the labels tickets of this workspace can carry
+		const labelsCard = append(modalBody, $('.form-group', {
+			style: 'background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px;'
+		}));
+		append(labelsCard, $('label', { style: 'font-size: 11.5px; opacity: 0.85; font-weight: 500; color: inherit;' }, 'Ticket Labels (optional):'));
+		const labelsEditor = renderLabelDefinitionsEditor(labelsCard, []);
 
 		// Priority Selection Box (5 Levels Flat Grid with Color Dots)
 		const priorityBox = append(modalBody, $('.form-group'));
@@ -2799,6 +2673,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					customStatuses: statusConfig.customStatuses,
 					statusMapping: statusConfig.statusMapping,
 					removedStatus: statusConfig.removedStatus,
+					labelDefinitions: labelsEditor.getLabels(),
 					priority: selectedPriority,
 					assignedAgentId: assignedAgentId,
 					assignedAgentName: matchingAgent ? matchingAgent.name : undefined,

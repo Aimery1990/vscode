@@ -1168,6 +1168,8 @@ export interface IBaseEntitySnapshot {
 	description?: string;
 	status?: string;
 	priority?: string;
+	/** The ticket's labels (UI-13), written as `- **Labels**: a, b` when not empty. */
+	labels?: string[];
 	assignedAgentId?: string;
 	assignedAgentName?: string;
 	agentRulePrompt?: string;

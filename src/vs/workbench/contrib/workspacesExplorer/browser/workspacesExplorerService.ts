@@ -4,7 +4,9 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
+import { ITicketLabelDefinition, parseLabelDefinitions, renameTicketLabels, serializeLabelDefinitions, TICKET_LABELS_METADATA_KEY } from '../common/ticketLabels.js';
+import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, setTicketLabelsLine, setTicketStatusLine, STATUS_MAPPING_KEY, TICKET_STATUSES_KEY, upsertWorkspaceMetadata } from '../common/workspaceLifecycle.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -44,6 +46,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private readonly _childEntityMetaCache = new Map<string, {
 		type: ResourceType;
 		status?: string;
+		labels?: string[];
 		ticketId?: string;
 		title?: string;
 		timestamp: number;
@@ -589,6 +592,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (options.removedStatus) {
 			customMetadata['Removed Status'] = options.removedStatus;
 		}
+		if (options.labelDefinitions && options.labelDefinitions.length > 0) {
+			customMetadata[TICKET_LABELS_METADATA_KEY] = serializeLabelDefinitions(options.labelDefinitions);
+		}
 
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: targetBaseUri.toString(),
@@ -761,7 +767,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private async _readChildEntityMetadataFast(
 		childUri: URI,
 		fallbackName: string
-	): Promise<{ type: ResourceType; status?: string; ticketId?: string; title?: string }> {
+	): Promise<{ type: ResourceType; status?: string; labels?: string[]; ticketId?: string; title?: string }> {
 		const cacheKey = this.normalizeUriString(childUri);
 		const snap = this.getMetadataSnapshot(childUri);
 		const cached = this._childEntityMetaCache.get(cacheKey);
@@ -771,6 +777,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return {
 				type: cached.type !== 'folder' ? cached.type : (snap?.entityType || cached.type),
 				status: cached.status,
+				labels: cached.labels,
 				ticketId: resolvedId,
 				title: resolvedTitle
 			};
@@ -781,6 +788,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		let detectedType: ResourceType | undefined;
 		let detectedStatus: string | undefined;
+		let detectedLabels: string[] | undefined;
 		let ticketIdFromTicket = '';
 		let titleFromTicket = '';
 		let foundTicketFile = false;
@@ -802,6 +810,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				const statusMatch = text.match(/-\s+\*\*Status\*\*:\s*([^\r\n]+)/i);
 				if (statusMatch && statusMatch[1]) {
 					detectedStatus = statusMatch[1].trim();
+				}
+				const labels = readTicketLabels(text);
+				if (labels.length > 0) {
+					detectedLabels = labels;
 				}
 
 				const idMatch = text.match(/-\s+\*\*(?:Ticket|Entity)\s+ID\*\*:\s*([^\r\n]+)/i);
@@ -905,6 +917,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const entry = {
 			type: finalType,
 			status: detectedStatus,
+			labels: detectedLabels,
 			ticketId: resolvedTicketId,
 			title: resolvedTitle || undefined,
 			timestamp: Date.now()
@@ -991,6 +1004,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						ticketId: meta.ticketId,
 						title: meta.title,
 						status: childStatus,
+						labels: meta.labels,
 						uri: childUri
 					};
 				}));
@@ -1055,7 +1069,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return 'Todo';
 		};
 
-		const buildInfo = (statuses: string[], mapping: { [key: string]: CanonicalStatusCategory }, removedStatus?: string): IWorkspaceStatusesInfo => {
+		const buildInfo = (statuses: string[], mapping: { [key: string]: CanonicalStatusCategory }, removedStatus?: string, labels: readonly ITicketLabelDefinition[] = []): IWorkspaceStatusesInfo => {
 			const safeStatuses = statuses.length > 0 ? statuses : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
 			const safeMapping: { [key: string]: CanonicalStatusCategory } = { ...mapping };
 			for (const st of safeStatuses) {
@@ -1076,6 +1090,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				mapping: safeMapping,
 				removedStatus: rem || 'Removed',
 				initialStatus: initial,
+				labels,
 				getCategory: (statusName?: string): CanonicalStatusCategory => {
 					if (!statusName) { return 'Todo'; }
 					if (safeMapping[statusName]) { return safeMapping[statusName]; }
@@ -1086,6 +1101,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			};
 		};
 
+		let fallbackLabels: ITicketLabelDefinition[] = [];
 		try {
 			const workspaces = await this.getWorkspaces();
 			const targetPath = targetUri.path.toLowerCase();
@@ -1109,6 +1125,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						const statusesMatch = content.match(/-\s+\*\*Ticket\s+Statuses\*\*:\s*([^\r\n]+)/i);
 						const mappingMatch = content.match(/-\s+\*\*Status\s+Mapping\*\*:\s*([^\r\n]+)/i);
 						const removedMatch = content.match(/-\s+\*\*Removed\s+Status\*\*:\s*([^\r\n]+)/i);
+						const labelsMatch = content.match(/-\s+\*\*Ticket\s+Labels\*\*:\s*([^\r\n]+)/i);
+						const parsedLabels = parseLabelDefinitions(labelsMatch?.[1]);
+						fallbackLabels = parsedLabels;
 
 						let parsedStatuses: string[] = [];
 						if (statusesMatch && statusesMatch[1]) {
@@ -1128,7 +1147,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 							if (parsedStatuses.length === 0) {
 								parsedStatuses = Object.keys(parsedMapping);
 							}
-							const info = buildInfo(parsedStatuses, parsedMapping, removedMatch?.[1]?.trim());
+							const info = buildInfo(parsedStatuses, parsedMapping, removedMatch?.[1]?.trim(), parsedLabels);
 							const entry = { info, timestamp: Date.now() };
 							this._workspaceStatusesCache.set(wsCacheKey, entry);
 							this._workspaceStatusesCache.set(cacheKey, entry);
@@ -1153,7 +1172,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				'Blocked': 'Blocked',
 				'Removed': 'Removed'
 			},
-			'Removed'
+			'Removed',
+			fallbackLabels
 		);
 		this._workspaceStatusesCache.set(cacheKey, { info: fallbackInfo, timestamp: Date.now() });
 		return fallbackInfo;
@@ -1203,6 +1223,133 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}
 		this._onDidChangeWorkspaces.fire();
+	}
+
+	private async _resolveTicketMdUri(entityUri: URI): Promise<URI | undefined> {
+		const ticketUri = URI.joinPath(entityUri, '.agents', 'ticket.md');
+		if (await this.fileService.exists(ticketUri)) {
+			return ticketUri;
+		}
+		const rootTicketUri = URI.joinPath(entityUri, 'ticket.md');
+		if (await this.fileService.exists(rootTicketUri)) {
+			return rootTicketUri;
+		}
+		return undefined;
+	}
+
+	public async setEntityLabels(entityUri: URI, labels: string[]): Promise<void> {
+		const ticketUri = await this._resolveTicketMdUri(entityUri);
+		if (!ticketUri) {
+			throw new Error(`No ticket.md found in '${entityUri.fsPath}'.`);
+		}
+		const text = (await this.fileService.readFile(ticketUri)).value.toString();
+		const updated = setTicketLabelsLine(text, labels);
+		if (updated !== text) {
+			await this.fileService.writeFile(ticketUri, VSBuffer.fromString(updated));
+		}
+		this._invalidateCacheForUri(entityUri);
+		this._onDidChangeWorkspaces.fire();
+	}
+
+	/** The ticket.md files of the workspace: its root ticket and every ticket folder below it (dot folders skipped). */
+	private async _collectWorkspaceTicketFiles(workspaceRootUri: URI): Promise<{ folderUri: URI; ticketUri: URI }[]> {
+		const result: { folderUri: URI; ticketUri: URI }[] = [];
+		const visited = new Set<string>();
+		const visit = async (folderUri: URI, depth: number): Promise<void> => {
+			const key = this.normalizeUriString(folderUri);
+			if (depth > 12 || visited.has(key)) {
+				return;
+			}
+			visited.add(key);
+			const ticketUri = await this._resolveTicketMdUri(folderUri);
+			if (ticketUri) {
+				result.push({ folderUri, ticketUri });
+			}
+			let children;
+			try {
+				children = (await this.fileService.resolve(folderUri)).children;
+			} catch {
+				return;
+			}
+			for (const child of children || []) {
+				if (child.isDirectory && !child.name.startsWith('.') && !child.name.startsWith('~') && child.name !== 'node_modules' && child.name !== 'attachments') {
+					await visit(child.resource, depth + 1);
+				}
+			}
+		};
+		await visit(workspaceRootUri, 0);
+		return result;
+	}
+
+	public async getWorkspaceStatusUsage(targetUri: URI): Promise<{ [status: string]: number }> {
+		const rootUri = await this.findWorkspaceRootUri(targetUri);
+		const usage: { [status: string]: number } = {};
+		for (const { ticketUri } of await this._collectWorkspaceTicketFiles(rootUri)) {
+			try {
+				const status = readTicketStatus((await this.fileService.readFile(ticketUri)).value.toString());
+				if (status) {
+					usage[status] = (usage[status] || 0) + 1;
+				}
+			} catch {
+				// unreadable ticket: not counted
+			}
+		}
+		return usage;
+	}
+
+	public async updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate): Promise<{ migratedTickets: number }> {
+		const rootUri = await this.findWorkspaceRootUri(workspaceUri);
+		const rootTicketUri = await this._resolveTicketMdUri(rootUri);
+		if (!rootTicketUri) {
+			throw new Error(`The workspace '${rootUri.fsPath}' has no ticket.md.`);
+		}
+
+		let text = (await this.fileService.readFile(rootTicketUri)).value.toString();
+		if (update.statuses && update.statuses.length > 0) {
+			text = upsertWorkspaceMetadata(text, TICKET_STATUSES_KEY, update.statuses.join(', '));
+		}
+		if (update.mapping && Object.keys(update.mapping).length > 0) {
+			text = upsertWorkspaceMetadata(text, STATUS_MAPPING_KEY, JSON.stringify(update.mapping));
+		}
+		if (update.removedStatus) {
+			text = upsertWorkspaceMetadata(text, REMOVED_STATUS_KEY, update.removedStatus);
+		}
+		if (update.labels) {
+			text = upsertWorkspaceMetadata(text, TICKET_LABELS_METADATA_KEY, serializeLabelDefinitions(update.labels));
+		}
+		await this.fileService.writeFile(rootTicketUri, VSBuffer.fromString(text));
+
+		let migratedTickets = 0;
+		const statusMigration = update.statusMigration || {};
+		const labelRenames = update.labelRenames || {};
+		if (Object.keys(statusMigration).length > 0 || Object.keys(labelRenames).length > 0) {
+			for (const { folderUri, ticketUri } of await this._collectWorkspaceTicketFiles(rootUri)) {
+				try {
+					const original = (await this.fileService.readFile(ticketUri)).value.toString();
+					let next = original;
+					const newStatus = migrateStatus(readTicketStatus(next), statusMigration);
+					if (newStatus) {
+						next = setTicketStatusLine(next, newStatus) ?? next;
+					}
+					const renamedLabels = renameTicketLabels(readTicketLabels(next), labelRenames);
+					if (renamedLabels) {
+						next = setTicketLabelsLine(next, renamedLabels);
+					}
+					if (next !== original) {
+						await this.fileService.writeFile(ticketUri, VSBuffer.fromString(next));
+						this._invalidateCacheForUri(folderUri);
+						migratedTickets++;
+					}
+				} catch (err) {
+					console.error('Failed to migrate ticket status / labels:', err);
+				}
+			}
+		}
+
+		this._workspaceStatusesCache.clear();
+		this._childEntityMetaCache.clear();
+		this._onDidChangeWorkspaces.fire();
+		return { migratedTickets };
 	}
 
 	public async detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType> {
@@ -1634,6 +1781,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityCode: activeCode,
 			status: options.status || 'Todo',
 			priority: options.priority || 'Medium',
+			labels: options.labels,
 			assignedAgentId: options.assignedAgentId,
 			assignedAgentName: options.assignedAgentName,
 			agentRulePrompt: options.agentRulePrompt,

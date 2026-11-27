@@ -5,6 +5,7 @@
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
+import { ITicketLabelDefinition } from './ticketLabels.js';
 
 export const WORKSPACES_EXPLORER_VIEWLET_ID = 'workbench.view.workspacesExplorer';
 export const WORKSPACE_PANE_VIEW_ID = 'workbench.workspacesExplorer.mainPane';
@@ -35,6 +36,8 @@ export interface IWorkspaceChildItem {
 	ticketId?: string;
 	title?: string;
 	status?: string;
+	/** The ticket's labels (`- **Labels**:` in its ticket.md). */
+	labels?: string[];
 	isMissing?: boolean;
 	missingReason?: string;
 	hasDamagedDescendant?: boolean;
@@ -75,6 +78,10 @@ export interface ICreateResourceOptions {
 	customStatuses?: string[];
 	statusMapping?: { [statusName: string]: CanonicalStatusCategory };
 	removedStatus?: string;
+	/** Workspace creation: the workspace's label definitions (`Ticket Labels`). */
+	labelDefinitions?: ITicketLabelDefinition[];
+	/** Ticket creation: the ticket's labels (`Labels`). */
+	labels?: string[];
 	gitRepoUrl?: string;
 	gitBranch?: string;
 	/**
@@ -102,7 +109,21 @@ export interface IWorkspaceStatusesInfo {
 	mapping: { [statusName: string]: CanonicalStatusCategory };
 	removedStatus: string;
 	initialStatus: string;
+	/** The workspace's label definitions (`Ticket Labels` in the workspace ticket.md); empty when none. */
+	labels?: readonly ITicketLabelDefinition[];
 	getCategory(statusName?: string): CanonicalStatusCategory;
+}
+
+/** A change to a workspace's status lifecycle and / or label definitions (UI-13, UI-14). */
+export interface IWorkspaceLifecycleUpdate {
+	statuses?: string[];
+	mapping?: { [statusName: string]: CanonicalStatusCategory };
+	removedStatus?: string;
+	labels?: ITicketLabelDefinition[];
+	/** Ticket status changes (old -> new, case-insensitive) applied to every ticket of the workspace. */
+	statusMigration?: { [oldStatus: string]: string };
+	/** Label renames (old -> new, case-insensitive) applied to every ticket of the workspace. */
+	labelRenames?: { [oldLabel: string]: string };
 }
 
 export interface ICreateResourceResult {
@@ -175,6 +196,15 @@ export interface IWorkspacesExplorerService {
 	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
 	setEntityStatus(entityUri: URI, status: string): Promise<void>;
+	/** Writes a ticket's labels (`- **Labels**:` line of its ticket.md). */
+	setEntityLabels(entityUri: URI, labels: string[]): Promise<void>;
+	/** Number of tickets (including the workspace root ticket) per status in the workspace containing `targetUri`. */
+	getWorkspaceStatusUsage(targetUri: URI): Promise<{ [status: string]: number }>;
+	/**
+	 * Saves the lifecycle / labels in the workspace root ticket.md (Profile Data and Self Defined Data Value), applies
+	 * the status migration and label renames to the workspace's tickets, and refreshes caches and views.
+	 */
+	updateWorkspaceLifecycle(workspaceUri: URI, update: IWorkspaceLifecycleUpdate): Promise<{ migratedTickets: number }>;
 	getWorkspaceStatuses(targetUri: URI): Promise<IWorkspaceStatusesInfo>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;

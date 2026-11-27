@@ -57,7 +57,7 @@ export class GetTicketDataTool implements IToolImpl {
 			toolReferenceName: 'getTicketData',
 			displayName: localize('ticket.tool.get.displayName', "Get Ticket Data"),
 			userDescription: localize('ticket.tool.get.userDescription', "Get ticket field values and schema metadata"),
-			modelDescription: 'Retrieve actual values, field types, allowed scopes, and dynamically discovered direct children sub-tickets of a ticket. If field_path is omitted, returns the entire ticket values alongside its children list, complete YAML type schema definition, and workspace status mapping.',
+			modelDescription: 'Retrieve actual values, field types, allowed scopes, and dynamically discovered direct children sub-tickets of a ticket. If field_path is omitted, returns the entire ticket values (including its labels) alongside its children list, complete YAML type schema definition, workspace status mapping, and the workspace label definitions (workspace_labels).',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.search,
@@ -163,6 +163,11 @@ export class CreateTicketTool implements IToolImpl {
 						enum: ['Very High', 'High', 'Medium', 'Low', 'Very Low'],
 						default: 'Medium',
 						description: 'Priority level. Defaults to \'Medium\'.'
+					},
+					labels: {
+						type: 'array',
+						items: { type: 'string' },
+						description: 'Optional label names for the ticket (e.g. [\'bug\', \'urgent\']). Prefer the workspace labels (workspace_labels in getTicketData); other names are stored but shown in a neutral color. Names cannot contain commas.'
 					},
 					ticket_prompt: {
 						type: 'string',
@@ -354,7 +359,12 @@ export class UpdateTicketTool implements IToolImpl {
 					},
 					updates: {
 						type: 'object',
-						description: 'Path-to-value map. Set value to null to clear a field or delete a dynamic list card. Path rules:\n- Standard fields: \'/Title\': \'New Title\', \'/Status\': \'In Dev\', \'/Priority\': \'High\'\n- Instruction prompt: \'/Instructions/Ticket Prompt\': \'Specific rules...\'\n- Clear field: \'/Custom/expected_salary\': null\n- Dynamic list update item: \'/Custom/education/LU Edu/degree\': \'Master of Computer Science\'\n- Dynamic list delete card: \'/Custom/education/HNU Edu\': null\n- Dynamic list add new card: \'/Custom/education/add\': { \'key\': \'Stanford Edu\', \'school\': \'Stanford University\', \'degree\': \'PhD\', \'period\': \'2026-09 ~ 2030-06\' }'
+						description: 'Path-to-value map. Set value to null to clear a field or delete a dynamic list card. Path rules:\n- Standard fields: \'/Title\': \'New Title\', \'/Status\': \'In Dev\', \'/Priority\': \'High\', \'/Labels\': [\'bug\', \'urgent\']\n- Instruction prompt: \'/Instructions/Ticket Prompt\': \'Specific rules...\'\n- Clear field: \'/Custom/expected_salary\': null\n- Dynamic list update item: \'/Custom/education/LU Edu/degree\': \'Master of Computer Science\'\n- Dynamic list delete card: \'/Custom/education/HNU Edu\': null\n- Dynamic list add new card: \'/Custom/education/add\': { \'key\': \'Stanford Edu\', \'school\': \'Stanford University\', \'degree\': \'PhD\', \'period\': \'2026-09 ~ 2030-06\' }'
+					},
+					labels: {
+						type: 'array',
+						items: { type: 'string' },
+						description: 'Optional: replaces the ticket\'s labels with these label names ([] removes all labels). Prefer the workspace labels (workspace_labels in getTicketData); other names are stored but shown in a neutral color. Pass `updates` and / or `labels`.'
 					},
 					worklog_record: {
 						type: 'object',
@@ -379,7 +389,7 @@ export class UpdateTicketTool implements IToolImpl {
 						required: ['user_request', 'update_summary', 'update_details', 'update_conclusion']
 					}
 				},
-				required: ['workspace_id', 'ticket_id', 'updates', 'worklog_record']
+				required: ['workspace_id', 'ticket_id', 'worklog_record']
 			}
 		};
 	}
@@ -525,6 +535,10 @@ export class QueryWorkspaceTreeTool implements IToolImpl {
 					query: {
 						type: 'string',
 						description: 'Optional keyword to search across ticket IDs, titles, or types (e.g. \'demo\', \'job\', \'0001\').'
+					},
+					label: {
+						type: 'string',
+						description: 'Optional label name: only tickets carrying this label (case-insensitive) are returned in matching_tickets.'
 					},
 					max_depth: {
 						type: 'number',

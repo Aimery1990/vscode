@@ -33,6 +33,8 @@ import { dirname, basename } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
+import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
+import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -925,6 +927,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
 	private _lastParsedData: IParsedTicketData | undefined;
+	private _labelsPicker: HTMLElement | undefined;
 	private _lastCustomModule: ITicketTemplateModule | null | undefined;
 	private _workspaceStatuses: IWorkspaceStatusesInfo = {
 		statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
@@ -2613,7 +2616,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				delete parsed.customMetadata['outputSpecs'];
 				delete parsed.customMetadata['output_specs'];
-				const internalLifecycleKeys = ['ticket statuses', 'status mapping', 'removed status', 'git remote url', 'git branch'];
+				const internalLifecycleKeys = ['ticket statuses', 'status mapping', 'removed status', 'ticket labels', 'git remote url', 'git branch'];
 				for (const k of Object.keys(parsed.customMetadata)) {
 					if (internalLifecycleKeys.includes(k.toLowerCase())) { continue; }
 					if (!validKeys.has(k.toLowerCase()) && !validKeys.has(k.toLowerCase().replace(/_/g, ' '))) {
@@ -4965,6 +4968,133 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		}
 		return metadata;
+	}
+
+	/** Workspace page: icon button that opens the lifecycle & labels editor (UI-13 / UI-14). */
+	private _buildEditLifecycleButton(): HTMLButtonElement {
+		const btn = $<HTMLButtonElement>('button.edit-workspace-lifecycle-btn', { type: 'button', title: 'Edit Workspace Status Lifecycle & Labels', style: 'background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; padding: 0; font-size: 10px;' },
+			$('span' + ThemeIcon.asCSSSelector(Codicon.edit), { style: 'font-size: 10px; pointer-events: none;' })
+		);
+		btn.onclick = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._openWorkspaceLifecycleEditor();
+		};
+		return btn;
+	}
+
+	private async _openWorkspaceLifecycleEditor(): Promise<void> {
+		if (!this._entityUri) {
+			return;
+		}
+		const wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri);
+		await openWorkspaceLifecycleDialog({
+			workspacesExplorerService: this._workspacesExplorerService,
+			notificationService: this._notificationService,
+			workspaceUri: wsRoot,
+			workspaceName: basename(wsRoot),
+			onSaved: () => { this._resolvePathsAndLoadData(); }
+		});
+	}
+
+	/** Ticket page sidebar: the ticket's labels as colored chips and an icon button to add / remove labels (UI-13). */
+	private _buildLabelsSidebarRow(data: IParsedTicketData): HTMLElement {
+		const labels = parseTicketLabels(data.metadata?.[TICKET_LABELS_FIELD_KEY]);
+		const defs = this._workspaceStatuses?.labels || [];
+		const editBtn = $<HTMLButtonElement>('button.ticket-labels-edit-btn', { type: 'button', title: 'Add / remove labels', style: 'background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 4px;' },
+			$('span' + ThemeIcon.asCSSSelector(Codicon.tag), { style: 'font-size: 12px; pointer-events: none;' })
+		);
+		editBtn.onclick = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._showLabelsPicker(editBtn, labels);
+		};
+		const chips = labels.length === 0
+			? [$('span', { style: 'font-size: 0.82em; opacity: 0.45; font-style: italic;' }, 'No labels')]
+			: labels.map(label => {
+				const color = getLabelColor(defs, label);
+				return $('span', { title: isDefinedLabel(defs, label) ? label : `${label} (not defined in this workspace)`, style: `display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8em; font-weight: 600; padding: 1px 8px; border-radius: 10px; color: ${color}; background: ${color}22; border: 1px solid ${color}66;` }, label);
+			});
+		return $('div.sidebar-row', undefined,
+			$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+				$('span.sidebar-label', undefined, 'LABELS'),
+				editBtn
+			),
+			$('div', { style: 'display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 0;' }, ...chips)
+		);
+	}
+
+	private _showLabelsPicker(anchor: HTMLElement, current: string[]): void {
+		const doc = mainWindow.document;
+		this._labelsPicker?.remove();
+		const defs = this._workspaceStatuses?.labels || [];
+		let selected = [...current];
+		const rect = anchor.getBoundingClientRect();
+		const picker = this._labelsPicker = $('div.ticket-labels-picker', { style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${Math.max(8, Math.round(rect.right - 220))}px; width: 220px; max-height: 320px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); color: var(--vscode-editor-foreground); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.6); z-index: 10000; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px;` });
+		const close = () => {
+			doc.removeEventListener('mousedown', onOutside, true);
+			doc.removeEventListener('keydown', onKey, true);
+			picker.remove();
+		};
+		const onOutside = (e: MouseEvent) => {
+			if (!picker.contains(e.target as Node)) {
+				close();
+			}
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') {
+				e.stopPropagation();
+				close();
+			}
+		};
+		const save = async () => {
+			if (!this._entityUri) {
+				return;
+			}
+			try {
+				await this._workspacesExplorerService.setEntityLabels(this._entityUri, selected);
+				await this._resolvePathsAndLoadData();
+			} catch (err) {
+				this._notificationService.error(`Failed to save labels: ${(err as Error | undefined)?.message || err}`);
+			}
+		};
+		const names = [...defs.map(d => d.name), ...current.filter(l => !isDefinedLabel(defs, l))];
+		const render = () => {
+			clearNode(picker);
+			append(picker, $('div', { style: 'font-size: 10.5px; opacity: 0.6; padding: 2px 6px 4px; text-transform: uppercase; letter-spacing: 0.04em;' }, 'Labels'));
+			if (names.length === 0) {
+				append(picker, $('div', { style: 'font-size: 11px; opacity: 0.6; padding: 4px 6px; line-height: 1.4;' }, 'This workspace has no labels yet.'));
+			}
+			for (const name of names) {
+				const color = getLabelColor(defs, name);
+				const isOn = hasTicketLabel(selected, name);
+				const item = append(picker, $('div', { role: 'menuitemcheckbox', title: isDefinedLabel(defs, name) ? name : `${name} (not defined in this workspace)`, style: `display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer;${isOn ? ' background: rgba(255,255,255,0.06);' : ''}` },
+					$('span' + ThemeIcon.asCSSSelector(Codicon.check), { style: `font-size: 12px; width: 14px; visibility: ${isOn ? 'visible' : 'hidden'};` }),
+					$('span', { style: `width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: ${color};` }),
+					$('span', { style: 'flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, name)
+				));
+				item.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					selected = toggleTicketLabel(selected, name);
+					render();
+					await save();
+				};
+			}
+			const manage = append(picker, $('div', { title: 'Edit the workspace labels and status lifecycle', style: 'display: flex; align-items: center; gap: 7px; padding: 5px 6px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.08); cursor: pointer; opacity: 0.8;' },
+				$('span' + ThemeIcon.asCSSSelector(Codicon.settingsGear), { style: 'font-size: 12px; width: 14px;' }),
+				$('span', undefined, 'Manage workspace labels...')
+			));
+			manage.onclick = (e) => {
+				e.preventDefault();
+				close();
+				this._openWorkspaceLifecycleEditor();
+			};
+		};
+		render();
+		doc.body.appendChild(picker);
+		doc.addEventListener('mousedown', onOutside, true);
+		doc.addEventListener('keydown', onKey, true);
 	}
 
 	private _parseAllEntityData(
@@ -7637,7 +7767,7 @@ export class EntityDetailEditor extends EditorPane {
 		// 5. Custom Metadata
 		if (data.customMetadata) {
 			const customChildren: ITicketHierarchyNode[] = [];
-			const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
+			const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Ticket Labels', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
 			for (const [k, v] of Object.entries(data.customMetadata)) {
 				if (internalLifecycleKeys.includes(k)) {
 					continue;
@@ -19807,7 +19937,7 @@ ${interpolatedPrompt}`;
 		// 6. Custom Fields Section
 		const customFieldsContent: Node[] = [];
 
-		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
+		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Ticket Labels', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
 		const rawCustomMap = new Map<string, unknown>(Object.entries(data.customMetadata || {}));
 		for (const k of internalLifecycleKeys) {
 			rawCustomMap.delete(k);
@@ -22912,7 +23042,8 @@ ${interpolatedPrompt}`;
 										' ',
 										$.SVG('circle', { cx: '8', cy: '4.75', r: '0.75', fill: 'currentColor', stroke: 'none' })
 									)
-								))
+								)),
+								...(!this._isPreviewMode && (data.ticketType || '').toLowerCase() === 'workspace' ? [this._buildEditLifecycleButton()] : [])
 							),
 							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Status', 'data-ai-field-type': 'status', 'data-ai-field-label': 'Status', 'data-ai-current-value': textOf(status), 'data-ai-options': textOf(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses))), title: 'Edit Status with AI' },
 								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
@@ -23048,6 +23179,7 @@ ${interpolatedPrompt}`;
 							$('span.meta-view-val', { style: `font-size: 0.9em; font-weight: 700; color: ${pColor};` }, data.priority)
 						)
 					),
+					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildLabelsSidebarRow(data)] : []),
 					...(isAgent ? [
 						$('div.sidebar-row', undefined,
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
