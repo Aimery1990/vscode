@@ -1,0 +1,17 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Elements appended to <body> (overlays, popovers, menus, tooltips) get the workbench UI font. */
+body.anyagent-ui-font {
+	font-family: var(--vscode-font-family);
+}
+
+/*
+ * Form controls do not inherit the font by default. Inside the workbench, upstream already
+ * handles input/select; for everything outside of it (AnyAgent overlays) make them inherit.
+ * Zero specificity so any explicit font (e.g. monospace code inputs) still wins.
+ */
+:where(body.anyagent-ui-font > :not(.monaco-workbench)) :where(button, input, select) {
+	font-family: inherit;
+}

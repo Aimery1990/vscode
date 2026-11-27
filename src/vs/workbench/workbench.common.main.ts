@@ -239,6 +239,9 @@ import './contrib/chat/browser/chatSessions/chatSessions.contribution.js';
 import './contrib/chat/browser/contextContrib/chatContext.contribution.js';
 import './contrib/imageCarousel/browser/imageCarousel.contribution.js';
 
+// AnyAgent: workbench UI font for custom UI outside .monaco-workbench
+import './contrib/anyagentUiFont/browser/anyagentUiFont.contribution.js';
+
 // Centered Chat Popup Widget
 import './contrib/centeredChat/browser/centeredChat.contribution.js';
 import './contrib/agentGroups/browser/agentGroups.contribution.js';

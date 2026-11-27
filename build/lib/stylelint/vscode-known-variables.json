@@ -1090,6 +1090,7 @@
 		"--chat-send-button-anim-angle",
 		"--chat-setup-dialog-glow-angle",
 		"--vscode-chat-font-family",
+		"--vscode-font-family",
 		"--vscode-chat-font-size-body-l",
 		"--vscode-chat-font-size-body-m",
 		"--vscode-chat-font-size-body-s",

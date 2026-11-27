@@ -498,6 +498,7 @@ import './contrib/onboardingTours/browser/onboardingTours.contribution.js';
 // Account commands (`anyagent.signInOrLogIn` / `anyagent.accountPreferences`) used by the global composite bar
 import '../workbench/contrib/accountManagement/browser/accountManagementSessionsCommands.js';
 import '../workbench/contrib/centeredChat/browser/centeredChat.contribution.js';
+import '../workbench/contrib/anyagentUiFont/browser/anyagentUiFont.contribution.js';
 
 import './services/sessions/browser/sessionsManagementService.js';
 //#endregion
