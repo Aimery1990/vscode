@@ -15,7 +15,7 @@ import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutput
 import { ISubWorkflowCallChain, SubWorkflowCallGraphRoot, checkSubWorkflowCall, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain, findSubWorkflowCallCycle, findTemplateByTicketType, formatSubWorkflowCycleError, subWorkflowCallFrame, withSubWorkflowCallParentRun } from '../common/subWorkflowCallGraph.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { ITicketCreateOptions, ITicketGetResult, ITicketRunResult, ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
-import { IHumanDecisionService } from '../common/humanDecision.js';
+import { IHumanDecisionService, publishTicketDecisionsToWorkflow, ticketDecisionAliasPrefix } from '../common/humanDecision.js';
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
@@ -4591,8 +4591,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						const staleTicketId = ticketHistoryWindow.shift();
 						if (staleTicketId) {
 							delete run.contextVariables[staleTicketId];
+							const staleAliasPrefix = ticketDecisionAliasPrefix(staleTicketId);
 							for (const ck of Object.keys(run.contextVariables)) {
-								if (ck.startsWith(`${staleTicketId}.`)) {
+								if (ck.startsWith(`${staleTicketId}.`) || ck.startsWith(staleAliasPrefix)) {
 									delete run.contextVariables[ck];
 								}
 							}
@@ -4609,6 +4610,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					for (const [k, v] of Object.entries(execResult.contextVariables)) {
 						run.contextVariables[`${ticketRecord.ticketId}.${k}`] = v;
 					}
+				}
+				// Gate decisions (CI-25) are also published unprefixed (latest decision wins) and as ANYAG_0121_review, so a
+				// link right after the node can branch on them: @review == 'Approve'
+				const publishedGates = publishTicketDecisionsToWorkflow(run.contextVariables, ticketRecord.ticketId, execResult.stepResults);
+				if (publishedGates.length) {
+					this._emitLog(run, 'info', `Ticket '${ticketName}' decision(s) available to the workflow: ${publishedGates.map(g => `${g} = '${String(run.contextVariables[g])}'`).join(', ')}`);
 				}
 
 				for (const stepRes of execResult.stepResults) {
@@ -4639,7 +4646,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				const isDirectComponentStep = stepComp && (
 					step.type === 'component' ||
-					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'git', 'python', 'http_request'].includes(stepComp.type)
+					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'git', 'python', 'http_request', 'button_group'].includes(stepComp.type)
 				);
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));

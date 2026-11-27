@@ -7,7 +7,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { getComponentSpec } from '../../../customModules/common/componentRegistry.js';
 import {
 	BUTTON_GROUP_OUTPUT_FIELDS, DEFAULT_WAITING_PROMPT, IHumanDecision, PendingHumanDecisions, buildHumanDecision, describeDecisionPrompt, matchDecisionButton,
-	normalizeDecisionButtons, parseButtonGroupValue, publishButtonGroupOutputs, resolveWaitingPrompt, ticketKeyOf
+	normalizeDecisionButtons, parseButtonGroupValue, publishButtonGroupOutputs, publishTicketDecisionsToWorkflow, resolveWaitingPrompt, ticketDecisionAliasPrefix, ticketKeyOf
 } from '../../common/humanDecision.js';
 
 const BUTTONS = normalizeDecisionButtons([
@@ -54,6 +54,47 @@ suite('humanDecision (CI-25)', () => {
 			assert.ok(outputs.includes(`{Label.${field}}`), field);
 		}
 		assert.ok(outputs.includes('{var}'));
+	});
+
+	test('ticket run inside a workflow node: decisions published unprefixed and with a ticket alias', () => {
+		const approve = buildHumanDecision(BUTTONS[0], 'User', new Date('2026-11-27T10:00:00.000Z'));
+		const reject = buildHumanDecision(BUTTONS[1], 'AI', new Date('2026-11-27T11:00:00.000Z'));
+		// What a ticket run with a 'Review' gate (step details = decision + buttons) followed by a Python step returns
+		const steps = [
+			{ fieldLabel: 'Title', fieldType: 'text', status: 'success', details: { value: 'x' } },
+			{ fieldLabel: 'Review', fieldType: 'button_group', status: 'success', details: { ...approve, buttons: ['Approve', 'Reject'] } },
+			{ fieldLabel: 'Review Result', fieldType: 'python', status: 'success', details: { output: 'Approve' } }
+		];
+		const ctx: Record<string, unknown> = { 'ANYAG-0121.review': 'Approve', review: 'stale value' };
+		assert.deepStrictEqual(publishTicketDecisionsToWorkflow(ctx, 'ANYAG-0121', steps), ['Review']);
+		assert.strictEqual(ctx['review'], 'Approve', 'latest decision overwrites an existing unprefixed variable');
+		assert.strictEqual(ctx['Review'], 'Approve');
+		assert.strictEqual(ctx['Review.by'], 'User');
+		assert.deepStrictEqual(ctx['review_result'], { id: 'btn_ok', label: 'Approve', at: '2026-11-27T10:00:00.000Z', by: 'User' });
+		assert.strictEqual(ctx['ANYAG_0121_review'], 'Approve');
+		assert.deepStrictEqual(ctx['ANYAG_0121_review_result'], ctx['review_result']);
+		assert.strictEqual(ctx['ANYAG-0121.review'], 'Approve', 'prefixed variables are kept');
+
+		// A later ticket run deciding the same gate wins; skipped / failed gates and non-decisions publish nothing
+		const later = [
+			{ fieldLabel: 'Review', fieldType: 'button_group', status: 'success', details: { ...reject } },
+			{ fieldLabel: 'Other', fieldType: 'button_group', status: 'failed', details: { ...approve } },
+			{ fieldLabel: 'Bad', fieldType: 'button_group', status: 'success', details: { label: 'no button id' } }
+		];
+		assert.deepStrictEqual(publishTicketDecisionsToWorkflow(ctx, 'ANYAG-0122', later), ['Review']);
+		assert.strictEqual(ctx['review'], 'Reject');
+		assert.strictEqual(ctx['ANYAG_0122_review'], 'Reject');
+		assert.strictEqual(ctx['ANYAG_0121_review'], 'Approve');
+		assert.strictEqual(ctx['other'], undefined);
+		assert.strictEqual(ctx['bad'], undefined);
+
+		// Without a ticket ID only the unprefixed outputs are published
+		const noId: Record<string, unknown> = {};
+		assert.deepStrictEqual(publishTicketDecisionsToWorkflow(noId, undefined, steps), ['Review']);
+		assert.deepStrictEqual(Object.keys(noId).filter(k => k.includes('ANYAG')), []);
+		assert.deepStrictEqual(publishTicketDecisionsToWorkflow(noId, 'X-1', undefined), []);
+		assert.strictEqual(ticketDecisionAliasPrefix('ANYAG-0121'), 'ANYAG_0121_');
+		assert.strictEqual(ticketDecisionAliasPrefix('9-A'), '_9_A_');
 	});
 
 	test('stored value round trip', () => {

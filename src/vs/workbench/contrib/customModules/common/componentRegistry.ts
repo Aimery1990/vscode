@@ -1597,7 +1597,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'label of the clicked button', example: '"Approve"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same label under the component label (link conditions: @review == \'Approve\')' },
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same label under the component label and its label_key (link conditions: @review == \'Approve\'); a ticket run inside a workflow node also publishes it unprefixed in the workflow' },
 			{ name: '{Label.id}', type: 'string', when: 'both', description: 'id of the clicked button', example: '"btn_approve"' },
 			{ name: '{Label.label}', type: 'string', when: 'both', description: 'label of the clicked button' },
 			{ name: '{Label.at}', type: 'string', when: 'both', description: 'ISO time of the click', example: '"2026-11-27T15:04:05.000Z"' },
@@ -1616,7 +1616,7 @@ export const COMPONENT_SPECS = {
 		},
 		notes: [
 			'A run that reaches the buttons waits for a person: only add it where a human decision is wanted.',
-			'Branch on the decision with a link condition such as @review == \'Approve\' (or {Review} == \'Approve\').',
+			'Branch in a workflow with link conditions on the label key: @review == \'Approve\' / @review == \'Reject\' (label "Review" -> review). This works for the buttons directly in a node and for a node that runs a ticket containing them: the ticket\'s decisions are published unprefixed in the workflow (review, Review, review_result, Review.by ...; if a variable of that name already exists, the latest decision wins), besides the ticket-prefixed ANYAG-0121.review, and as the identifier-safe ANYAG_0121_review / ANYAG_0121_review_result for a specific ticket (@ANYAG_0121_review == \'Approve\').',
 			'Old data may use the legacy type id "button"; it is migrated to "button_group" on load.'
 		],
 		help: {
@@ -1630,11 +1630,11 @@ export const COMPONENT_SPECS = {
 			steps: [
 				{ step: '1. Pause', detail: 'The run stops at the buttons. The ticket opens to the right of the workflow (or is revealed where it is already open) with the card highlighted and the Waiting Prompt (default "Waiting for your decision"); the workflow node shows the prompt and the buttons; a notification can reveal the ticket again. "Stop this run" on the card or the node ends the whole run.' },
 				{ step: '2. Decide', detail: 'A person clicks a button (ticket page, canvas or notification); an agent can resume the workflow with the button label when told to. Stop ends the wait and the run.' },
-				{ step: '3. Publish', detail: '{Label} = clicked label; {Label.id}, {Label.label}, {Label.at}, {Label.by}. The choice is stored on the ticket.' },
+				{ step: '3. Publish', detail: '{Label} = clicked label; {Label.id}, {Label.label}, {Label.at}, {Label.by}. The choice is stored on the ticket. When a workflow node runs the ticket, the decision is also published unprefixed in the workflow (latest decision wins) and as <TICKET_ID>_<label_key> (e.g. ANYAG_0121_review), so the next link can branch: @review == \'Approve\'.' },
 				{ step: '4. Status', detail: 'The button\'s target status becomes the ticket status when the run finishes successfully.' }
 			],
 			variableResolution: '{Field Label} (clicked label), {Field Label.at}, {Field Label.by}',
-			downstreamPassing: 'Later steps and link conditions read the decision, e.g. @review == \'Approve\'.',
+			downstreamPassing: 'Later steps and link conditions read the decision, e.g. @review == \'Approve\' on the links after the node (also when the node runs a ticket containing the buttons).',
 			syntaxExamples: ['{Review}', '{Review.by}', '@review == \'Approve\''],
 			tips: ['Outside a run, clicking a button still changes the ticket status and records the choice.']
 		},

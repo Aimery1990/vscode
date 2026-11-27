@@ -190,6 +190,51 @@ export function publishButtonGroupOutputs(context: Record<string, unknown>, labe
 	return decision.label;
 }
 
+/** The parts of a ticket step result needed to find its gate decisions. */
+export interface IDecisionStepResultLike {
+	readonly fieldLabel: string;
+	readonly fieldType: string;
+	readonly status: string;
+	readonly details?: unknown;
+}
+
+/** Identifier-safe prefix of a ticket's decision aliases: 'ANYAG-0121' -> 'ANYAG_0121_'. */
+export function ticketDecisionAliasPrefix(ticketId: string): string {
+	const safe = ticketId.replace(/[^a-zA-Z0-9_]/g, '_');
+	return `${/^[0-9]/.test(safe) ? '_' : ''}${safe}_`;
+}
+
+/**
+ * Publishes the gate decisions of a ticket run inside a workflow node into the workflow context, so a link right after
+ * the node can branch on them (@review == 'Approve'). For each Button Group the ticket run decided, in run order:
+ * - unprefixed, exactly like a Button Group directly in a node: `{Label}` / label_key = clicked label, `{Label.id}`
+ *   ... and `{Label}_result` / `{label_key}_result` (dict). An existing variable of the same name is overwritten:
+ *   the latest decision wins.
+ * - with an identifier-safe ticket alias (when ticketId is given): `ANYAG_0121_review` = clicked label and
+ *   `ANYAG_0121_review_result` (dict), usable in link conditions and Python where `ANYAG-0121.review` is not.
+ * Returns the labels of the published gates.
+ */
+export function publishTicketDecisionsToWorkflow(context: Record<string, unknown>, ticketId: string | undefined, stepResults: readonly IDecisionStepResultLike[] | undefined): string[] {
+	const published: string[] = [];
+	for (const step of stepResults ?? []) {
+		if (step.fieldType !== 'button_group' || step.status !== 'success' || !step.fieldLabel) {
+			continue;
+		}
+		const decision = parseButtonGroupValue(step.details);
+		if (!decision) {
+			continue;
+		}
+		publishButtonGroupOutputs(context, step.fieldLabel, decision);
+		if (ticketId) {
+			const alias = `${ticketDecisionAliasPrefix(ticketId)}${cleanKey(step.fieldLabel)}`;
+			context[alias] = decision.label;
+			context[`${alias}_result`] = buttonGroupOutputFields(decision);
+		}
+		published.push(step.fieldLabel);
+	}
+	return published;
+}
+
 /** The stored decision of a Button Group ticket value (object or JSON text), or undefined. */
 export function parseButtonGroupValue(raw: unknown): IHumanDecision | undefined {
 	let value = raw;
