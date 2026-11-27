@@ -3,8 +3,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
-import { pickMediaSubtitlesState } from '../../voiceModels/common/subtitleConfig.js';
-import { parseSubtitleDocument, toTimedText } from '../../voiceModels/common/subtitles.js';
+import { pickMediaSubtitlesState, resolveMediaSubtitlesConfig } from '../../voiceModels/common/subtitleConfig.js';
+import { ISubtitleDocument, matchSubtitleDocument, toTimedText } from '../../voiceModels/common/subtitles.js';
+import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
+import { extractMediaSubtitleDocument, readMediaSubtitleDocument, resolveMediaUri, writeMediaSubtitleDocument } from '../../voiceModels/browser/mediaSubtitleJob.js';
+import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
+import { isCancellationError } from '../../../../base/common/errors.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -180,6 +184,8 @@ export interface ITicketRunOptions {
 	isCancelled?: () => boolean;
 	onStepStart?: (info: { fieldId: string; fieldLabel: string; fieldType: string; stepIndex: number; totalSteps: number }) => void;
 	onStepProgress?: (stepResult: IPrimitiveExecutionStepResult, index: number, total: number) => void;
+	/** Progress of a long running step, e.g. subtitle extraction of an MP3 / MP4 Player (CI-46). */
+	onStepMessage?: (info: { fieldId: string; fieldLabel: string; fieldType: string; message: string }) => void;
 }
 
 export interface IPrimitiveExecutionStepResult {
@@ -2129,7 +2135,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const detected = detectMediaFileInfo(resolvedName || interpolatedPath, mediaMimeType);
 							stepOutput = interpolatedPath || resolvedName || '';
 
-							customMetadata[fieldLabel] = JSON.stringify({
+							const mediaValue = {
 								mediaFilePath: interpolatedPath,
 								mediaFileName: resolvedName,
 								mediaKind: detected.kind,
@@ -2138,18 +2144,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								mediaAutoPlay,
 								// Keep the subtitles file reference and dictation answers (CI-45).
 								...pickMediaSubtitlesState(storedMediaValue)
-							});
-							// With subtitles enabled and extracted, the field output is the timed subtitle text.
-							const subtitlesText = field.mediaSubtitlesEnabled ? await this._readMediaSubtitlesText(ticketUri, storedMediaValue) : '';
-							if (subtitlesText) {
-								contextVariables[`${fieldLabel} Path`] = stepOutput;
-								contextVariables[`${fieldLabel} Subtitles`] = subtitlesText;
-								contextVariables[this._cleanKey(`${fieldLabel} Subtitles`)] = subtitlesText;
-								stepOutput = subtitlesText;
-							}
-							contextVariables[fieldLabel] = stepOutput;
-							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
-
+							};
+							customMetadata[fieldLabel] = JSON.stringify(mediaValue);
 							stepDetails = {
 								filePath: interpolatedPath,
 								fileName: resolvedName,
@@ -2157,6 +2153,27 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								mimeType: detected.mimeType,
 								playbackRate: mediaPlaybackRate
 							};
+							// Subtitles enabled (CI-46): saved subtitles of this file, else extracted now; a failed or
+							// refused extraction fails the step (thrown) like any other component error.
+							if (field.mediaSubtitlesEnabled) {
+								const subs = await this._ensureMediaSubtitles(ticketUri, fieldLabel, field, interpolatedPath, resolvedName, storedMediaValue, isCancelled, message => {
+									try { options.onStepMessage?.({ fieldId: field.id, fieldLabel, fieldType, message }); } catch { }
+								});
+								stepDetails.logs = subs.log;
+								if (subs.doc) {
+									customMetadata[fieldLabel] = JSON.stringify({ ...mediaValue, subtitlesFile: subs.subtitlesFile });
+									const subtitlesText = toTimedText(subs.doc.segments);
+									stepDetails.subtitlesFile = subs.subtitlesFile;
+									stepDetails.subtitleLines = subs.doc.segments.length;
+									stepDetails.subtitlesExtracted = subs.extracted;
+									contextVariables[`${fieldLabel} Path`] = stepOutput;
+									contextVariables[`${fieldLabel} Subtitles`] = subtitlesText;
+									contextVariables[this._cleanKey(`${fieldLabel} Subtitles`)] = subtitlesText;
+									stepOutput = subtitlesText;
+								}
+							}
+							contextVariables[fieldLabel] = stepOutput;
+							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 							break;
 						}
 
@@ -3667,6 +3684,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					field.mediaKind = detected.kind;
 					field.mediaMimeType = detected.mimeType;
 					field.lastExecutionLog = `>>> MP3 / MP4 Player [${detected.kind.toUpperCase()}]: ${resolvedName || '(no file selected)'}\nPath: ${interpolatedPath || '(none)'}\nFormat: ${detected.ext.toUpperCase()} (${detected.mimeType})\nPlayback Speed: ${rate}x`;
+					if (field.mediaSubtitlesEnabled) {
+						// A workflow node has no ticket to keep subtitles in (CI-46): only a ticket run extracts / uses them
+						field.lastExecutionLog += '\nSubtitles: not available in a workflow node (they are extracted and saved per ticket); the output is the media path.';
+					}
 					field.lastExecutionOutput = stepOutput;
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
@@ -4664,18 +4685,82 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return u;
 	}
 
-	/** Timed subtitle text of a media player field whose stored value references a subtitles file (CI-45); '' when there is none. */
-	private async _readMediaSubtitlesText(ticketUri: URI, storedValue: Record<string, unknown> | undefined): Promise<string> {
-		const rel = typeof storedValue?.subtitlesFile === 'string' ? storedValue.subtitlesFile : '';
-		if (!rel) {
-			return '';
+	/**
+	 * Subtitles of an MP3 / MP4 Player with subtitles enabled, for a ticket run (CI-46). The saved subtitles are used
+	 * when they belong to the current file (name / path and size, see `matchSubtitleDocument`); otherwise they are
+	 * extracted now with the component's settings (same pipeline, limits and messages as the card) and saved as the
+	 * ticket's `attachments/subtitles_<field>.json`. Extraction runs in this renderer (Web Audio decode). Throws a
+	 * user-facing error when the extraction fails or is refused; `doc` is undefined when no media file is set.
+	 */
+	private async _ensureMediaSubtitles(
+		ticketUri: URI,
+		fieldLabel: string,
+		field: ICustomField,
+		mediaPath: string,
+		mediaName: string,
+		storedValue: Record<string, unknown> | undefined,
+		isCancelled: () => boolean,
+		onMessage: (message: string) => void
+	): Promise<{ doc?: ISubtitleDocument; subtitlesFile?: string; extracted: boolean; log: string }> {
+		const prefix = `MP3 / MP4 Player '${fieldLabel}'`;
+		const mediaUri = resolveMediaUri(mediaPath, ticketUri);
+		if (!mediaUri) {
+			return { extracted: false, log: 'Subtitles: no media file is set, nothing to extract.' };
 		}
+		const name = mediaName || mediaUri.path.split('/').pop() || 'media';
+		let sizeBytes: number | undefined;
 		try {
-			const content = await this.fileService.readFile(URI.joinPath(ticketUri, rel));
-			const doc = parseSubtitleDocument(content.value.toString());
-			return doc ? toTimedText(doc.segments) : '';
+			sizeBytes = (await this.fileService.stat(mediaUri)).size;
 		} catch {
-			return '';
+			// a missing file is reported by the extraction below when it is needed
+		}
+		const storedRel = typeof storedValue?.subtitlesFile === 'string' ? storedValue.subtitlesFile : '';
+		let stored: ISubtitleDocument | undefined;
+		try {
+			stored = await readMediaSubtitleDocument(this.fileService, ticketUri, storedRel);
+		} catch {
+			stored = undefined;
+		}
+		let why = 'no subtitles were saved for this file';
+		if (stored && stored.segments.length > 0) {
+			const match = matchSubtitleDocument(stored, { name, path: mediaUri.fsPath, sizeBytes });
+			if (match === 'current') {
+				return { doc: stored, subtitlesFile: storedRel, extracted: false, log: `Subtitles: using the saved ${storedRel} (${stored.segments.length} lines, ${stored.model || stored.provider}); no model call.` };
+			}
+			why = match === 'changed' ? `"${name}" changed since its subtitles were extracted` : `the saved subtitles belong to "${stored.mediaName}"`;
+		}
+
+		const voiceModelService = this.instantiationService.invokeFunction(accessor => {
+			try { return accessor.get(IVoiceModelService); } catch { return undefined; }
+		});
+		if (!voiceModelService) {
+			throw new Error(`${prefix}: cannot extract subtitles, the voice model service is unavailable.`);
+		}
+		const config = resolveMediaSubtitlesConfig(field);
+		const cts = new CancellationTokenSource();
+		const controller = new AbortController();
+		controller.signal.addEventListener('abort', () => cts.cancel(), { once: true });
+		this._activeAbortControllers.add(controller);
+		this.logService.info(`[TicketWorkflowRuntime] ${prefix}: extracting subtitles of "${name}" (${why}).`);
+		onMessage(`Extracting subtitles of "${name}"...`);
+		try {
+			const doc = await extractMediaSubtitleDocument(voiceModelService, this.fileService, { name, path: mediaUri.toString() }, config, ticketUri, (pct, message) => {
+				if (isCancelled()) {
+					cts.cancel();
+				}
+				onMessage(`Subtitles ${Math.round(pct)}%: ${message}`);
+			}, cts.token);
+			// Saved even when Stop was pressed meanwhile: it is a paid result
+			const rel = await writeMediaSubtitleDocument(this.fileService, ticketUri, fieldLabel, doc);
+			return { doc, subtitlesFile: rel, extracted: true, log: `Subtitles: extracted ${doc.segments.length} lines from "${name}" with ${doc.model || doc.provider} (${why}); saved as ${rel}.` };
+		} catch (err) {
+			if (isCancellationError(err) || cts.token.isCancellationRequested || isCancelled()) {
+				throw new Error('Ticket execution cancelled by Stop request');
+			}
+			throw new Error(`${prefix}: subtitle extraction failed. ${(err as Error)?.message || String(err)}`);
+		} finally {
+			this._activeAbortControllers.delete(controller);
+			cts.dispose();
 		}
 	}
 
