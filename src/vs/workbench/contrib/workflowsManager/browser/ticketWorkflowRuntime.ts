@@ -25,6 +25,7 @@ import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId }
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
+import { readTicketFileResolved } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
 import { ITicketChangeActor } from '../../workspacesExplorer/common/ticketChangeLog.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
@@ -6049,7 +6050,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		for (const uri of candidateTicketMd) {
 			if (await this.fileService.exists(uri)) {
 				try {
-					const content = (await this.fileService.readFile(uri)).value.toString();
+					const content = await readTicketFileResolved(this.fileService, uri);
 					let inSelfDefined = false;
 					for (const line of content.split(/\r?\n/)) {
 						if (line.startsWith('### Self Defined Data')) {
@@ -6095,7 +6096,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		for (const uri of candidateReadme) {
 			if (await this.fileService.exists(uri)) {
 				try {
-					const content = (await this.fileService.readFile(uri)).value.toString();
+					const content = await readTicketFileResolved(this.fileService, uri);
 					for (const line of content.split(/\r?\n/)) {
 						const tMatch = line.match(/^\s*-\s*\*\*Title\*\*:\s*(.*)$/i);
 						if (tMatch && tMatch[1].trim()) { title = tMatch[1].trim(); }
@@ -6198,7 +6199,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			for (const tMdUri of ticketMdCandidates) {
 				try {
 					if (await this.fileService.exists(tMdUri)) {
-						const mdText = (await this.fileService.readFile(tMdUri)).value.toString();
+						const mdText = await readTicketFileResolved(this.fileService, tMdUri);
 						const lines = mdText.split(/\r?\n/);
 						const newLines: string[] = [];
 						let inSelfDefined = false;
@@ -6629,6 +6630,15 @@ def get_outputs(ticket=None, *, ticket_id=None, ticket_name=None, tickets=None, 
                         ticket_type = v
     except Exception:
         return None
+    # CI-51: long values live in .agents/fields/<key>.txt; ticket.md keeps only a reference
+    for _ck, _cv in list(custom_meta.items()):
+        _rm = re.match(r'^@file\\((\\.agents/fields/[a-z0-9_-]+\\.txt)\\) sha256:[0-9a-f]{64} chars:\\d+$', str(_cv).strip())
+        if _rm:
+            try:
+                with open(os.path.join(t_dir, *_rm.group(1).split('/')), 'r', encoding='utf-8') as _ff:
+                    custom_meta[_ck] = _ff.read()
+            except Exception:
+                pass
     # Locate schema yaml to check for output component and outputSpecs
     schema_paths = []
     if ticket_type:

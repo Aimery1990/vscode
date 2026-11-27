@@ -59,6 +59,7 @@ import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHE
 import { getLabelColor } from '../common/ticketLabels.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
+import { readTicketFileResolved } from './ticketFieldFiles.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
@@ -5436,11 +5437,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 		return pathInAgents;
 	}
 
+	/** Reads a file; ticket files with their field references resolved (CI-51). */
 	private async _safeReadFile(uri: URI | undefined): Promise<string> {
 		if (uri && await this.fileService.exists(uri)) {
 			try {
-				const content = await this.fileService.readFile(uri);
-				return content.value.toString();
+				return await readTicketFileResolved(this.fileService, uri);
 			} catch { }
 		}
 		return '';

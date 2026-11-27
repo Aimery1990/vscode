@@ -36,6 +36,7 @@ import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/wo
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
 import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
+import { readTicketFileResolved } from './ticketFieldFiles.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -4947,11 +4948,11 @@ export class EntityDetailEditor extends EditorPane {
 		return URI.joinPath(baseUri, '.agents', 'worklog.md');
 	}
 
+	/** Reads a file; ticket files with their field references resolved (CI-51). */
 	private async _safeReadFile(uri: URI | undefined): Promise<string> {
 		if (uri && await this._fileService.exists(uri)) {
 			try {
-				const content = await this._fileService.readFile(uri);
-				return content.value.toString();
+				return await readTicketFileResolved(this._fileService, uri);
 			} catch { }
 		}
 		return '';
@@ -7118,7 +7119,7 @@ export class EntityDetailEditor extends EditorPane {
 			};
 			const safeRead = async (u: URI): Promise<string> => {
 				if (await fileService.exists(u)) {
-					return (await fileService.readFile(u)).value.toString();
+					return readTicketFileResolved(fileService, u);
 				}
 				return '';
 			};
@@ -7183,7 +7184,7 @@ export class EntityDetailEditor extends EditorPane {
 			};
 			const safeRead = async (u: URI): Promise<string> => {
 				if (await fileService.exists(u)) {
-					return (await fileService.readFile(u)).value.toString();
+					return readTicketFileResolved(fileService, u);
 				}
 				return '';
 			};

@@ -18,6 +18,7 @@ import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
 import { readTicketFieldVersion, writeTicketFile } from '../ticketChangeRecorder.js';
+import { readTicketFileResolved } from '../ticketFieldFiles.js';
 import { ITicketChangeRecord, parseTicketChangeRecords, ticketChangeRecordMatchesField } from '../../common/ticketChangeLog.js';
 import { IPathService } from '../../../../services/path/common/pathService.js';
 import { coerceTicketLabelsInput, hasTicketLabel, isDefinedLabel, ITicketLabelDefinition } from '../../common/ticketLabels.js';
@@ -962,7 +963,7 @@ export class TicketDataEngine {
 		if (!paths) { throw new Error(`Ticket '${ticketId}' not found in workspace '${workspaceId}'.`); }
 
 		// Read files
-		const ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
+		const ticketContent = await readTicketFileResolved(this.fileService, paths.ticketMdUri);
 		const readmeContent = await this._safeRead(paths.readmeMdUri);
 		const instructionContent = await this._safeRead(paths.instructionMdUri);
 
@@ -1257,7 +1258,7 @@ export class TicketDataEngine {
 			throw new Error(`Ticket '${options.ticket_id}' not found.`);
 		}
 
-		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
+		let ticketContent = await readTicketFileResolved(this.fileService, paths.ticketMdUri);
 		let readmeContent = await this._safeRead(paths.readmeMdUri);
 		let instructionContent = await this._safeRead(paths.instructionMdUri);
 
@@ -1511,7 +1512,7 @@ export class TicketDataEngine {
 			if (!srcPaths) { continue; }
 			involvedTicketPaths.push(srcPaths);
 
-			let srcTicketContent = (await this.fileService.readFile(srcPaths.ticketMdUri)).value.toString();
+			let srcTicketContent = await readTicketFileResolved(this.fileService, srcPaths.ticketMdUri);
 			const currentLinkTo = this._extractLinkValue(srcTicketContent, 'Link To');
 			let newLinkToList = this._splitList(currentLinkTo);
 
@@ -1538,7 +1539,7 @@ export class TicketDataEngine {
 				involvedTicketPaths.push(targetPaths);
 			}
 
-			let targetTicketContent = (await this.fileService.readFile(targetPaths.ticketMdUri)).value.toString();
+			let targetTicketContent = await readTicketFileResolved(this.fileService, targetPaths.ticketMdUri);
 			const currentLinkedBy = this._extractLinkValue(targetTicketContent, 'Linked By');
 			let newLinkedByList = this._splitList(currentLinkedBy);
 
@@ -1677,9 +1678,10 @@ export class TicketDataEngine {
 
 	// ---------------- Helper Methods ----------------
 
+	/** Reads a ticket file (field references resolved, CI-51), or '' when it does not exist. */
 	private async _safeRead(uri: URI): Promise<string> {
 		if (await this.fileService.exists(uri)) {
-			return (await this.fileService.readFile(uri)).value.toString();
+			return readTicketFileResolved(this.fileService, uri);
 		}
 		return '';
 	}
@@ -1962,7 +1964,7 @@ export class TicketDataEngine {
 		for (const tId of targetIds) {
 			const p = await this.resolveTicketPaths(wsUri, tId);
 			if (!p) { continue; }
-			let content = (await this.fileService.readFile(p.ticketMdUri)).value.toString();
+			let content = await readTicketFileResolved(this.fileService, p.ticketMdUri);
 			const current = this._extractLinkValue(content, 'Linked By');
 			let list = this._splitList(current);
 
@@ -1984,7 +1986,7 @@ export class TicketDataEngine {
 		for (const sId of sourceIds) {
 			const p = await this.resolveTicketPaths(wsUri, sId);
 			if (!p) { continue; }
-			let content = (await this.fileService.readFile(p.ticketMdUri)).value.toString();
+			let content = await readTicketFileResolved(this.fileService, p.ticketMdUri);
 			const current = this._extractLinkValue(content, 'Link To');
 			let list = this._splitList(current);
 
@@ -2025,7 +2027,7 @@ export class TicketDataEngine {
 			throw new Error(`Ticket '${options.ticket_id}' not found in workspace '${options.workspace_id}'.`);
 		}
 
-		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
+		let ticketContent = await readTicketFileResolved(this.fileService, paths.ticketMdUri);
 		const parsedTicket = this._parseTicketMd(ticketContent);
 
 		const schema = await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
