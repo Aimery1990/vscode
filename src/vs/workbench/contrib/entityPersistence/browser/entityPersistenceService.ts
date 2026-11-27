@@ -13,6 +13,7 @@ import { IEntityPersistenceService, IBaseEntitySnapshot } from '../common/entity
 import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { FREESTYLE_TYPE_DEFINITION, FREESTYLE_TYPE_PROMPT, SUB_WORKFLOW_TYPE_DEFINITION, SUB_WORKFLOW_TYPE_PROMPT } from '../../customModules/common/freestyleTicket.js';
+import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
 export const SYSTEM_CONFIG_DIR_NAME = '.agents';
@@ -254,15 +255,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			if (!await this.fileService.exists(directYamlUri)) {
 				try {
 					const filename = snapshot.typeDefinition.split('/').filter(Boolean).pop() || `${type}.yaml`;
-					let savedPath = '~/.anyagent/entity_type';
-					try {
-						if (this.storageService) {
-							savedPath = this.storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-						}
-					} catch { }
-					const userHome = this.environmentService.userHome.fsPath;
-					const resolvedGlobalDir = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
-					const globalYamlUri = URI.file(`${resolvedGlobalDir}/${filename}`);
+					const globalYamlUri = URI.joinPath(getAnyAgentGlobalFolders(this.storageService, this.environmentService.userHome).entityType, filename);
 					if (await this.fileService.exists(globalYamlUri)) {
 						const parentDir = dirname(directYamlUri);
 						if (!await this.fileService.exists(parentDir)) {

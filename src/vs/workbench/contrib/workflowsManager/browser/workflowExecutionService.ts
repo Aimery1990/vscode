@@ -18,6 +18,7 @@ import { ITicketCreateOptions, ITicketGetResult, ITicketRunResult, ITicketWorkfl
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
+import { getAnyAgentGlobalFolders, IAnyAgentGlobalFolders, toFolderAccessError } from '../../customModules/common/anyagentGlobalPaths.js';
 import { Sequencer } from '../../../../base/common/async.js';
 import { IDisposable } from '../../../../base/common/lifecycle.js';
 import { SUB_WORKFLOW_TICKET_TYPE, isSubWorkflowTicketType } from '../../customModules/common/freestyleTicket.js';
@@ -1924,19 +1925,27 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._onDidChangeSubWorkflows.fire();
 	}
 
-	/** The folder for Sub-Workflow tickets whose source workflow no longer exists: the global workflows directory. */
+	/** The folder for Sub-Workflow tickets whose source workflow no longer exists: `<AnyAgent global folder>/workflows` (CI-26). */
 	private async _getGlobalSubWorkflowParentFolder(): Promise<URI> {
-		const home = await this.pathService.userHome();
-		const folder = URI.joinPath(home, 'Documents', 'workflows');
+		const folder = this._getAnyAgentGlobalFolders().workflows;
 		if (!await this.fileService.exists(folder)) {
-			await this.fileService.createFolder(folder);
+			try {
+				await this.fileService.createFolder(folder);
+			} catch (err) {
+				throw toFolderAccessError(err, folder);
+			}
 		}
 		return folder;
 	}
 
+	/** The user's AnyAgent global folder and its subfolders (Settings > Agent Customizations). */
+	private _getAnyAgentGlobalFolders(): IAnyAgentGlobalFolders {
+		return getAnyAgentGlobalFolders(this.storageService, this.pathService.userHome({ preferLocal: true }));
+	}
+
 	/**
 	 * Creates the Sub-Workflow ticket for `draft` with the normal ticket numbering of its parent folder: the source
-	 * workflow folder or, for a migrated legacy definition whose workflow is gone, the global workflows directory.
+	 * workflow folder or, for a migrated legacy definition whose workflow is gone, `<AnyAgent global folder>/workflows`.
 	 * Writes the definition file and returns the definition with the ticket ID as `id` (a legacy id is kept as `legacyId`).
 	 */
 	private async _createSubWorkflowTicketNow(draft: ISubWorkflowDefinition, isMigration: boolean): Promise<ISubWorkflowDefinition> {
@@ -2119,15 +2128,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			const dirUri = isFile ? URI.joinPath(uri, '..') : uri;
 			return URI.joinPath(dirUri, '.agents', 'workflow_runs.json');
 		} catch {
-			const homeDir = (typeof process !== 'undefined' && process.env?.HOME) ? process.env.HOME : '/Users/aimery';
-			return URI.file(`${homeDir}/.anyagent/workflow_history/default_runs.json`);
+			return URI.joinPath(this._getAnyAgentGlobalFolders().workflowHistory, 'default_runs.json');
 		}
 	}
 
 	private _getGlobalBackupRunsFileUri(workflowUriStr: string): URI {
 		const safeKey = workflowUriStr.replace(/[^a-zA-Z0-9_-]/g, '_');
-		const homeDir = (typeof process !== 'undefined' && process.env?.HOME) ? process.env.HOME : '/Users/aimery';
-		return URI.file(`${homeDir}/.anyagent/workflow_history/${safeKey}_runs.json`);
+		return URI.joinPath(this._getAnyAgentGlobalFolders().workflowHistory, `${safeKey}_runs.json`);
 	}
 
 	async loadRunsForWorkflow(workflowUri: URI | string): Promise<IWorkflowExecutionRun[]> {
@@ -2666,7 +2673,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this.logService.warn(`[WorkflowExecution] Failed to write runs to ${primaryFileUri.toString()}:`, err);
 		}
 
-		// 2. Global backup location (~/.anyagent/workflow_history/<safeKey>_runs.json)
+		// 2. Global backup location (<AnyAgent global folder>/workflow_history/<safeKey>_runs.json)
 		const backupFileUri = this._getGlobalBackupRunsFileUri(uriStr);
 		try {
 			const backupParentDir = URI.joinPath(backupFileUri, '..');

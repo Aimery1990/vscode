@@ -26,6 +26,7 @@ import { parseTemplateYaml } from '../common/templateYaml.js';
 import { getReservedTemplateNameError, getReservedTypeNameMessage, isReservedTemplate, isReservedTicketTypeName } from '../common/freestyleTicket.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
+import { getAnyAgentGlobalFolders } from '../common/anyagentGlobalPaths.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 
 function formatYamlScalar(val: unknown): unknown {
@@ -147,31 +148,11 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 	}
 
 	public getGlobalEntityTypeDir(): URI {
-		let savedPath = '~/.anyagent/entity_type';
-		try {
-			if (this.storageService) {
-				savedPath = this.storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-			}
-		} catch (e) {
-			console.error('Failed to read globalEntityTypePath setting:', e);
-		}
-		const userHome = this.environmentService.userHome.fsPath;
-		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type');
-		return URI.file(resolvedPath);
+		return getAnyAgentGlobalFolders(this.storageService, this.environmentService.userHome).entityType;
 	}
 
 	public getGlobalEntityComponentDir(): URI {
-		let savedPath = '~/.anyagent/entity_component';
-		try {
-			if (this.storageService) {
-				savedPath = this.storageService.get('anyagent.globalEntityComponentPath', StorageScope.PROFILE, '~/.anyagent/entity_component');
-			}
-		} catch (e) {
-			console.error('Failed to read globalEntityComponentPath setting:', e);
-		}
-		const userHome = this.environmentService.userHome.fsPath;
-		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_component');
-		return URI.file(resolvedPath);
+		return getAnyAgentGlobalFolders(this.storageService, this.environmentService.userHome).entityComponent;
 	}
 
 	private async _resolveTargetWorkspaceUri(workspaceUri?: URI): Promise<URI | undefined> {

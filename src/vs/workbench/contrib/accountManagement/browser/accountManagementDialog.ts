@@ -2,8 +2,14 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { Disposable } from '../../../../base/common/lifecycle.js';
-import { getActiveDocument } from '../../../../base/browser/dom.js';
+import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { $, addDisposableListener, append, getActiveDocument } from '../../../../base/browser/dom.js';
+import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { URI } from '../../../../base/common/uri.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
+import { ANYAGENT_GLOBAL_DATA_PATH_KEY, ANYAGENT_GLOBAL_ENTITY_COMPONENT_PATH_KEY, ANYAGENT_GLOBAL_ENTITY_TYPE_PATH_KEY, AnyAgentGlobalSubfolder, DEFAULT_ANYAGENT_GLOBAL_DATA_PATH, expandHomePath, getFolderNotAccessibleMessage, isFolderPermissionError, resolveAnyAgentGlobalPaths, validateGlobalPathInput } from '../../customModules/common/anyagentGlobalPaths.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -13,7 +19,7 @@ import { AccountSignInModal } from './accountSignInModal.js';
 import { ALIYUN_MODEL_STUDIO_REGIONS, ALIYUN_PROVIDER_ID, IAgentCredentialService, IAgentModelReference, isNonChatModelId, isOpenAICompatibleProvider } from '../../agentsManager/common/agentsManager.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IVoiceModel, IVoiceModelService, VOICE_PROVIDER_CATALOG, VoiceModelProvider } from '../../voiceModels/common/voiceModel.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IRequestService } from '../../../../platform/request/common/request.js';
@@ -45,10 +51,16 @@ export class AccountManagementDialog extends Disposable {
 		@IStorageService private readonly _storageService: IStorageService,
 		@IVoiceModelService private readonly voiceModelService: IVoiceModelService,
 		@IDialogService private readonly dialogService: IDialogService,
-		@IMainProcessService private readonly mainProcessService: IMainProcessService
+		@IMainProcessService private readonly mainProcessService: IMainProcessService,
+		@IFileService private readonly fileService: IFileService,
+		@IFileDialogService private readonly fileDialogService: IFileDialogService,
+		@IPathService private readonly pathService: IPathService
 	) {
 		super();
 	}
+
+	/** Listeners of the Agent Customizations tab; cleared whenever the tab is rendered again or the dialog closes. */
+	private readonly _customizationsDisposables = this._register(new DisposableStore());
 
 	private _requestService: IRequestService | undefined;
 	private _priceCatalog: IModelPriceCatalog | undefined;
@@ -68,6 +80,7 @@ export class AccountManagementDialog extends Disposable {
 			this.container = undefined;
 		}
 		this.renderNavFn = undefined;
+		this._customizationsDisposables.clear();
 	}
 
 	public async show(initialTab: AccountPanelTab = 'Account'): Promise<void> {
@@ -2461,68 +2474,107 @@ export class AccountManagementDialog extends Disposable {
 		addFormCard.appendChild(formBtnRow);
 	}
 
-	private async renderCustomizationsTab(container: HTMLElement, targetDocument: Document): Promise<void> {
-		const header = targetDocument.createElement('div');
-		header.style.marginBottom = '24px';
-		this.setElementHTML(header, `
-			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;">Agent Customizations Settings</h3>
-			<p style="margin:0;font-size:13px;color:#888888;line-height:1.5;">Customize settings and configuration options for Agent Customizations.</p>
-		`);
-		container.appendChild(header);
+	private async renderCustomizationsTab(container: HTMLElement, _targetDocument: Document): Promise<void> {
+		this._customizationsDisposables.clear();
+		const store = this._customizationsDisposables;
+		const homePath = this.pathService.userHome({ preferLocal: true }).fsPath;
 
-		const formCard = targetDocument.createElement('div');
-		formCard.style.cssText = `
-			background: #1c1c1c;
-			border: 1px solid #2a2a2a;
-			border-radius: 8px;
-			padding: 20px;
-			display: flex;
-			flex-direction: column;
-			gap: 16px;
-			margin-bottom: 24px;
-		`;
-		container.appendChild(formCard);
+		const header = append(container, $('div', { style: 'margin-bottom: 24px;' }));
+		append(header, $('h3', { style: 'margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;' }, 'Agent Customizations Settings'));
+		append(header, $('p', { style: 'margin:0;font-size:13px;color:#888888;line-height:1.5;' },
+			'AnyAgent keeps everything that is not stored in a workspace (templates, components, workflow run history) in one global folder. Workflows, agents and tickets always live inside a workspace you choose.'));
 
-		const pathGroup = targetDocument.createElement('div');
-		const pathLabel = targetDocument.createElement('label');
-		pathLabel.style.cssText = `display: block; font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.05em; color: #888888;`;
-		pathLabel.textContent = 'Global Custom Modules Storage Path:';
+		const formCard = append(container, $('div', { style: 'background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px; display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px;' }));
 
-		const pathInput = targetDocument.createElement('input');
-		pathInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
-
-		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-		pathInput.value = savedPath;
-		pathInput.placeholder = 'e.g. ~/.anyagent/entity_type';
-
-		pathGroup.appendChild(pathLabel);
-		pathGroup.appendChild(pathInput);
-		formCard.appendChild(pathGroup);
-
-		const btnRow = targetDocument.createElement('div');
-		btnRow.style.cssText = `display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px;`;
-
-		const saveBtn = targetDocument.createElement('button');
-		saveBtn.style.cssText = `
-			background: #38bdf8;
-			color: #0f172a;
-			border: none;
-			border-radius: 6px;
-			padding: 8px 16px;
-			font-size: 12px;
-			font-weight: 600;
-			cursor: pointer;
-		`;
-		saveBtn.textContent = 'Save Changes';
-
-		saveBtn.onclick = async () => {
-			const newPath = pathInput.value.trim() || '~/.anyagent/entity_type';
-			this._storageService.store('anyagent.globalEntityTypePath', newPath, StorageScope.PROFILE, StorageTarget.USER);
-			this.notificationService.info('Global storage path updated successfully!');
+		interface IPathRow { readonly input: HTMLInputElement; readonly hint: HTMLElement }
+		const createPathRow = (label: string, storageKey: string, placeholder: string, browseTitle: string): IPathRow => {
+			const group = append(formCard, $('div'));
+			append(group, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.05em; color: #888888;' }, label));
+			const row = append(group, $('div', { style: 'display: flex; gap: 8px; align-items: center;' }));
+			const input = append(row, $<HTMLInputElement>('input', { style: 'flex: 1; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;' }));
+			input.value = this._storageService.get(storageKey, StorageScope.PROFILE, '');
+			input.placeholder = placeholder;
+			const browseBtn = append(row, $<HTMLButtonElement>('button', { style: 'display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: #262626; border: 1px solid #2a2a2a; border-radius: 6px; color: #cccccc; cursor: pointer;' }));
+			browseBtn.title = browseTitle;
+			browseBtn.setAttribute('aria-label', browseTitle);
+			append(browseBtn, renderIcon(Codicon.folderOpened));
+			const hint = append(group, $('div', { style: 'margin-top: 6px; font-size: 11px; color: #777777; line-height: 1.4; word-break: break-all;' }));
+			store.add(addDisposableListener(browseBtn, 'click', async () => {
+				// The system folder picker also grants macOS access to the chosen folder
+				const current = input.value.trim();
+				const res = await this.fileDialogService.showOpenDialog({
+					canSelectFolders: true,
+					canSelectFiles: false,
+					canSelectMany: false,
+					defaultUri: current && !validateGlobalPathInput(current) ? URI.file(expandHomePath(current, homePath)) : URI.file(homePath),
+					title: browseTitle
+				});
+				if (res && res.length > 0) {
+					input.value = res[0].fsPath;
+					updateHints();
+				}
+			}));
+			store.add(addDisposableListener(input, 'input', () => updateHints()));
+			return { input, hint };
 		};
 
-		btnRow.appendChild(saveBtn);
-		formCard.appendChild(btnRow);
+		const rootRow = createPathRow('AnyAgent Global Folder', ANYAGENT_GLOBAL_DATA_PATH_KEY, `Default: ${DEFAULT_ANYAGENT_GLOBAL_DATA_PATH}`, 'Choose the AnyAgent global folder');
+		const typeRow = createPathRow('Global Custom Modules (Templates) Storage Path', ANYAGENT_GLOBAL_ENTITY_TYPE_PATH_KEY, `Default: <global folder>/${AnyAgentGlobalSubfolder.EntityType}`, 'Choose the global templates folder');
+		const componentRow = createPathRow('Global Components Storage Path', ANYAGENT_GLOBAL_ENTITY_COMPONENT_PATH_KEY, `Default: <global folder>/${AnyAgentGlobalSubfolder.EntityComponent}`, 'Choose the global components folder');
+
+		const resolveFromInputs = () => resolveAnyAgentGlobalPaths({
+			globalDataPath: rootRow.input.value,
+			entityTypePath: typeRow.input.value,
+			entityComponentPath: componentRow.input.value
+		}, homePath);
+		const updateHints = () => {
+			const paths = resolveFromInputs();
+			const hintFor = (row: IPathRow, effective: string, extra?: string) => {
+				const error = validateGlobalPathInput(row.input.value);
+				row.hint.style.color = error ? '#f87171' : '#777777';
+				row.hint.textContent = error ?? `In use: ${effective}${extra ? ` ${extra}` : ''}`;
+			};
+			hintFor(rootRow, paths.root, `(run history goes to ${AnyAgentGlobalSubfolder.WorkflowHistory}/)`);
+			hintFor(typeRow, paths.entityType);
+			hintFor(componentRow, paths.entityComponent);
+		};
+		updateHints();
+
+		const btnRow = append(formCard, $('div', { style: 'display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px;' }));
+		const saveBtn = append(btnRow, $<HTMLButtonElement>('button', { style: 'background: #38bdf8; color: #0f172a; border: none; border-radius: 6px; padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer;' }, 'Save Changes'));
+		store.add(addDisposableListener(saveBtn, 'click', async () => {
+			const rows: Array<[IPathRow, string]> = [[rootRow, ANYAGENT_GLOBAL_DATA_PATH_KEY], [typeRow, ANYAGENT_GLOBAL_ENTITY_TYPE_PATH_KEY], [componentRow, ANYAGENT_GLOBAL_ENTITY_COMPONENT_PATH_KEY]];
+			for (const [row] of rows) {
+				const error = validateGlobalPathInput(row.input.value);
+				if (error) {
+					this.notificationService.error(error);
+					row.input.focus();
+					return;
+				}
+			}
+			// The global folder must be usable: create it now; on a permission error stop and keep the old setting
+			const rootUri = URI.file(resolveFromInputs().root);
+			try {
+				if (!await this.fileService.exists(rootUri)) {
+					await this.fileService.createFolder(rootUri);
+				}
+			} catch (err) {
+				this.notificationService.error(isFolderPermissionError(err)
+					? getFolderNotAccessibleMessage(rootUri.fsPath)
+					: `Could not create the global folder "${rootUri.fsPath}": ${(err as Error | undefined)?.message || err}`);
+				return;
+			}
+			for (const [row, key] of rows) {
+				const value = row.input.value.trim();
+				if (value) {
+					this._storageService.store(key, value, StorageScope.PROFILE, StorageTarget.USER);
+				} else {
+					this._storageService.remove(key, StorageScope.PROFILE);
+				}
+			}
+			updateHints();
+			this.notificationService.info('AnyAgent global folder settings saved.');
+		}));
 	}
 
 	private async renderGenericTab(container: HTMLElement, targetDocument: Document, tabId: string): Promise<void> {

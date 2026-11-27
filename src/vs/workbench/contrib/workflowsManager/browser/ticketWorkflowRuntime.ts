@@ -6354,6 +6354,7 @@ import os, sys, json, re, atexit
 _ANYAGENT_RESULT_FILE = "${resultFilePathStr}"
 _ANYAGENT_WS_DIR = "${wsPathStr}"
 _ANYAGENT_TICKET_DIR = "${ticketPathStr}"
+_ANYAGENT_GLOBAL_ENTITY_TYPE_DIR = ${JSON.stringify(this.customModulesService.getGlobalEntityTypeDir().fsPath)}
 _ANYAGENT_HAS_EXPLICIT_OUTPUT = False
 
 def set_output(val):
@@ -6590,10 +6591,9 @@ def get_outputs(ticket=None, *, ticket_id=None, ticket_name=None, tickets=None, 
             if not parent or parent == cur:
                 break
             cur = parent
-        home_dir = os.path.expanduser('~')
         for sv in slug_variants:
-            schema_paths.append(os.path.join(home_dir, '.anyagent', 'entity_type', f'{sv}.yaml'))
-            schema_paths.append(os.path.join(home_dir, '.anyagent', 'entity_type', f'{sv}.yml'))
+            schema_paths.append(os.path.join(_ANYAGENT_GLOBAL_ENTITY_TYPE_DIR, f'{sv}.yaml'))
+            schema_paths.append(os.path.join(_ANYAGENT_GLOBAL_ENTITY_TYPE_DIR, f'{sv}.yml'))
     has_output_comp = False
     output_specs = []
     for sp in schema_paths:

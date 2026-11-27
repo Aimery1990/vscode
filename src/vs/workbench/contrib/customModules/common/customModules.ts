@@ -15,6 +15,8 @@ export interface ICustomModulesService {
 
 	getCustomModules(workspaceUri?: URI): Promise<ICustomModule[]>;
 	getSystemModules(): ICustomModule[];
+	/** The global template folder: the user setting, or `<AnyAgent global folder>/entity_type` when unset. */
+	getGlobalEntityTypeDir(): URI;
 	saveCustomModules(modules: ICustomModule[], workspaceUri?: URI): Promise<void>;
 	deleteCustomModule(moduleId: string, workspaceUri?: URI): Promise<void>;
 

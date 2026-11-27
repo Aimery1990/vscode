@@ -49,6 +49,7 @@ import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, cr
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
+import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
@@ -2096,10 +2097,7 @@ export class EntityDetailEditor extends EditorPane {
 		const checkDirs: URI[] = [];
 
 		// 1. Global directory has priority for custom modules defined/updated in the Schema Designer
-		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-		const userHome = this._environmentService.userHome.fsPath;
-		const resolvedGlobal = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
-		checkDirs.push(URI.file(resolvedGlobal));
+		checkDirs.push(getAnyAgentGlobalFolders(this._storageService, this._environmentService.userHome).entityType);
 
 		// 2. Local workspace directory hierarchy
 		let curr = workspaceUri;
