@@ -3,6 +3,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './media/workflowEditor.css';
+import { collectSubWorkflowRefsFromNodes } from '../common/subWorkflowCallGraph.js';
 import { $, append, clearNode, h, addDisposableListener, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
 import { isCodeEditor } from '../../../../editor/browser/editorBrowser.js';
@@ -1201,10 +1202,33 @@ export class WorkflowEditor extends EditorPane {
 					};
 					await this._entityPersistenceService.saveSnapshot(snapshot);
 				}
+				void this._reportSubWorkflowCallCycle(this._workflowUri);
 			}
 		} catch (err) {
 			this._notificationService.error(`Failed to save flowchart data: ${err}`);
 		}
+	}
+
+	/** Last call-cycle error shown for this workflow (CI-38), so auto-save does not repeat it on every edit. */
+	private _lastReportedCycleError: string | undefined;
+
+	/**
+	 * Recursion protection (CI-38): the workflow is always saved (auto-save keeps every edit) but marked invalid when
+	 * its calls form a cycle: the error names the chain and a run refuses to start until it is fixed.
+	 */
+	private async _reportSubWorkflowCallCycle(workflowUri: URI): Promise<void> {
+		const nodes = this._data?.nodes || [];
+		// Only workflows that call Sub-Workflows are walked on save (a run start also checks run-ticket templates)
+		if (collectSubWorkflowRefsFromNodes(nodes).length === 0) {
+			this._lastReportedCycleError = undefined;
+			return;
+		}
+		const uriStr = workflowUri.toString();
+		const cycleError = await this._workflowExecutionService.checkSubWorkflowCallCycle({ kind: 'workflow', key: uriStr, label: this.input?.getName() || uriStr, nodes }, uriStr);
+		if (cycleError && cycleError !== this._lastReportedCycleError) {
+			this._notificationService.error(`This workflow is invalid: ${cycleError}`);
+		}
+		this._lastReportedCycleError = cycleError;
 	}
 
 	override clearInput(): void {

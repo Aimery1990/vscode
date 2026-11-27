@@ -10,8 +10,10 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { ICustomField, IEntityPersistenceService, generateSmartPythonVarName, normalizeLegacyFieldTypes, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
-import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
+import { ICustomField, ICustomModule, IEntityPersistenceService, generateSmartPythonVarName, normalizeLegacyFieldTypes, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
+import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult, ISubWorkflowInvocationRequest, ISubWorkflowInvocationResult } from '../common/workflowExecutionService.js';
+import { ISubWorkflowCallChain, SubWorkflowCallGraphRoot, checkSubWorkflowCall, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain, findSubWorkflowCallCycle, findTemplateByTicketType, formatSubWorkflowCycleError, subWorkflowCallFrame, withSubWorkflowCallParentRun } from '../common/subWorkflowCallGraph.js';
+import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { ITicketCreateOptions, ITicketGetResult, ITicketRunResult, ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
@@ -76,6 +78,8 @@ interface IInternalWorkflowRun extends IWorkflowExecutionRun {
 	_displayWorkflowUri?: string;
 	_totalStepsCounter?: number;
 	_executedTicketIdsWindow?: string[];
+	/** Who called whom down to this run (CI-38 recursion / depth guard). */
+	_callChain?: ISubWorkflowCallChain;
 }
 
 /** Callers (the Workflow editor, Sub-Workflow runs) pass the in-memory flowchart as `initialData`. */
@@ -1035,7 +1039,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		@ITerminalService private readonly terminalService: ITerminalService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
-		@IPathService private readonly pathService: IPathService
+		@IPathService private readonly pathService: IPathService,
+		@ICustomModulesService private readonly customModulesService: ICustomModulesService
 	) {
 		this._cleanupStaleKernelDirsOnStartup().catch(() => { });
 		this.workspacesExplorerService.onDidCreateSubWorkflowTicket(folderUri => {
@@ -1100,8 +1105,19 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		parentRun: IWorkflowExecutionRun,
 		subDef: ISubWorkflowDefinition,
 		resolvedInputs: Record<string, unknown>,
-		callerNode?: { id: string; label?: string }
+		callerNode?: { id: string; label?: string },
+		callChain?: ISubWorkflowCallChain
 	): Promise<IWorkflowExecutionRun> {
+		// Runtime recursion / depth guard (CI-38): never run a Sub-Workflow that is already on the call chain
+		const parentChain = callChain ?? this._callChainOf(parentRun);
+		const frame = subWorkflowCallFrame(subDef);
+		const guardError = checkSubWorkflowCall(parentChain.frames, frame);
+		if (guardError) {
+			parentChain.abort.error = parentChain.abort.error || guardError;
+			this._emitLog(parentRun, 'error', guardError, callerNode ? { nodeId: callerNode.id } : undefined);
+			throw new Error(guardError);
+		}
+
 		// Always refresh Sub-Workflow nodes/links from the live source workflow_flowchart.json if available,
 		// so any edits the user saved on the canvas (e.g. changing Output variable names) ALWAYS take effect immediately
 		// instead of running a stale snapshot of the Sub-Workflow ticket definition
@@ -1172,6 +1188,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			callerNodeLabel: callerNode?.label,
 			logs: []
 		};
+		(childRun as IInternalWorkflowRun)._callChain = extendSubWorkflowCallChain(parentChain, frame, childRunId);
 		(childRun as IInternalWorkflowRun)._displayRunId = (parentRun as IInternalWorkflowRun)._displayRunId || parentRun.runId;
 		(childRun as IInternalWorkflowRun)._displayWorkflowUri = (parentRun as IInternalWorkflowRun)._displayWorkflowUri || parentRun.workflowUri;
 
@@ -1229,6 +1246,201 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 			this._runs.delete(childRunId);
 		}
+	}
+
+	public async invokeSubWorkflow(request: ISubWorkflowInvocationRequest): Promise<ISubWorkflowInvocationResult> {
+		const startedAt = Date.now();
+		const reference = (request.reference || '').trim();
+		const chain = request.callChain ?? createSubWorkflowCallChain();
+		let subDef: ISubWorkflowDefinition | undefined;
+		let resolvedInputs: Record<string, unknown> | undefined;
+		try {
+			if (!reference) {
+				throw new Error('No sub-workflow selected: set subWorkflowId to a sub_workflow ticket ID (find one with GET_TICKETS(ticket_type="sub_workflow")).');
+			}
+			subDef = await this.resolveSubWorkflow(reference, request.contextUri);
+			if (!subDef) {
+				throw new Error(`Sub-Workflow '${reference}' not found: no sub_workflow ticket with ID '${reference}'. Find sub-workflows with GET_TICKETS(ticket_type="sub_workflow") and use the ticket ID.`);
+			}
+			resolvedInputs = this._bindSubWorkflowInputs(subDef, request.inputBindings, request.variables);
+			// Inside a workflow run the calling run receives the Sub-Workflow logs; otherwise a detached caller run is used
+			const liveParent = chain.parentRunId ? this._runs.get(chain.parentRunId) : undefined;
+			const parentRun = liveParent ?? this._createDetachedCallerRun(subDef, request);
+			const childRun = await this._executeSubWorkflow(parentRun, subDef, resolvedInputs, undefined, chain);
+			if (childRun.status === 'failed' || childRun.status === 'stopped') {
+				const failedNode = Object.values(childRun.nodeStates || {}).find(ns => ns.status === 'failed');
+				const failedNodeInfo = failedNode ? ` at node '${failedNode.nodeLabel}'` : '';
+				throw new Error(chain.abort.error || `Sub-Workflow '${subDef.name}' ${childRun.status === 'stopped' ? 'was stopped' : 'failed'}${failedNodeInfo}: ${childRun.error || 'Unknown error'}`);
+			}
+			return {
+				success: true,
+				subWorkflowId: subDef.id,
+				subWorkflowName: subDef.name,
+				resolvedInputs,
+				output: this._extractSubWorkflowOutput(childRun),
+				durationMs: Date.now() - startedAt
+			};
+		} catch (err) {
+			const message = chain.abort.error || (err instanceof Error ? err.message : String(err));
+			return {
+				success: false,
+				subWorkflowId: subDef?.id,
+				subWorkflowName: subDef?.name,
+				resolvedInputs,
+				durationMs: Date.now() - startedAt,
+				error: message,
+				callChainError: chain.abort.error
+			};
+		}
+	}
+
+	/** A caller run for a Sub-Workflow called outside any workflow run (a ticket run): never registered or persisted. */
+	private _createDetachedCallerRun(subDef: ISubWorkflowDefinition, request: ISubWorkflowInvocationRequest): IWorkflowExecutionRun {
+		const now = Date.now();
+		return {
+			runId: `subcall_${now}_${Math.random().toString(36).substring(2, 7)}`,
+			workflowUri: subDef.sourceWorkflowUri || request.contextUri || '',
+			workflowName: request.callerLabel || subDef.name,
+			status: 'running',
+			mode: 'standard',
+			fullSpeed: true,
+			trigger: 'manual',
+			visitedNodeIds: [],
+			startedAt: now,
+			updatedAt: now,
+			contextVariables: {},
+			nodeStates: {},
+			executionPath: [],
+			logs: []
+		};
+	}
+
+	public async checkSubWorkflowCallCycle(root: SubWorkflowCallGraphRoot, contextUri?: string, workspaceUri?: URI): Promise<string | undefined> {
+		try {
+			await this.whenSubWorkflowsReady();
+			let templates: ICustomModule[] | undefined;
+			const loadTemplates = async (): Promise<ICustomModule[]> => {
+				if (!templates) {
+					let wsUri = workspaceUri;
+					if (!wsUri && contextUri) {
+						try {
+							wsUri = await this.workspacesExplorerService.findWorkspaceRootUri(URI.parse(contextUri));
+						} catch {
+							wsUri = undefined;
+						}
+					}
+					try {
+						templates = await this.customModulesService.getCustomModules(wsUri);
+					} catch {
+						templates = [];
+					}
+				}
+				return templates;
+			};
+			const cycle = await findSubWorkflowCallCycle(root, {
+				resolveSubWorkflow: ref => this.resolveSubWorkflow(ref, contextUri),
+				resolveTemplate: async type => {
+					const tpl = findTemplateByTicketType(await loadTemplates(), type);
+					return tpl ? { id: tpl.id, name: tpl.name, fields: tpl.fields || [] } : undefined;
+				}
+			});
+			return cycle ? formatSubWorkflowCycleError(cycle) : undefined;
+		} catch (err) {
+			this.logService.warn('[WorkflowExecution] Sub-workflow cycle check failed:', err);
+			return undefined;
+		}
+	}
+
+	/** The call chain of a run (CI-38); a top-level run starts one with its own workflow. */
+	private _callChainOf(run: IWorkflowExecutionRun): ISubWorkflowCallChain {
+		const internal = run as IInternalWorkflowRun;
+		if (!internal._callChain) {
+			internal._callChain = createSubWorkflowCallChain({ kind: 'workflow', key: run.workflowUri, label: describeCallGraphNode('workflow', run.workflowName, run.workflowUri) }, run.runId);
+		}
+		return internal._callChain;
+	}
+
+	/** The call chain a ticket run started by `run` carries (its parent run is `run`). */
+	private _ticketCallChainOf(run: IWorkflowExecutionRun): ISubWorkflowCallChain {
+		return withSubWorkflowCallParentRun(this._callChainOf(run), run.runId);
+	}
+
+	/**
+	 * Resolves the inputs of a Sub-Workflow call: the Sub-Workflow defaults, overridden by the caller's bindings
+	 * ({var} references and interpolation against `variables`). Shared by workflow nodes and ticket runs (CI-38).
+	 */
+	private _bindSubWorkflowInputs(subDef: ISubWorkflowDefinition, bindings: unknown, variables: Record<string, unknown>): Record<string, unknown> {
+		const resolvedInputs: Record<string, unknown> = {};
+		for (const inpDef of (subDef.inputs || [])) {
+			resolvedInputs[inpDef.name] = this._coerceInputLiteral(inpDef.defaultValue ?? '');
+		}
+		const customBindings: Record<string, unknown> = (isWorkflowRecord(bindings) && !Array.isArray(bindings)) ? bindings : {};
+		for (const [k, rawExpr] of Object.entries(customBindings)) {
+			const expr = String(rawExpr ?? '').trim();
+			if (!expr) {
+				continue;
+			}
+			const directMatch = expr.match(/^(?:\{\{\s*([^{}]+?)\s*\}\}|\{\s*([^{}]+?)\s*\}|@?([a-zA-Z_][a-zA-Z0-9_]*))$/);
+			if (directMatch) {
+				const isExplicitBrace = Boolean(directMatch[1] || directMatch[2]);
+				const refKey = (directMatch[1] || directMatch[2] || directMatch[3] || '').trim();
+				if (refKey && Object.prototype.hasOwnProperty.call(variables, refKey) && variables[refKey] !== undefined) {
+					resolvedInputs[k] = variables[refKey];
+					continue;
+				}
+				if (isExplicitBrace && refKey) {
+					const avail = Object.keys(variables || {})
+						.filter(ck => ck && !ck.startsWith('@') && !ck.startsWith('__') && !ck.startsWith('comp_'))
+						.slice(0, 20)
+						.join(', ');
+					throw new Error(`Sub-Workflow '${subDef.name}' input '${k}' references undefined variable '${expr}'.${avail ? ` Available variables: ${avail}` : ''}`);
+				}
+			}
+			const unresolvedSubRefs: string[] = [];
+			const interpolated = expr.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}|\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}/g, (m, g1, g2) => {
+				const rk = (g1 || g2 || '').trim();
+				if (rk && Object.prototype.hasOwnProperty.call(variables, rk) && variables[rk] !== undefined) {
+					const v = variables[rk];
+					return typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+				}
+				if (rk && !unresolvedSubRefs.includes(rk)) {
+					unresolvedSubRefs.push(rk);
+				}
+				return m;
+			});
+			if (unresolvedSubRefs.length > 0) {
+				throw new Error(`Sub-Workflow '${subDef.name}' input '${k}' references undefined variable(s): ${unresolvedSubRefs.map(r => `{${r}}`).join(', ')}.`);
+			}
+			resolvedInputs[k] = this._coerceInputLiteral(interpolated);
+		}
+		return resolvedInputs;
+	}
+
+	/** The result of a finished Sub-Workflow run: the single output value, a dict of several outputs, or null. */
+	private _extractSubWorkflowOutput(childRun: IWorkflowExecutionRun): unknown {
+		const rawWorkflowOutputs = childRun.workflowOutputs ?? childRun.contextVariables['WORKFLOW_OUTPUTS'];
+		let childOutput: unknown;
+		if (isWorkflowRecord(rawWorkflowOutputs) && !Array.isArray(rawWorkflowOutputs)) {
+			const outputKeys = Object.keys(rawWorkflowOutputs);
+			if (outputKeys.length === 1) {
+				// Single exported output: pass through the raw value directly (list, string, number, object, etc.) without extra dict wrapping
+				childOutput = rawWorkflowOutputs[outputKeys[0]];
+			} else if (outputKeys.length > 1) {
+				// Multiple exported outputs: return a dict keyed by variable name (falling back to label)
+				childOutput = (childRun.workflowOutputsByVarName && Object.keys(childRun.workflowOutputsByVarName).length === outputKeys.length)
+					? childRun.workflowOutputsByVarName
+					: rawWorkflowOutputs;
+			} else {
+				childOutput = childRun.contextVariables['OUTPUT'];
+			}
+		} else {
+			childOutput = rawWorkflowOutputs ?? childRun.contextVariables['OUTPUT'];
+		}
+		// Like a Python function with no return value, an empty/void Sub-Workflow returns null (Python None)
+		if (childOutput === undefined) {
+			childOutput = null;
+		}
+		return childOutput;
 	}
 
 	private _ensureLatestSubWorkflowRunsLoaded(): void {
@@ -2799,6 +3011,23 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			throw new Error(`Cannot execute workflow: No flowchart nodes found for ${uriStr}`);
 		}
 
+		// Recursion protection (CI-38): a run never starts when its call graph has a cycle, and a workflow started from
+		// inside another run (nested workflow import) must not already be on that run's call chain
+		const workflowFrame = { kind: 'workflow' as const, key: uriStr, label: describeCallGraphNode('workflow', this._resolveWorkflowName(uriStr), uriStr) };
+		if (options?.callChain) {
+			const nestedError = checkSubWorkflowCall(options.callChain.frames, workflowFrame);
+			if (nestedError) {
+				options.callChain.abort.error = options.callChain.abort.error || nestedError;
+				throw new Error(nestedError);
+			}
+		} else {
+			const cycleError = await this.checkSubWorkflowCallCycle({ kind: 'workflow', key: uriStr, label: this._resolveWorkflowName(uriStr), nodes: flowchartData.nodes }, uriStr);
+			if (cycleError) {
+				this.notificationService.error(cycleError);
+				throw new Error(cycleError);
+			}
+		}
+
 		// Unified History-to-Runtime Inheritance for Partial/Selective Runs:
 		// If any visible upstream node already has a persisted `lastExecutionOutput` (the exact value shown in UI "Last Runtime Value")
 		// that is missing from `inheritedContextVariables` (e.g. from older runs before sidecar archiving), backfill it here so
@@ -2874,6 +3103,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			executionPath: [],
 			logs: []
 		};
+		(run as IInternalWorkflowRun)._callChain = options?.callChain
+			? extendSubWorkflowCallChain(options.callChain, workflowFrame, runId)
+			: createSubWorkflowCallChain(workflowFrame, runId);
 
 		// Initialize node states: on partial runs, preserve previous nodeStates for all unselected nodes so prior results remain intact
 		const selectiveResetSet = new Set<string>(
@@ -4100,7 +4332,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			const childWorkflowUri = subWorkflowImport.uri || subWorkflowImport.name;
 			const childRun = await this.executeWorkflow(childWorkflowUri, {
 				mode: 'standard',
-				initialInputs: { ...run.contextVariables }
+				initialInputs: { ...run.contextVariables },
+				callChain: this._callChainOf(run)
 			});
 			state.output = { subWorkflowRunId: childRun.runId, childStatus: childRun.status };
 			return;
@@ -4163,6 +4396,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketIdOrPath: ticketUri || ticketName,
 					inputParams: { ...run.contextVariables, ...inputParams },
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
+					callChain: this._ticketCallChainOf(run),
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  \u25B6 [${ticketName}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
@@ -4186,6 +4420,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				});
 				if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 					throw new Error('Workflow execution was stopped');
+				}
+				// A recursion / depth guard inside the ticket stops this whole run (CI-38)
+				const ticketChainAbort = this._callChainOf(run).abort.error;
+				if (ticketChainAbort) {
+					throw new Error(ticketChainAbort);
 				}
 
 				const ticketRecord: IExecutedTicketRecord = {
@@ -4292,51 +4531,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							if (!subDef) {
 								throw new Error(`Sub-Workflow '${stepComp.subWorkflowName || stepComp.subWorkflowId || stepComp.label}' not found: no sub_workflow ticket with ID '${stepComp.subWorkflowId || ''}'. Find sub-workflows with GET_TICKETS(ticket_type="sub_workflow") and use the ticket ID.`);
 							}
-							const resolvedInputs: Record<string, unknown> = {};
-							for (const inpDef of (subDef.inputs || [])) {
-								resolvedInputs[inpDef.name] = this._coerceInputLiteral(inpDef.defaultValue ?? '');
-							}
-							const customBindings = (stepComp.subWorkflowInputs && typeof stepComp.subWorkflowInputs === 'object')
-								? stepComp.subWorkflowInputs
-								: {};
-							for (const [k, rawExpr] of Object.entries(customBindings)) {
-								const expr = String(rawExpr ?? '').trim();
-								if (!expr) {
-									continue;
-								}
-								const directMatch = expr.match(/^(?:\{\{\s*([^{}]+?)\s*\}\}|\{\s*([^{}]+?)\s*\}|@?([a-zA-Z_][a-zA-Z0-9_]*))$/);
-								if (directMatch) {
-									const isExplicitBrace = Boolean(directMatch[1] || directMatch[2]);
-									const refKey = (directMatch[1] || directMatch[2] || directMatch[3] || '').trim();
-									if (refKey && Object.prototype.hasOwnProperty.call(run.contextVariables, refKey) && run.contextVariables[refKey] !== undefined) {
-										resolvedInputs[k] = run.contextVariables[refKey];
-										continue;
-									}
-									if (isExplicitBrace && refKey) {
-										const avail = Object.keys(run.contextVariables || {})
-											.filter(ck => ck && !ck.startsWith('@') && !ck.startsWith('__') && !ck.startsWith('comp_'))
-											.slice(0, 20)
-											.join(', ');
-										throw new Error(`Sub-Workflow '${subDef.name}' input '${k}' references undefined variable '${expr}'.${avail ? ` Available variables: ${avail}` : ''}`);
-									}
-								}
-								const unresolvedSubRefs: string[] = [];
-								const interpolated = expr.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}|\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}/g, (m, g1, g2) => {
-									const rk = (g1 || g2 || '').trim();
-									if (rk && Object.prototype.hasOwnProperty.call(run.contextVariables, rk) && run.contextVariables[rk] !== undefined) {
-										const v = run.contextVariables[rk];
-										return typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
-									}
-									if (rk && !unresolvedSubRefs.includes(rk)) {
-										unresolvedSubRefs.push(rk);
-									}
-									return m;
-								});
-								if (unresolvedSubRefs.length > 0) {
-									throw new Error(`Sub-Workflow '${subDef.name}' input '${k}' references undefined variable(s): ${unresolvedSubRefs.map(r => `{${r}}`).join(', ')}.`);
-								}
-								resolvedInputs[k] = this._coerceInputLiteral(interpolated);
-							}
+							const resolvedInputs = this._bindSubWorkflowInputs(subDef, stepComp.subWorkflowInputs, run.contextVariables);
 
 							try {
 								stepComp.lastExecutionInputs = JSON.parse(JSON.stringify(resolvedInputs));
@@ -4349,7 +4544,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							if (childRun.status === 'failed') {
 								const failedNode = Object.values(childRun.nodeStates || {}).find(ns => ns.status === 'failed');
 								const failedNodeInfo = failedNode ? ` at node '${failedNode.nodeLabel}'` : '';
-								const detailMsg = `Sub-Workflow '${subDef.name}' failed${failedNodeInfo}: ${childRun.error || 'Unknown error'}`;
+								// A recursion / depth guard stops the whole run with its own message naming the call chain (CI-38)
+								const detailMsg = this._callChainOf(run).abort.error || `Sub-Workflow '${subDef.name}' failed${failedNodeInfo}: ${childRun.error || 'Unknown error'}`;
 								stepComp.lastExecutionStatus = 'failed';
 								stepComp.lastExecutionDurationMs = Date.now() - stepStartMs;
 								stepComp.lastExecutedAt = new Date().toISOString();
@@ -4358,28 +4554,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								throw new Error(detailMsg);
 							}
 
-							const rawWorkflowOutputs = childRun.workflowOutputs ?? childRun.contextVariables['WORKFLOW_OUTPUTS'];
-							let childOutput: unknown;
-							if (isWorkflowRecord(rawWorkflowOutputs) && !Array.isArray(rawWorkflowOutputs)) {
-								const outputKeys = Object.keys(rawWorkflowOutputs);
-								if (outputKeys.length === 1) {
-									// Single exported output: pass through the raw value directly (list, string, number, object, etc.) without extra dict wrapping
-									childOutput = rawWorkflowOutputs[outputKeys[0]];
-								} else if (outputKeys.length > 1) {
-									// Multiple exported outputs: return a dict keyed by variable name (falling back to label)
-									childOutput = (childRun.workflowOutputsByVarName && Object.keys(childRun.workflowOutputsByVarName).length === outputKeys.length)
-										? childRun.workflowOutputsByVarName
-										: rawWorkflowOutputs;
-								} else {
-									childOutput = childRun.contextVariables['OUTPUT'];
-								}
-							} else {
-								childOutput = rawWorkflowOutputs ?? childRun.contextVariables['OUTPUT'];
-							}
-							// Like a Python function with no return value, an empty/void Sub-Workflow returns null (Python None)
-							if (childOutput === undefined) {
-								childOutput = null;
-							}
+							const childOutput = this._extractSubWorkflowOutput(childRun);
 							const outVarName = (stepComp.outputVariableName || '').trim() || generateSmartPythonVarName(stepComp.label || subDef.name, 'sub_workflow');
 							if (outVarName) {
 								run.contextVariables[outVarName] = childOutput;
@@ -4936,6 +5111,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketIdOrPath,
 					inputParams: inputParams,
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
+					callChain: this._ticketCallChainOf(run),
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  \u25B6 [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
@@ -4958,6 +5134,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 				});
 
+				// A recursion / depth guard inside the ticket stops this whole run (CI-38)
+				const ticketChainAbort = this._callChainOf(run).abort.error;
+				if (ticketChainAbort) {
+					throw new Error(ticketChainAbort);
+				}
 				if (!execRes.success) {
 					throw new Error(execRes.error || `Execution of ticket '${ticketIdOrPath}' failed.`);
 				}
@@ -7374,6 +7555,7 @@ finally:
 					ticketIdOrPath,
 					inputParams: { ...cleanCtxParams, ...inputParams },
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
+					callChain: this._ticketCallChainOf(run),
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  \u25B6 [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
@@ -7397,6 +7579,11 @@ finally:
 				});
 				if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 					throw new Error('Workflow execution was stopped');
+				}
+				// A recursion / depth guard inside the ticket stops this whole run (CI-38)
+				const ticketChainAbort = this._callChainOf(run).abort.error;
+				if (ticketChainAbort) {
+					throw new Error(ticketChainAbort);
 				}
 				if (!execRes.success) {
 					throw new Error(execRes.error || `Ticket '${ticketIdOrPath}' execution failed`);

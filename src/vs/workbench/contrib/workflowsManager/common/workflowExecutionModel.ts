@@ -2,6 +2,8 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+import type { ISubWorkflowCallChain } from './subWorkflowCallGraph.js';
+
 export type WorkflowRunStatus =
 	| 'idle'
 	| 'running'
@@ -18,6 +20,7 @@ export type WorkflowNodeStatus =
 	| 'success'
 	| 'failed'
 	| 'skipped';
+
 
 export interface IWorkflowLogEntry {
 	id: string;
@@ -236,6 +239,8 @@ export interface IWorkflowEngineOptions {
 	selectedNodeIds?: string[];
 	daemonIntervalMs?: number;
 	maxSteps?: number;
+	/** Set when this run is started from inside another run (CI-38 recursion / depth guard). */
+	callChain?: ISubWorkflowCallChain;
 }
 
 /**

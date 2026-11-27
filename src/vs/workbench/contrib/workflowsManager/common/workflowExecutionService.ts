@@ -6,6 +6,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ISubWorkflowDefinition, IWorkflowEngineOptions, IWorkflowExecutionRun, IWorkflowIOContract, IWorkflowLogEntry } from './workflowExecutionModel.js';
+import { ISubWorkflowCallChain, SubWorkflowCallGraphRoot } from './subWorkflowCallGraph.js';
 
 export const IWorkflowExecutionService = createDecorator<IWorkflowExecutionService>('workflowExecutionService');
 
@@ -59,6 +60,34 @@ export interface INotebookCellExecutionResult {
 	executionCount: number;
 }
 
+/** A Call Sub-Workflow made outside a workflow node, e.g. by a ticket's Call Sub-Workflow card (CI-38). */
+export interface ISubWorkflowInvocationRequest {
+	/** Sub-Workflow ticket ID or legacy `subwf_...` id. */
+	reference: string;
+	/** Input bindings {inputName: value or {var}}, resolved against `variables`. */
+	inputBindings?: Record<string, string>;
+	variables: Record<string, unknown>;
+	/** Where to search the Sub-Workflow ticket on disk (e.g. the ticket folder). */
+	contextUri?: string;
+	/** Name of the caller for logs (e.g. the card label). */
+	callerLabel?: string;
+	/** The chain of the run that started the caller, when it runs inside a workflow / Sub-Workflow run. */
+	callChain?: ISubWorkflowCallChain;
+}
+
+export interface ISubWorkflowInvocationResult {
+	success: boolean;
+	subWorkflowId?: string;
+	subWorkflowName?: string;
+	resolvedInputs?: Record<string, unknown>;
+	/** The single output value, a dict of several outputs, or null. */
+	output?: unknown;
+	durationMs: number;
+	error?: string;
+	/** Set when a recursion / depth guard stopped the call: the whole calling run must stop too. */
+	callChainError?: string;
+}
+
 export interface IWorkflowExecutionService {
 	readonly _serviceBrand: undefined;
 
@@ -90,6 +119,17 @@ export interface IWorkflowExecutionService {
 	 * programs and AI use. Returns the definition with its ticket ID as `id`.
 	 */
 	createSubWorkflowTicket(draft: ISubWorkflowDefinition): Promise<ISubWorkflowDefinition>;
+	/**
+	 * Runs a Sub-Workflow for a caller that is not a workflow node (a ticket's Call Sub-Workflow card), through the
+	 * same execution path as the node step, including the recursion / depth guard. Never rejects.
+	 */
+	invokeSubWorkflow(request: ISubWorkflowInvocationRequest): Promise<ISubWorkflowInvocationResult>;
+	/**
+	 * Up-front recursion check (CI-38): walks who calls whom from `root` (workflow nodes, Sub-Workflow definitions,
+	 * template Call Sub-Workflow cards, run-ticket steps whose template is known) and returns an error naming the
+	 * first cycle (e.g. `A -> B -> A`), or `undefined`. `workspaceUri` is used to find templates.
+	 */
+	checkSubWorkflowCallCycle(root: SubWorkflowCallGraphRoot, contextUri?: string, workspaceUri?: URI): Promise<string | undefined>;
 	getLatestSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;
 	/** The currently executing run of this Sub-Workflow if any, otherwise its latest finished snapshot. */
 	getActiveSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined;

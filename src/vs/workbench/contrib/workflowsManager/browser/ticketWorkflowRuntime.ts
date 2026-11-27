@@ -26,6 +26,8 @@ import { IWebContentExtractorService, WebContentExtractResult } from '../../../.
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { ISubWorkflowDefinition, hasWorkflowProperty, isWorkflowRecord } from '../common/workflowExecutionModel.js';
 import { buildDynamicListContextValue } from '../common/dynamicListValue.js';
+import { ISubWorkflowCallChain, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain } from '../common/subWorkflowCallGraph.js';
+import { ISubWorkflowInvocationResult, IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -192,6 +194,8 @@ export interface ITicketRunOptions {
 	onStepProgress?: (stepResult: IPrimitiveExecutionStepResult, index: number, total: number) => void;
 	/** Progress of a long running step, e.g. subtitle extraction of an MP3 / MP4 Player (CI-46). */
 	onStepMessage?: (info: { fieldId: string; fieldLabel: string; fieldType: string; message: string }) => void;
+	/** Set when the ticket runs inside a workflow / Sub-Workflow run: who called whom (CI-38 recursion guard). */
+	callChain?: ISubWorkflowCallChain;
 }
 
 export interface IPrimitiveExecutionStepResult {
@@ -1503,6 +1507,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						contextVariables[fKey] = defaultVal;
 						contextVariables[this._cleanKey(fKey)] = defaultVal;
 					}
+				}
+			}
+
+			// Call chain for Call Sub-Workflow cards and nested ticket runs (CI-38)
+			const ticketFrame = { kind: 'ticket' as const, key: ticketResult.ticketId, label: describeCallGraphNode('ticket', '', ticketResult.ticketId) };
+			const ticketCallChain = options.callChain ? extendSubWorkflowCallChain(options.callChain, ticketFrame) : createSubWorkflowCallChain(ticketFrame);
+			if (!options.callChain && fieldsToRun.some(f => f.type === 'sub_workflow' && !f.disabled)) {
+				// Up-front recursion check: a template whose calls form a cycle never starts
+				const cycleError = await this._getWorkflowExecutionService()?.checkSubWorkflowCallCycle(
+					{ kind: 'template', key: schema?.id || ticketResult.ticketType || ticketResult.ticketId, label: schema?.name || ticketResult.ticketType || ticketResult.ticketId, fields: fieldsToRun },
+					ticketUri.toString(),
+					wsUri
+				);
+				if (cycleError) {
+					throw new Error(cycleError);
 				}
 			}
 
@@ -3005,7 +3024,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const runRes = await this.runTicket({
 								workspaceUri: wsUri,
 								ticketIdOrPath: String(resolvedTarget || ''),
-								inputParams: resolvedParams
+								inputParams: resolvedParams,
+								callChain: ticketCallChain
 							});
 							stepOutput = runRes;
 							contextVariables[fieldLabel] = runRes;
@@ -3071,6 +3091,27 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'sub_workflow': {
+							// Call Sub-Workflow (CI-38): same execution path as the workflow node step
+							const invocation = await this._invokeSubWorkflowField(field, fieldLabel, contextVariables, ticketUri, ticketCallChain);
+							stepDetails = { subWorkflowId: field.subWorkflowId, subWorkflowName: invocation.subWorkflowName, inputs: invocation.resolvedInputs, output: invocation.output };
+							field.lastExecutionStatus = invocation.success ? 'success' : 'failed';
+							field.lastExecutionDurationMs = invocation.durationMs;
+							field.lastExecutionOutput = invocation.output;
+							field.lastExecutionLog = invocation.success
+								? `>>> Sub-Workflow '${invocation.subWorkflowName}' completed in ${invocation.durationMs}ms\nInputs: ${JSON.stringify(invocation.resolvedInputs ?? {})}\nOutputs: ${invocation.output === null ? 'None' : JSON.stringify(invocation.output, null, 2)}`
+								: `>>> ${invocation.error}`;
+							if (!invocation.success) {
+								stepDetails.error = invocation.error;
+								throw new Error(invocation.error || `Sub-Workflow '${fieldLabel}' failed`);
+							}
+							stepOutput = invocation.output ?? null;
+							contextVariables[fieldLabel] = stepOutput;
+							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+							customMetadata[fieldLabel] = JSON.stringify(stepOutput);
+							break;
+						}
+
 						case 'display': {
 							const rawDisp = (field.wfDisplayValue || '').trim();
 							const resolvedVal = await this._evaluateDisplayExpression(wsUri, ticketUri, rawDisp, contextVariables);
@@ -3125,7 +3166,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 
 					if (stepOutput !== undefined) {
-						const sanitizedStepOut = this.validateAndSanitizeComponentOutput(fieldType, field, stepOutput);
+						// A Sub-Workflow returns its outputs exactly (a dict with e.g. status / data keys is not an HTTP envelope)
+						const sanitizedStepOut = fieldType === 'sub_workflow' ? stepOutput : this.validateAndSanitizeComponentOutput(fieldType, field, stepOutput);
 						stepOutput = sanitizedStepOut;
 						const outVarName = (field.outputVariableName || '').trim() || generateSmartPythonVarName(fieldLabel, fieldType);
 						if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'display') {
@@ -3246,6 +3288,37 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				error: err.message || String(err)
 			};
 		}
+	}
+
+	/** The workflow execution service, resolved lazily (it depends on this runtime). */
+	private _getWorkflowExecutionService(): IWorkflowExecutionService | undefined {
+		try {
+			return this.instantiationService.invokeFunction(accessor => accessor.get(IWorkflowExecutionService));
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Runs the Sub-Workflow of a Call Sub-Workflow card with its bound inputs (CI-38). Never rejects. */
+	private async _invokeSubWorkflowField(field: IRuntimeCustomField, fieldLabel: string, contextVariables: Record<string, unknown>, ticketUri: URI, callChain: ISubWorkflowCallChain): Promise<ISubWorkflowInvocationResult> {
+		const executionService = this._getWorkflowExecutionService();
+		if (!executionService) {
+			return { success: false, durationMs: 0, error: `Sub-Workflow '${fieldLabel}' cannot run: the workflow engine is not available.` };
+		}
+		const bindings: Record<string, string> = {};
+		if (isWorkflowRecord(field.subWorkflowInputs) && !Array.isArray(field.subWorkflowInputs)) {
+			for (const [name, value] of Object.entries(field.subWorkflowInputs)) {
+				bindings[name] = typeof value === 'string' ? value : JSON.stringify(value);
+			}
+		}
+		return executionService.invokeSubWorkflow({
+			reference: (field.subWorkflowId || '').trim(),
+			inputBindings: bindings,
+			variables: contextVariables,
+			contextUri: ticketUri.toString(),
+			callerLabel: fieldLabel,
+			callChain
+		});
 	}
 
 	private _parseInputStringLiteral(val: unknown): unknown {
