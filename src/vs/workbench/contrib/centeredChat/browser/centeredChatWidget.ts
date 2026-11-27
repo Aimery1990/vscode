@@ -28,6 +28,7 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { IVoiceModelService } from '../../../contrib/voiceModels/common/voiceModel.js';
 import { IWorkspacesExplorerService } from '../../../contrib/workspacesExplorer/common/workspacesExplorer.js';
 import { TicketDataEngine } from '../../../contrib/workspacesExplorer/browser/tools/ticketDataEngine.js';
+import { withTicketAttachmentChange } from '../../../contrib/workspacesExplorer/browser/ticketAttachmentIntegrity.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -1980,6 +1981,7 @@ export class CenteredChatWidget extends Disposable {
 					if (!items || items.length === 0) { return; }
 					try {
 						let targetAttachmentsDir: URI | undefined = undefined;
+						let ticketFolderUri: URI | undefined = undefined;
 						if (!locator.entityUri && (locator.workspaceId || locator.ticketId)) {
 							try {
 								const wsUri = await this.ticketDataEngine.findWorkspaceUri(locator.workspaceId, locator.ticketId);
@@ -1993,6 +1995,7 @@ export class CenteredChatWidget extends Disposable {
 						}
 						if (locator.entityUri) {
 							const baseUri = locator.entityUri.includes('://') ? URI.parse(locator.entityUri) : URI.file(locator.entityUri);
+							ticketFolderUri = baseUri;
 							targetAttachmentsDir = URI.joinPath(baseUri, 'attachments');
 							if (!(await this.fileService.exists(targetAttachmentsDir))) {
 								await this.fileService.createFolder(targetAttachmentsDir);
@@ -2003,7 +2006,8 @@ export class CenteredChatWidget extends Disposable {
 							let fileSize = 0;
 							if (targetAttachmentsDir) {
 								const targetFileUri = URI.joinPath(targetAttachmentsDir, item.name);
-								await this.fileService.copy(item.uri, targetFileUri, true);
+								const copy = () => this.fileService.copy(item.uri, targetFileUri, true);
+								await (ticketFolderUri ? withTicketAttachmentChange(this.fileService, ticketFolderUri, 'User', copy) : copy());
 								const stat = await this.fileService.stat(targetFileUri);
 								fileSize = stat.size;
 							} else {

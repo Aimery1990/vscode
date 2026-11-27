@@ -25,6 +25,7 @@ import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId }
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
+import { checkTicketAttachments, withTicketAttachmentChange } from '../../workspacesExplorer/browser/ticketAttachmentIntegrity.js';
 import { readTicketFileResolved } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
 import { ITicketChangeActor } from '../../workspacesExplorer/common/ticketChangeLog.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -1461,6 +1462,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			const wsUri = this._toUri(options.workspaceUri);
 			const ticketUri = URI.parse(ticketResult.entityUri);
+			// Attachments changed outside the app since they were recorded are logged before the run uses them.
+			await checkTicketAttachments(this.fileService, ticketUri);
 			const schema = ticketResult.schema;
 			const customMetadata = { ...ticketResult.customMetadata };
 			const inputOverrides = options.inputParams || {};
@@ -2114,7 +2117,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 										audioFileName = `tts_${safeKey}.${ttsFormat}`;
 										audioRelativePath = `attachments/${audioFileName}`;
 										const audioUri = URI.joinPath(ticketUri, audioRelativePath);
-										await this.fileService.writeFile(audioUri, VSBuffer.wrap(ttsRes.audioBuffer));
+										const audioBytes = ttsRes.audioBuffer;
+										await withTicketAttachmentChange(this.fileService, ticketUri, 'Workflow', () => this.fileService.writeFile(audioUri, VSBuffer.wrap(audioBytes)));
 										lastGenerated = new Date().toISOString();
 										lastSynthesizedText = interpolatedText;
 										stepOutput = audioRelativePath;

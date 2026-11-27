@@ -49,7 +49,8 @@ export const TICKET_CHANGE_RECORDS_HEADING = '### Change Records';
 // Actors
 // ------------------------------------------------------------------------------------------------
 
-export type TicketChangeActorKind = 'User' | 'AI Agent' | 'Workflow';
+/** `System` is the app itself, e.g. `System (detected)` for attachment changes found when a ticket is opened. */
+export type TicketChangeActorKind = 'User' | 'AI Agent' | 'Workflow' | 'System';
 
 /** Who changed a ticket: the kind (written as `update_by`) and, when known, the agent / workflow name. */
 export interface ITicketChangeActor {
@@ -764,7 +765,21 @@ export function summarizeTicketListChange(oldText: string, newText: string): ITi
 // Change records
 // ------------------------------------------------------------------------------------------------
 
-export type TicketChangeKind = 'inline' | 'diff' | 'blob' | 'binary' | 'list';
+export type TicketChangeKind = 'inline' | 'diff' | 'blob' | 'binary' | 'list' | 'attachments';
+
+/** One file of an `attachments` record: added / removed / content changed (see `ticketAttachmentIntegrity.ts`). */
+export interface ITicketAttachmentChangeItem {
+	readonly op: 'added' | 'removed' | 'changed';
+	readonly name: string;
+	/** SHA-256 (lowercase hex) of the current (removed: last recorded) content; empty when too large to hash. */
+	readonly sha256: string;
+	readonly size: number;
+	/** changed: the previously recorded hash / size. */
+	readonly oldSha256?: string;
+	readonly oldSize?: number;
+	/** changed: found when the ticket was opened / run, i.e. changed outside the app. */
+	readonly detected?: boolean;
+}
 
 /** One field change as written into the machine readable block of a change entry. */
 export interface ITicketChangeRecord {
@@ -792,6 +807,7 @@ export interface ITicketChangeRecord {
 	linesRemoved?: number;
 	items?: ITicketListChangeSummary;
 	media?: { old: ITicketMediaRef[]; new: ITicketMediaRef[] };
+	attachments?: ITicketAttachmentChangeItem[];
 }
 
 export interface IPlannedTicketChange {
@@ -916,11 +932,35 @@ export function describeTicketChangeRecord(r: ITicketChangeRecord): string {
 			const pv = fromEmpty ? r.new : r.old;
 			return `${head} ${fromEmpty ? '(empty) → text' : 'text → (empty)'}; ${words}; full text ${hash}\n  - preview: ${inlineValue(pv)}`;
 		}
+		case 'attachments':
+			return `${head} ${attachmentCounts(r.attachments ?? [])}${(r.attachments ?? []).map(a => `\n  - ${describeTicketAttachmentChange(a)}`).join('')}`;
 		case 'diff': {
 			const s = r.stats!;
 			return `${head} ${fmtCount(s.old.words)} → ${fmtCount(s.new.words)} words, ${fmtCount(s.old.chars)} → ${fmtCount(s.new.chars)} chars, ${fmtCount(s.old.lines)} → ${fmtCount(s.new.lines)} lines; +${r.linesAdded ?? 0} / -${r.linesRemoved ?? 0} diff lines${r.diffTruncated ? ' (diff truncated)' : ''}; full texts old ${versionRef(r.oldPath)}, new ${versionRef(r.newPath)}`;
 		}
 	}
+}
+
+function shaRef(sha: string | undefined): string {
+	return sha ? `sha256:${sha}` : 'sha256: not hashed (file too large)';
+}
+
+/** `+ resume.pdf (sha256:…, 182,331 bytes)`, `- old.docx (sha256:…, 1,024 bytes)`, `~ resume.pdf content changed: …`. */
+export function describeTicketAttachmentChange(a: ITicketAttachmentChangeItem): string {
+	const name = inlineValue(a.name);
+	switch (a.op) {
+		case 'added':
+			return `+ ${name} (${shaRef(a.sha256)}, ${fmtCount(a.size)} bytes)`;
+		case 'removed':
+			return `- ${name} (${shaRef(a.sha256)}, ${fmtCount(a.size)} bytes)`;
+		case 'changed':
+			return `~ ${name} content changed${a.detected ? ' outside the app' : ''}: sha256 ${a.oldSha256 || '(not hashed)'} → ${a.sha256 || '(not hashed)'}, ${fmtCount(a.oldSize ?? 0)} → ${fmtCount(a.size)} bytes`;
+	}
+}
+
+function attachmentCounts(items: readonly ITicketAttachmentChangeItem[]): string {
+	const n = (op: ITicketAttachmentChangeItem['op']) => items.filter(a => a.op === op).length;
+	return [n('added') && `${n('added')} added`, n('removed') && `${n('removed')} removed`, n('changed') && `${n('changed')} content changed`].filter(Boolean).join(', ') || 'no change';
 }
 
 /** A one line summary for worklog.md: `Status: Todo → Done; Description changed`. */
@@ -929,7 +969,9 @@ export function summarizeTicketChangeRecords(records: readonly ITicketChangeReco
 		const s = (v || '(empty)').replace(/\s+/g, ' ');
 		return s.length > 40 ? `${s.slice(0, 39)}…` : s;
 	};
-	return records.map(r => r.kind === 'inline' ? `${r.label}: ${one(r.old)} → ${one(r.new)}` : `${r.label} changed`).join('; ');
+	return records.map(r => r.kind === 'inline' ? `${r.label}: ${one(r.old)} → ${one(r.new)}`
+		: r.kind === 'attachments' ? `${r.label}: ${attachmentCounts(r.attachments ?? [])}`
+			: `${r.label} changed`).join('; ');
 }
 
 function codeFence(content: string): string {

@@ -36,6 +36,8 @@ import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/wo
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
 import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
+import { checkTicketAttachments, readTicketAttachmentManifest, withTicketAttachmentChange } from './ticketAttachmentIntegrity.js';
+import { attachmentTamperTooltip, IAttachmentManifest } from '../common/ticketAttachmentIntegrity.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
@@ -156,6 +158,7 @@ interface IEditorParts {
 	mediaPlayerCardMount?: HTMLElement;
 	mediaPlayerHeaderBadge?: HTMLElement;
 	mediaPlayerPrimitiveCards?: HTMLElement[];
+	attachmentCards?: HTMLElement[];
 	outputItemFormatSelector?: HTMLSelectElement;
 	outputItemRawContent?: HTMLTextAreaElement;
 	outputItemViewport?: HTMLElement;
@@ -294,7 +297,7 @@ const SHOW_TICKET_INSTRUCTIONS = false;
 type EditorPartRole = keyof IEditorParts;
 
 /** Roles that keep every element built for them (in build order). */
-const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
+const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['attachmentCards', 'browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
 
 const partRolesOf = new WeakMap<Element, readonly EditorPartRole[]>();
 const builtParts = new WeakMap<Element, IEditorParts>();
@@ -955,6 +958,8 @@ export class EntityDetailEditor extends EditorPane {
 
 	private _suppressAutoReloadUntil: number = 0;
 	private _loadSeq: number = 0;
+	/** Recorded attachment hashes of the shown ticket (tamper warnings on attachment cards). */
+	private _attachmentManifest: IAttachmentManifest | undefined;
 	private _saveEpoch: number = 0;
 	private _activeSaveCount: number = 0;
 	private _saveChain: Promise<void> = Promise.resolve();
@@ -2583,6 +2588,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			const attachments = await this._getAttachments(this._entityUri);
+			this._attachmentManifest = await readTicketAttachmentManifest(this._fileService, this._entityUri);
 			await this._loadSubWorkflowDefinition(parsed.ticketId);
 			// A Freestyle ticket has no template: its own structure is stored in its folder
 			const freestyleSchema = isFreestyleTicketType(this._entityType)
@@ -2687,6 +2693,8 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateTablePrimitiveCards();
 			await this._hydrateSshPrimitiveCards();
 			this._renderBrowserCredentialNames();
+			this._applyAttachmentTamperMarks();
+			this._checkAttachmentIntegrity(this._entityUri, loadSeq);
 			this._applySavedScrollPosition(scrollKey);
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
@@ -8216,7 +8224,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 					const fileUri = URI.joinPath(attachmentsDir, e.name);
 					const buffer = new Uint8Array(e.data);
-					await this._fileService.writeFile(fileUri, VSBuffer.wrap(buffer));
+					await withTicketAttachmentChange(this._fileService, this._entityUri, 'User', () => this._fileService.writeFile(fileUri, VSBuffer.wrap(buffer)));
 					this._notificationService.info(localize('fileUploaded', "Attachment '{0}' uploaded.", e.name));
 					await this._resolvePathsAndLoadData();
 				} catch (err) {
@@ -8247,7 +8255,7 @@ export class EntityDetailEditor extends EditorPane {
 				try {
 					const fileUri = URI.joinPath(this._entityUri, 'attachments', e.name);
 					if (await this._fileService.exists(fileUri)) {
-						await this._fileService.del(fileUri);
+						await withTicketAttachmentChange(this._fileService, this._entityUri, 'User', () => this._fileService.del(fileUri));
 						this._notificationService.info(localize('attachmentDeleted', "Attachment deleted."));
 						await this._resolvePathsAndLoadData();
 					}
@@ -13242,7 +13250,8 @@ ${rawErr}
 			const audioFileUri = URI.joinPath(this._entityUri, audioRelativePath);
 
 			this._suppressAutoReloadUntil = Date.now() + 2500;
-			await this._fileService.writeFile(audioFileUri, VSBuffer.wrap(res.audioBuffer));
+			const ttsBytes = res.audioBuffer;
+			await withTicketAttachmentChange(this._fileService, this._entityUri, 'User', () => this._fileService.writeFile(audioFileUri, VSBuffer.wrap(ttsBytes)));
 
 			const nowStr = `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
 			card.setAttribute('data-audio-file', audioFileName);
@@ -19569,6 +19578,39 @@ ${interpolatedPrompt}`;
 		}
 	}
 
+	/**
+	 * Re-hashes the ticket's attachments in the background (only files whose size / mtime changed) and logs changes made
+	 * outside the app as `System (detected)`; then refreshes the tamper warnings.
+	 */
+	private _checkAttachmentIntegrity(entityUri: URI, loadSeq: number): void {
+		checkTicketAttachments(this._fileService, entityUri).then(manifest => {
+			if (loadSeq !== this._loadSeq || this._entityUri?.toString() !== entityUri.toString()) {
+				return;
+			}
+			this._attachmentManifest = manifest;
+			this._applyAttachmentTamperMarks();
+		}, () => { /* reported by the checker */ });
+	}
+
+	/** Adds a warning icon (old / new hash and detection time in the tooltip) to attachment cards of tampered files. */
+	private _applyAttachmentTamperMarks(): void {
+		if (!this._container) {
+			return;
+		}
+		const files = this._attachmentManifest?.files ?? {};
+		for (const card of this._pageParts.attachmentCards ?? []) {
+			for (const old of Array.from(card.children).filter(c => c.classList.contains('attachment-tamper-mark'))) {
+				old.remove();
+			}
+			const name = card.getAttribute('data-file-name') || '';
+			const entry = Object.prototype.hasOwnProperty.call(files, name) ? files[name] : undefined;
+			const tooltip = entry ? attachmentTamperTooltip(entry) : undefined;
+			if (tooltip) {
+				card.append($('span', { class: `attachment-tamper-mark ${ThemeIcon.asClassName(Codicon.warning)}`, title: tooltip, style: 'color: #f59e0b; font-size: 13px;' }));
+			}
+		}
+	}
+
 	private async _getAttachments(entityUri: URI): Promise<string[]> {
 		const attachmentsDir = URI.joinPath(entityUri, 'attachments');
 		if (!(await this._fileService.exists(attachmentsDir))) {
@@ -20299,7 +20341,7 @@ ${interpolatedPrompt}`;
 										$.SVG('path', { d: 'M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z' })
 									));
 
-							fileItemsContent.append($('div.attachment-card-download', { 'data-file-name': textOf(f.name), style: 'display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease;', title: 'Download attachment' },
+							fileItemsContent.append(part('attachmentCards', $('div.attachment-card-download', { 'data-file-name': textOf(f.name), style: 'display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease;', title: 'Download attachment' },
 								iconSvg,
 								$('span', { style: 'font-size: 0.9em; font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
 									textOf(f.name)
@@ -20307,7 +20349,7 @@ ${interpolatedPrompt}`;
 								...(f.size ? [
 									$('span', { style: 'font-size: 0.75em; opacity: 0.5;' }, '(', (f.size / 1024).toFixed(0), ' KB)')
 								] : [])
-							));
+							)));
 						}
 					}
 

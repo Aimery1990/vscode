@@ -200,3 +200,29 @@ export async function recordTicketFieldChanges(fileService: IFileService, config
 		ticketChangeCoalescer.invalidate(ticketKey);
 	}
 }
+
+/**
+ * Writes ready-made change records (e.g. attachment changes) as a new change entry of the ticket, serialized with the
+ * ticket's field writes. The entry is never coalesced; the next field change starts a new entry.
+ */
+export function recordTicketChangeEntry(fileService: IFileService, configDir: URI, records: readonly ITicketChangeRecord[], actor: ITicketChangeActor, now: Date = new Date()): Promise<void> {
+	return enqueue(configDir.toString(), async () => {
+		const storage = new TicketWorklogStorage(fileService);
+		const startedAt = storage.formatFullDateTime(now);
+		const save = (timestamp: string) => {
+			const text = renderTicketChangeEntry(records, actor, timestamp);
+			return {
+				raw_content: text.markdown,
+				update_summary: text.summary,
+				update_by: actor.kind,
+				actor_name: actor.name,
+				entry_kind: TICKET_CHANGE_ENTRY_KIND
+			};
+		};
+		const entry = await storage.saveWorklog(configDir, save(startedAt), { customDate: now });
+		if (entry.meta.totalParts === 1 && entry.meta.timestamp !== startedAt) {
+			await storage.rewriteSinglePartEntry(configDir, entry.meta.partFiles[0], entry.meta.timestamp, save(entry.meta.timestamp));
+		}
+		ticketChangeCoalescer.invalidate(URI.joinPath(configDir, 'Worklogs').toString());
+	});
+}
