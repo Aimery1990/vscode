@@ -741,6 +741,10 @@ export class WorkflowEditor extends EditorPane {
 	private _outlinePanelEl?: HTMLElement;
 	private _isSubWorkflowDropdownOpen = false;
 	private _showEncapsulateForm = false;
+	/** True while an encapsulation is creating its Sub-Workflow ticket. */
+	private _isEncapsulating = false;
+	/** Sub-Workflow ticket whose delete button was clicked once (a second click deletes it). */
+	private _pendingSubWorkflowDeleteId: string | undefined;
 	// Workflow Outline (layers button): keys of the expanded item per menu level, library section state, lit lightbulb
 	private _outlinePath: string[] = [];
 	private _outlineLibraryOpen = false;
@@ -10129,7 +10133,11 @@ export class WorkflowEditor extends EditorPane {
 		return hidden;
 	}
 
-	private _encapsulateNodesAsSubWorkflow(nodeIds: string[], rawName: string): ISubWorkflowDefinition | undefined {
+	/**
+	 * Encapsulates the selected nodes as a Sub-Workflow: creates a `sub_workflow` ticket inside this workflow's folder
+	 * (normal ticket numbering, e.g. FINDJ-0042) whose folder stores the definition (CI-23).
+	 */
+	private async _encapsulateNodesAsSubWorkflow(nodeIds: string[], rawName: string): Promise<ISubWorkflowDefinition | undefined> {
 		const cleanName = rawName.trim();
 		if (!cleanName) {
 			this._notificationService.warn('Please enter a name for the Sub-Workflow.');
@@ -10145,10 +10153,14 @@ export class WorkflowEditor extends EditorPane {
 		const contract = this._workflowExecutionService.resolveWorkflowIOContract({ nodes: subNodes, links: subLinks });
 
 		const curUri = this._workflowUri?.toString() || '';
+		if (!curUri) {
+			this._notificationService.warn('Save the workflow first: a Sub-Workflow is stored as a ticket inside the workflow folder.');
+			return undefined;
+		}
 		const wfName = this.input?.getName() || 'Workflow';
 		const now = Date.now();
-		const def: ISubWorkflowDefinition = {
-			id: `subwf_${now}_${Math.random().toString(36).substring(2, 6)}`,
+		const draft: ISubWorkflowDefinition = {
+			id: '',
 			name: cleanName,
 			namespace: sanitizePythonVarName(cleanName) || `subwf_${now}`,
 			sourceWorkflowUri: curUri,
@@ -10163,8 +10175,14 @@ export class WorkflowEditor extends EditorPane {
 			updatedAt: now
 		};
 
-		this._workflowExecutionService.saveSubWorkflow(def);
-		this._notificationService.info(`Encapsulated '${cleanName}' (${subNodes.length} node(s), ${contract.inputs.length} input(s), ${contract.outputs.length} output(s)).`);
+		let def: ISubWorkflowDefinition;
+		try {
+			def = await this._workflowExecutionService.createSubWorkflowTicket(draft);
+		} catch (err) {
+			this._notificationService.error(`Could not create the Sub-Workflow ticket for '${cleanName}': ${err instanceof Error ? err.message : String(err)}`);
+			return undefined;
+		}
+		this._notificationService.info(`Encapsulated '${cleanName}' as Sub-Workflow ticket ${def.id} (${subNodes.length} node(s), ${contract.inputs.length} input(s), ${contract.outputs.length} output(s)).`);
 		return def;
 	}
 
@@ -10260,6 +10278,10 @@ export class WorkflowEditor extends EditorPane {
 		const allSubs = curUri
 			? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri)
 			: [];
+		// Sub-Workflow tickets of other workflows: callable from here too (by ticket ID)
+		const otherSubs = curUri
+			? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri !== curUri)
+			: [];
 
 		const triggerBtn = append(this._subWorkflowWidgetEl, $(`button.wf-subworkflow-trigger-btn${this._isSubWorkflowDropdownOpen ? '.is-open' : ''}`, {
 			type: 'button',
@@ -10312,15 +10334,27 @@ export class WorkflowEditor extends EditorPane {
 			const cancelBtn = append(encapBar, $('button.wf-subworkflow-encap-cancel', { type: 'button', title: 'Cancel' }));
 			append(cancelBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 
-			const doSave = () => {
+			confirmBtn.disabled = this._isEncapsulating;
+			const doSave = async () => {
+				if (this._isEncapsulating) {
+					return;
+				}
 				const ids = Array.from(this._selectedNodeIds);
-				const created = this._encapsulateNodesAsSubWorkflow(ids, nameInput.value);
+				this._isEncapsulating = true;
+				confirmBtn.disabled = true;
+				confirmBtn.textContent = 'Creating...';
+				let created: ISubWorkflowDefinition | undefined;
+				try {
+					created = await this._encapsulateNodesAsSubWorkflow(ids, nameInput.value);
+				} finally {
+					this._isEncapsulating = false;
+				}
 				if (created) {
 					this._showEncapsulateForm = false;
-					this._renderSubWorkflowDropdown();
 				}
+				this._renderSubWorkflowDropdown();
 			};
-			confirmBtn.onclick = doSave;
+			confirmBtn.onclick = () => void doSave();
 			cancelBtn.onclick = () => {
 				this._showEncapsulateForm = false;
 				this._renderSubWorkflowDropdown();
@@ -10328,7 +10362,7 @@ export class WorkflowEditor extends EditorPane {
 			nameInput.onkeydown = (e) => {
 				if (e.key === 'Enter') {
 					e.preventDefault();
-					doSave();
+					void doSave();
 				} else if (e.key === 'Escape') {
 					e.preventDefault();
 					this._showEncapsulateForm = false;
@@ -10356,11 +10390,11 @@ export class WorkflowEditor extends EditorPane {
 		// Sub-Workflow library (insert / drag into nodes, show-hide region, delete): kept, but collapsed and compact
 		const libToggle = append(panel, $(`button.wf-outline-section-toggle${this._outlineLibraryOpen ? '.is-open' : ''}`, {
 			type: 'button',
-			title: 'Sub-Workflows of this workflow: click a name to show / hide it; drag it onto a node (or select a node and press +) to use it'
+			title: 'Sub-Workflow tickets (type sub_workflow): click a name to show / hide it; drag it onto a node (or select a node and press +) to call it by its ticket ID'
 		})) as HTMLButtonElement;
 		append(libToggle, $('span' + ThemeIcon.asCSSSelector(this._outlineLibraryOpen ? Codicon.chevronDown : Codicon.chevronRight)));
 		append(libToggle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
-		append(libToggle, $('span', {}, `Sub-Workflow Library (${allSubs.length})`));
+		append(libToggle, $('span', {}, `Sub-Workflow Library (${allSubs.length}${otherSubs.length > 0 ? ` + ${otherSubs.length} from other workflows` : ''})`));
 		libToggle.onclick = () => {
 			this._outlineLibraryOpen = !this._outlineLibraryOpen;
 			this._renderSubWorkflowDropdown();
@@ -10373,6 +10407,10 @@ export class WorkflowEditor extends EditorPane {
 			} else {
 				this._renderSubWorkflowLibraryItems(listContentEl, allSubs, curUri);
 			}
+			if (otherSubs.length > 0) {
+				append(listContentEl, $('.wf-outline-section-label', {}, 'From other workflows'));
+				this._renderSubWorkflowLibraryItems(listContentEl, otherSubs, curUri);
+			}
 			this._addOutlineOverscroll('library', listEl, listContentEl);
 		}
 
@@ -10382,6 +10420,7 @@ export class WorkflowEditor extends EditorPane {
 	private _renderSubWorkflowLibraryItems(listEl: HTMLElement, allSubs: ISubWorkflowDefinition[], curUri: string): void {
 		for (const sw of allSubs) {
 			const isFromCurrentCanvas = Boolean(curUri && sw.sourceWorkflowUri === curUri);
+			const isTicket = Boolean(sw.ticketFolderUri);
 			const row = append(listEl, $('.wf-subworkflow-item'));
 			row.setAttribute('draggable', 'true');
 			row.ondragstart = (e: DragEvent) => {
@@ -10392,14 +10431,15 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			const swItem = this._outlineSubWorkflowItem(sw.id, sw.name, 'library', new Set<string>(), '');
-			void isFromCurrentCanvas;
 
 			// Label: click only shows / hides it (never changes the canvas). Adding it to a node is explicit: drag it onto
 			// a node, or select one node and press "+".
+			const idText = isTicket ? `Ticket ${sw.id}` : `Legacy ${sw.id} (not migrated to a ticket yet)`;
+			const sourceText = isFromCurrentCanvas ? '' : ` · from ${sw.sourceWorkflowName || 'another workflow'}`;
 			const infoWrap = append(row, $('.wf-subworkflow-info'));
-			infoWrap.title = `Click to show / hide '${sw.name}' below the canvas. To use it, drag it onto a node, or select a node and press +\n${sw.inputs.length} input(s) · ${sw.outputs.length} output(s)`;
+			infoWrap.title = `Click to show / hide '${sw.name}' below the canvas. To use it, drag it onto a node, or select a node and press +\n${idText}${sourceText}\n${sw.inputs.length} input(s) · ${sw.outputs.length} output(s)`;
 			append(infoWrap, $('.wf-subworkflow-name', {}, sw.name));
-			append(infoWrap, $('.wf-subworkflow-meta', {}, `${sw.inputs.length} in · ${sw.outputs.length} out`));
+			append(infoWrap, $('.wf-subworkflow-meta', {}, `${isTicket ? sw.id : 'legacy'} · ${sw.inputs.length} in · ${sw.outputs.length} out${sourceText}`));
 			infoWrap.onclick = (e) => {
 				e.stopPropagation();
 				this._toggleOutlineItem(swItem);
@@ -10408,7 +10448,7 @@ export class WorkflowEditor extends EditorPane {
 			const selectedNode = this._selectedNodeIds.size === 1 ? this._data.nodes.find(n => n.id === Array.from(this._selectedNodeIds)[0]) : undefined;
 			const addBtn = append(row, $(`button.wf-subworkflow-add-btn${selectedNode ? '' : '.is-disabled'}`, {
 				type: 'button',
-				title: selectedNode ? `Add '${sw.name}' as a capsule to the selected node '${selectedNode.label || selectedNode.id}'` : 'Select exactly one node on the canvas first (or drag this Sub-Workflow onto a node)'
+				title: selectedNode ? `Add '${sw.name}' (${sw.id}) as a capsule to the selected node '${selectedNode.label || selectedNode.id}'` : 'Select exactly one node on the canvas first (or drag this Sub-Workflow onto a node)'
 			})) as HTMLButtonElement;
 			append(addBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
 			addBtn.onclick = (e) => {
@@ -10422,14 +10462,26 @@ export class WorkflowEditor extends EditorPane {
 				this._renderSubWorkflowDropdown();
 			};
 
-			// Delete button
-			const delBtn = append(row, $('button.wf-subworkflow-del-btn', {
+			// Delete: only for the Sub-Workflows of this workflow; a ticket needs a second click (its folder goes to the trash)
+			if (!isFromCurrentCanvas) {
+				continue;
+			}
+			const isConfirming = this._pendingSubWorkflowDeleteId === sw.id;
+			const delBtn = append(row, $(`button.wf-subworkflow-del-btn${isConfirming ? '.is-confirming' : ''}`, {
 				type: 'button',
-				title: `Remove Sub-Workflow '${sw.name}' from library`
+				title: isConfirming
+					? `Click again to delete Sub-Workflow ticket ${sw.id} '${sw.name}' (its folder is moved to the trash)`
+					: (isTicket ? `Delete Sub-Workflow ticket ${sw.id} '${sw.name}'` : `Remove Sub-Workflow '${sw.name}' from library`)
 			})) as HTMLButtonElement;
-			append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+			append(delBtn, $('span' + ThemeIcon.asCSSSelector(isConfirming ? Codicon.trash : Codicon.close)));
 			delBtn.onclick = (e) => {
 				e.stopPropagation();
+				if (isTicket && !isConfirming) {
+					this._pendingSubWorkflowDeleteId = sw.id;
+					this._renderSubWorkflowDropdown();
+					return;
+				}
+				this._pendingSubWorkflowDeleteId = undefined;
 				this._workflowExecutionService.deleteSubWorkflow(sw.id);
 			};
 		}

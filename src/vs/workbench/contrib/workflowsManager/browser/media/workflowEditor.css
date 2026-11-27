@@ -8457,6 +8457,13 @@ Node Component Palette & Configuration Modal
 	background: rgba(248, 113, 113, 0.14);
 }
 
+/* Second click deletes the Sub-Workflow ticket: the button stays visible and highlighted until then */
+.wf-subworkflow-del-btn.is-confirming {
+	opacity: 1;
+	color: #f87171;
+	background: rgba(248, 113, 113, 0.22);
+}
+
 
 
 

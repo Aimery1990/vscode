@@ -22,6 +22,8 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { EntityDetailEditorInput, IEntityPreviewModule } from './entityDetailEditorInput.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
+import { ISubWorkflowDefinition } from '../../workflowsManager/common/workflowExecutionModel.js';
+import { SUB_WORKFLOW_DEFINITION_REL_PATH, describeSubWorkflowSource, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition } from '../../workflowsManager/common/subWorkflowTicket.js';
 import { URI } from '../../../../base/common/uri.js';
 import { FileAccess } from '../../../../base/common/network.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
@@ -42,7 +44,7 @@ import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { CustomModuleSchemaEditor } from '../../customModules/browser/customModuleSchemaEditor.js';
 import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHelpGuide.js';
-import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, isReservedFreestyleTemplate, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, isReservedTemplate, isSubWorkflowTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
@@ -985,6 +987,9 @@ export class EntityDetailEditor extends EditorPane {
 	private _isComponentToolboxOpen: boolean = false;
 	/** The Freestyle ticket's own structure as stored on disk (`undefined` for every other page). */
 	private _freestyleSchema: ICustomModule | undefined;
+	/** Sub-Workflow tickets only (CI-23): the definition read from `.agents/sub_workflow.json`, shown read-only. */
+	private _subWorkflowDef: ISubWorkflowDefinition | undefined;
+	private _subWorkflowDefMissing = false;
 	/** Component card frames of the rendered Freestyle structure, by component id (lowercase). */
 	private _freestyleComponentFrames = new Map<string, HTMLElement>();
 	/** What is being dragged from the toolbox or between component cards. */
@@ -1517,7 +1522,7 @@ export class EntityDetailEditor extends EditorPane {
 		try {
 			const modules = await this._customModulesService.getCustomModules(await this._findWorkspaceRootForTicket(ticketUri));
 			// Freestyle tickets can only be created manually in the UI: never default to a reserved-name template
-			return modules.find(m => !isReservedFreestyleTemplate(m))?.name || '';
+			return modules.find(m => !isReservedTemplate(m))?.name || '';
 		} catch {
 			return '';
 		}
@@ -2026,6 +2031,58 @@ export class EntityDetailEditor extends EditorPane {
 		return card;
 	}
 
+	/** Sub-Workflow tickets (CI-23): reads the definition shown read-only on the page; clears it for other tickets. */
+	private async _loadSubWorkflowDefinition(ticketId: string): Promise<void> {
+		this._subWorkflowDef = undefined;
+		this._subWorkflowDefMissing = false;
+		if (!this._entityUri || !isSubWorkflowTicketType(this._entityType)) {
+			return;
+		}
+		try {
+			const fileUri = getSubWorkflowDefinitionUri(this._entityUri);
+			if (await this._fileService.exists(fileUri)) {
+				this._subWorkflowDef = parseSubWorkflowDefinition((await this._fileService.readFile(fileUri)).value.toString(), ticketId);
+			}
+		} catch {
+			this._subWorkflowDef = undefined;
+		}
+		this._subWorkflowDefMissing = !this._subWorkflowDef;
+	}
+
+	/** Read-only card of a Sub-Workflow ticket: name, source workflow, inputs and outputs. */
+	private _buildSubWorkflowCard(): HTMLElement {
+		const def = this._subWorkflowDef;
+		const rowStyle = 'display: flex; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.45;';
+		const keyStyle = 'flex: 0 0 120px; opacity: 0.7;';
+		const row = (key: string, value: string) => $('div', { style: rowStyle }, $('span', { style: keyStyle }, key), $('span', { style: 'flex: 1; word-break: break-word;' }, value));
+		const listOrNone = (items: string[]) => items.length > 0
+			? $('ul', { style: 'margin: 2px 0 6px 0; padding-left: 18px; font-size: 12px;' }, ...items.map(t => $('li', undefined, t)))
+			: $('div', { style: 'font-size: 12px; opacity: 0.6; margin: 2px 0 6px 0;' }, 'none');
+		const title = $('div.section-title', undefined,
+			$('div', { style: 'display: flex; align-items: center; gap: 8px;' }, $('span', undefined, 'Sub-Workflow (read-only)'))
+		);
+		if (!def) {
+			return $('div.section-card', undefined, title,
+				$('div', { style: 'font-size: 12px; opacity: 0.75;' }, this._subWorkflowDefMissing
+					? `The definition file ${SUB_WORKFLOW_DEFINITION_REL_PATH} is missing or invalid in this ticket folder.`
+					: 'Loading...'));
+		}
+		const inputs = (def.inputs || []).map(i => `${i.name}${i.label && i.label !== i.name ? ` (${i.label})` : ''}${i.defaultValue ? ` = ${i.defaultValue}` : ''}`);
+		const outputs = (def.outputs || []).map(o => `${o.varName || o.label}${o.label && o.label !== o.varName ? ` (${o.label})` : ''}${o.defaultFormat ? ` [${o.defaultFormat}]` : ''}`);
+		return $('div.section-card', undefined, title,
+			row('Name', def.name),
+			row('Ticket ID', def.id),
+			...(def.legacyId ? [row('Legacy ID', def.legacyId)] : []),
+			row('Source workflow', describeSubWorkflowSource(def)),
+			row('Nodes', String((def.nodeIds || []).length || (def.nodes || []).length)),
+			$('div', { style: 'font-size: 12px; opacity: 0.7; margin-top: 6px;' }, `Inputs (${inputs.length})`),
+			listOrNone(inputs),
+			$('div', { style: 'font-size: 12px; opacity: 0.7;' }, `Outputs (${outputs.length})`),
+			listOrNone(outputs),
+			$('div', { style: 'font-size: 11px; opacity: 0.6; margin-top: 4px;' }, `Edit its nodes on the source workflow canvas. Call it from any workflow with a Call Sub-Workflow step using ticket ID ${def.id}.`)
+		);
+	}
+
 	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<ITicketTemplateModule | null> {
 		const targetId = (typeId || '').trim().toLowerCase();
 		if (!targetId) { return null; }
@@ -2516,6 +2573,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			const attachments = await this._getAttachments(this._entityUri);
+			await this._loadSubWorkflowDefinition(parsed.ticketId);
 			// A Freestyle ticket has no template: its own structure is stored in its folder
 			const freestyleSchema = isFreestyleTicketType(this._entityType)
 				? (await readFreestyleSchema(this._fileService, this._entityUri) ?? createDefaultFreestyleSchema())
@@ -2970,6 +3028,9 @@ export class EntityDetailEditor extends EditorPane {
 				if (isFreestyleTicketType(ticketType || undefined)) {
 					// A Freestyle ticket has no template to preview: the badge shows / hides the component toolbox
 					this._toggleComponentToolbox();
+				} else if (isSubWorkflowTicketType(ticketType)) {
+					// A Sub-Workflow ticket has no template: it is edited on its source workflow canvas
+					return;
 				} else if (ticketType) {
 					await this._customModulesService.openModuleTicketPreview(ticketType, this._entityUri);
 				}
@@ -22731,6 +22792,7 @@ ${interpolatedPrompt}`;
 			),
 			part('layoutContainer', $('div', { class: `layout-container ${this._isAttributesCollapsed || wfNode ? 'attributes-collapsed' : ''}${wfNode ? ' wf-node-view' : ''}` },
 				$('div.main-content', undefined,
+					...(!wfNode && isSubWorkflowTicketType(data.ticketType) ? [this._buildSubWorkflowCard()] : []),
 					...((isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? [
 						frameDescriptionCard(part('sectionCards', withParts(() => $('div.section-card', undefined,
 							part('sectionTitle', withParts(() => $('div.section-title', undefined,
