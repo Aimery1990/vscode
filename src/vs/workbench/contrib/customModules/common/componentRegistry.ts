@@ -533,13 +533,13 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Opens a URL and extracts the readable page text.',
-		description: 'Opens defaultUrl and extracts the readable page text (retries, then falls back to a plain HTTP GET). The URL supports {variable} references. credentials is a list of {key, value} pairs with names of your choice; write {key} in the URL and the run replaces it with the URL-encoded value (a credential wins over a variable with the same name). Credentials are used only in the URL (no headers, cookies or form login) and are shown as *** in logs, outputs and the stored URL. Values written by the AI must be variable references like {SITE_API_KEY}, never plain text.',
-		runtime: 'Replaces {name} credentials and {variables} in the URL, extracts the page with the built-in web content extractor (retries browserMaxRetries times, browserRetryDelayMs apart), falls back to a plain HTTP GET with tags stripped, and publishes the page text and the masked URL.',
+		description: 'Opens defaultUrl and extracts the readable page text (retries, then falls back to a plain HTTP GET). The URL supports {variable} references. credentials is a list of {key, value} pairs set in the template (tickets only see the names): write {key} in the URL and the run replaces it with the URL-encoded value (a credential wins over a variable with the same name); a credential not referenced in the URL is sent as an HTTP request header named after its key (e.g. Authorization, Cookie, X-Api-Key). Credential values are shown as *** in logs, outputs and the stored URL. Values written by the AI must be variable references like {SITE_API_KEY}, never plain text.',
+		runtime: 'Uses the template\'s (or the node\'s) credentials, never a list stored on the ticket. Replaces {name} credentials and {variables} in the URL. Without header credentials it extracts the page with the built-in web content extractor and falls back to a plain HTTP GET with tags stripped; with header credentials it uses the plain HTTP GET only (the extractor cannot send request headers). Retries browserMaxRetries times, browserRetryDelayMs apart, and publishes the page text and the masked URL.',
 		props: [
 			{ name: 'defaultUrl', kind: 'string', required: true, ticketValue: true, description: 'URL to open. Supports {variable} and {credential} references.' },
 			{ name: 'browserMaxRetries', kind: 'number', default: 3, description: 'Retries after a failed fetch (0 - 10).' },
 			{ name: 'browserRetryDelayMs', kind: 'number', default: 1000, description: 'Delay between retries in ms.' },
-			{ name: 'credentials', kind: 'credentialArray', secret: true, ticketValue: true, description: '[{key, value}] pairs referenced in the URL as {key}. Values are secrets.' },
+			{ name: 'credentials', kind: 'credentialArray', secret: true, description: '[{key, value}] pairs set in the template. A {key} in the URL is replaced with the value; the others are sent as request headers named after the key. Values are secrets.' },
 			{ name: 'lastResolvedUrl', kind: 'string', role: 'state', description: 'Masked URL of the last run.' }
 		],
 		outputs: [
@@ -553,26 +553,32 @@ export const COMPONENT_SPECS = {
 			id: 'web_browser',
 			label: 'Browser',
 			type: 'browser',
-			defaultUrl: 'https://example.com/api?user={user}&key={api_key}',
+			defaultUrl: 'https://example.com/api?user={user}',
 			credentials: [
 				{ id: 'cred_1', key: 'user', value: '{SITE_USER}' },
-				{ id: 'cred_2', key: 'api_key', value: '{SITE_API_KEY}' }
+				{ id: 'cred_2', key: 'Authorization', value: 'Bearer {SITE_API_TOKEN}' }
 			]
 		},
-		notes: ['There are no CSS selectors or scraping modes: the whole readable text is returned.', 'Only credential values are masked; secrets typed directly into the URL are not.'],
+		notes: [
+			'There are no CSS selectors or scraping modes: the whole readable text is returned.',
+			'Credentials come from the template only. Ticket users see the names with the values masked and cannot change them; credential lists stored on older tickets are ignored.',
+			'Prefer header credentials (Authorization, Cookie, API-key headers) to tokens in the URL: URLs end up in browser history, server and proxy logs.',
+			'With header credentials the page is fetched with a plain HTTP GET (no JavaScript rendering, no integrated-browser cookies), because the built-in extractor cannot send request headers.',
+			'Only credential values are masked; secrets typed directly into the URL are not.'
+		],
 		help: {
 			badge: 'Web Application & Navigation',
 			summary: 'Opens a URL and extracts the readable text of the page so later steps (e.g. an AI Prompt) can use it. Retries on failure and falls back to a plain HTTP GET.',
 			designerConfig: [
 				{ name: 'Target URL', desc: 'URL to open. Supports {variable} references to Inputs and earlier outputs (e.g. https://news.ycombinator.com/item?id={item_id}) and {name} references to Credentials.' },
-				{ name: 'Credentials', desc: 'Any number of name = value pairs (names are yours, e.g. user, password, my_api_key). Write {name} in the URL; at run time it is replaced with the URL-encoded value. A value may itself be a variable reference such as {SITE_API_KEY}. Credentials are used only through {name} in the URL: they are not sent as headers, cookies or form logins. A ticket can keep its own credentials; when it has none, the template\'s are used.' },
+				{ name: 'Credentials', desc: 'Any number of name = value pairs, set here by the template author (ticket users only see the names, with values masked). Write {name} in the URL to put the URL-encoded value there. A credential not referenced in the URL is sent as an HTTP request header named after it, e.g. Authorization = Bearer {SITE_API_TOKEN}, Cookie = sid={SITE_SESSION} or X-Api-Key = {SITE_API_KEY}. Headers are the normal, safer place for tokens: URLs end up in browser history, server and proxy logs. A value may itself be a variable reference such as {SITE_API_KEY}.' },
 				{ name: 'Retries', desc: 'Max retries (default 3, up to 10) and delay between retries (default 1000 ms).' }
 			],
 			headline: 'How RUN_TICKETS Executes Browser Primitive',
 			steps: [
-				{ step: '1. URL Resolution', detail: 'Replaces each {name} of a credential with its URL-encoded value (a credential wins over a variable with the same name), then replaces other {variable} references with Inputs or earlier outputs. Unknown {x} stay as written.' },
-				{ step: '2. Fetch with Retries', detail: 'Extracts the page with the built-in web content extractor; if it fails, falls back to a plain HTTP GET with tags stripped. Failed attempts are retried with the configured delay.' },
-				{ step: '3. Secret Masking', detail: 'Credential values are shown as *** in the stored URL, {FieldLabel_url}, run details, logs and error messages. The fetched page text itself is not changed.' },
+				{ step: '1. URL Resolution', detail: 'Uses the template\'s credentials. Replaces each {name} of a credential with its URL-encoded value (a credential wins over a variable with the same name), then replaces other {variable} references with Inputs or earlier outputs. Unknown {x} stay as written. Credentials not referenced in the URL become request headers named after them.' },
+				{ step: '2. Fetch with Retries', detail: 'Without header credentials, extracts the page with the built-in web content extractor and, if it fails, falls back to a plain HTTP GET with tags stripped. With header credentials, uses the plain HTTP GET with those headers directly (the extractor cannot send headers). Failed attempts are retried with the configured delay.' },
+				{ step: '3. Secret Masking', detail: 'Credential values are shown as *** in the stored URL, {FieldLabel_url}, run details (header names only), logs and error messages. The fetched page text itself is not changed.' },
 				{ step: '4. Output', detail: 'Stores the page text as {FieldLabel} and the masked URL as {FieldLabel_url}.' }
 			],
 			variableResolution: 'Access the extracted text via {Field Label} or {{Field Label}}; the masked URL via {Field Label_url}.',
