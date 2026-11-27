@@ -939,8 +939,8 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Creates a new ticket from a template and returns its handle.',
-		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}; default "New Ticket"), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}} matching the template Inputs. Output: a ticket handle {success, ticketId, ticketName, ticketType, entityUri, targetFolder, fields} usable by Run Tickets / Get Outputs as {var}. In workflow nodes it compiles to Python: v = CREATE_TICKETS(ticket_type=..., title=..., path=..., params={...}).',
-		runtime: 'Creates the ticket folder and files from the template, filling the given Inputs, and stores the ticket handle in the output variable.',
+		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}; default "New Ticket"), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}} matching the template Inputs. Output: a ticket handle {success, ticketId, ticketName, ticketType, entityUri, targetFolder, fields} usable by Run Tickets / Get Outputs as {var}. In workflow nodes it compiles to Python: v = CREATE_TICKETS(ticket_type=..., title=..., path=..., params={...}). Freestyle tickets cannot be created here. wfTicketType "sub_workflow" creates a reusable sub-workflow ticket: wfTicketPath must be the parent workflow folder (or inside it) and wfTicketParams.definition may hold {name, nodes, links, inputs, outputs} (validated; omitted = empty sub-workflow).',
+		runtime: 'Creates the ticket folder and files from the template, filling the given Inputs, and stores the ticket handle in the output variable. Freestyle tickets cannot be created this way. wfTicketType "sub_workflow" creates a reusable sub-workflow ticket: wfTicketPath must be the parent workflow folder (or a folder inside it; "." when the workflow itself runs), and the optional wfTicketParams.definition {name, nodes, links, inputs, outputs} (object or JSON) is validated; without it the sub-workflow is empty (no nodes).',
 		props: [
 			{ name: 'wfTicketType', kind: 'string', required: true, description: 'Template id or name.' },
 			{ name: 'wfTicketTitle', kind: 'string', default: 'New Ticket', description: 'Title; supports {var}.' },
@@ -952,7 +952,10 @@ export const COMPONENT_SPECS = {
 			{ name: '{Label}', type: 'object', when: 'both', description: 'same handle under the label' }
 		],
 		example: { id: 'new_run', label: 'New Run', type: 'create_tickets', wfTicketType: 'training_run', wfTicketTitle: 'Run {run_no}', wfTicketParams: { lr: '{lr}' } },
-		notes: [],
+		notes: [
+			'Freestyle tickets cannot be created programmatically.',
+			'sub_workflow: create it inside a workflow folder (wfTicketPath); wfTicketParams.definition = {name, nodes, links, inputs, outputs}; node ids must be unique and links must connect given nodes.'
+		],
 		help: builtinHelp('Create Tickets',
 			'Creates a new ticket from a ticket template (type), for example one record per training run.',
 			[
@@ -967,7 +970,7 @@ export const COMPONENT_SPECS = {
 			],
 			'Pass the handle to Run Tickets or Get Outputs as {variable}.',
 			['new_ticket = CREATE_TICKETS(ticket_type="training_run", title="Run {run_no}", params={"lr": "{lr}"})'],
-			['Create the ticket first, then run it with Run Tickets.']),
+			['Create the ticket first, then run it with Run Tickets.', 'To create a reusable sub-workflow: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {...}}).']),
 		templatePalette: { defaultName: 'created_ticket' },
 		nodePalette: { label: 'Create Tickets', accent: '#c084fc', icon: Codicon.add, tooltip: 'CREATE_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores ticket handle in Component Title.' }
 	},
@@ -1051,8 +1054,8 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Reads one ticket (or one of its fields).',
-		description: 'Reads ONE ticket: its fields, status, and outputs. Settings: wfTicketTarget (ticket id, name, path, or {var} handle, required), wfTicketField (optional: return just this field). Returns the ticket object or the field value.',
-		runtime: 'Resolves the ticket by id / name / path / handle and returns the ticket object, or only wfTicketField when given.',
+		description: 'Reads ONE ticket: its fields, status, and outputs. Settings: wfTicketTarget (ticket id, name, path, or {var} handle, required), wfTicketField (optional: return just this field). Returns the ticket object or the field value. For a sub_workflow ticket the result has subWorkflow: its full calling contract (inputs with defaults, outputs, source workflow).',
+		runtime: 'Resolves the ticket by id / name / path / handle and returns the ticket object, or only wfTicketField when given. For a sub_workflow ticket the result also has subWorkflow: the full calling contract {ticketId, name, sourceWorkflowName, inputs [{name, label, defaultValue}], outputs [{name, label, format}], usage}.',
 		props: [
 			{ name: 'wfTicketTarget', kind: 'string', required: true, description: 'Ticket id, name, path, or {var} handle.' },
 			{ name: 'wfTicketField', kind: 'string', description: 'Return only this field.' },
@@ -1060,7 +1063,7 @@ export const COMPONENT_SPECS = {
 			{ name: 'wfTicketVariable', kind: 'string', role: 'editor', description: 'Older form of the target (handle variable); read when wfTicketTarget is empty.' }
 		],
 		outputs: [
-			{ name: '{var}', type: 'object | any', when: 'both', description: 'ticket object, or the value of wfTicketField' },
+			{ name: '{var}', type: 'object | any', when: 'both', description: 'ticket object (with subWorkflow, the calling contract, for a sub_workflow ticket), or the value of wfTicketField' },
 			{ name: '{Label}', type: 'object | any', when: 'both', description: 'same value under the label' }
 		],
 		example: { id: 'parent', label: 'Parent', type: 'get_ticket', wfTicketTarget: 'JOB-0001' },
@@ -1098,8 +1101,8 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Searches several tickets at once (AND of filters).',
-		description: 'Searches SEVERAL tickets at once (AND of all filters; give at least one), e.g. all "Done" tickets of a template, to loop over them. Settings: wfTicketType (template id), wfTicketStatus, wfTicketTitle (substring), wfTicketPath (folder), wfTicketField (return only this field per ticket). Output: a list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata}.',
-		runtime: 'Filters all tickets by the given settings (exact type and status, title substring, folder) and returns the list (or one field per ticket).',
+		description: 'Searches SEVERAL tickets at once (AND of all filters; give at least one), e.g. all "Done" tickets of a template, to loop over them. Settings: wfTicketType (template id), wfTicketStatus, wfTicketTitle (substring), wfTicketPath (folder), wfTicketField (return only this field per ticket). Output: a list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata}. To discover reusable sub-workflows use wfTicketType "sub_workflow" (each item has subWorkflow {name, inputs, outputs, sourceWorkflow}); call one from a workflow node with a Call Sub-Workflow step whose subWorkflowId is that ticket ID.',
+		runtime: 'Filters all tickets by the given settings (exact type and status, title substring, folder) and returns the list (or one field per ticket). wfTicketType "sub_workflow" lists the reusable sub-workflows; each item then also has subWorkflow {name, inputs, outputs, sourceWorkflow} (a short summary).',
 		props: [
 			{ name: 'wfTicketType', kind: 'string', description: 'Template id (exact match).' },
 			{ name: 'wfTicketStatus', kind: 'string', description: 'Status (exact match).' },
@@ -1108,7 +1111,7 @@ export const COMPONENT_SPECS = {
 			{ name: 'wfTicketField', kind: 'string', description: 'Return only this field per ticket.' }
 		],
 		outputs: [
-			{ name: '{var}', type: 'object[] | any[]', when: 'both', description: 'list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata}, or one field value per ticket' },
+			{ name: '{var}', type: 'object[] | any[]', when: 'both', description: 'list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata} (plus subWorkflow {name, inputs, outputs, sourceWorkflow} for sub_workflow tickets), or one field value per ticket' },
 			{ name: '{Label}', type: 'object[] | any[]', when: 'both', description: 'same list under the label' }
 		],
 		example: { id: 'done_runs', label: 'Done Runs', type: 'get_tickets', wfTicketType: 'training_run', wfTicketStatus: 'Done' },
@@ -1663,34 +1666,39 @@ export const COMPONENT_SPECS = {
 		usableIn: ['node'],
 		ai: 'exposed',
 		purpose: 'Calls a reusable sub-workflow inside a node and returns its outputs.',
-		description: 'Calls a reusable sub-workflow from the Sub-Workflow Library inside a node: passes inputs in, runs it, and hands its outputs to the next steps.',
-		runtime: 'Config: subWorkflowId* (from the Sub-Workflow Library), subWorkflowInputs {inputName: expression or {var}}. Runs the sub-workflow with those inputs; the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. Creating a new sub-workflow is a separate action (save a group of nodes to the library), not done by this component.',
+		description: 'Calls a reusable sub-workflow (a sub_workflow ticket) inside a node: passes inputs in, runs it, and hands its outputs to the next steps. Works in the workflow it was encapsulated from and in any other workflow.',
+		runtime: 'Config: subWorkflowId* (the sub-workflow TICKET ID, e.g. FINDJ-0042: find it with GET_TICKETS(ticket_type="sub_workflow"), read its inputs / outputs with GET_TICKET(id)), subWorkflowInputs {inputName: expression or {var}}. Runs the sub-workflow with those inputs; the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. Creating a new sub-workflow is a separate action, not done by this component: encapsulate selected nodes on a workflow canvas, or CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {...}}).',
 		props: [
-			{ name: 'subWorkflowId', kind: 'string', role: 'editor', required: true, description: 'Sub-workflow from the Sub-Workflow Library.' },
+			{ name: 'subWorkflowId', kind: 'string', role: 'editor', required: true, description: 'The Sub-Workflow ticket ID (e.g. FINDJ-0042), or the legacy subwf_... id of a migrated Sub-Workflow.' },
 			{ name: 'subWorkflowInputs', kind: 'object', role: 'editor', description: 'Input bindings {inputName: expression or {var}}.' },
-			{ name: 'subWorkflowName', kind: 'string', role: 'state', description: 'Name of the linked sub-workflow (filled from the id).' },
+			{ name: 'subWorkflowName', kind: 'string', role: 'state', description: 'Name of the linked sub-workflow (filled from the ticket).' },
 			{ name: 'subWorkflowSourceUri', kind: 'string', role: 'state', description: 'Workflow the sub-workflow was saved from (written, never read).' },
-			{ name: 'subWorkflowInputDefs', kind: 'objectArray', role: 'state', description: 'Input definitions copied from the library.' },
-			{ name: 'subWorkflowOutputDefs', kind: 'objectArray', role: 'state', description: 'Output definitions copied from the library.' }
+			{ name: 'subWorkflowInputDefs', kind: 'objectArray', role: 'state', description: 'Input definitions copied from the sub-workflow ticket.' },
+			{ name: 'subWorkflowOutputDefs', kind: 'objectArray', role: 'state', description: 'Output definitions copied from the sub-workflow ticket.' }
 		],
 		outputs: [
 			{ name: '{var}', type: 'any | object', when: 'both', description: 'sub-workflow outputs: the raw value with one output item, else a dictionary keyed by output name' }
 		],
-		example: { id: 'call_sub', label: 'Call Sub-Workflow', type: 'sub_workflow', subWorkflowId: 'subwf_...', subWorkflowInputs: {} },
-		notes: ['Workflow nodes only; it is added from the Sub-Workflow Library, not from the Node Components palette.'],
+		example: { id: 'call_sub', label: 'Call Sub-Workflow', type: 'sub_workflow', subWorkflowId: 'FINDJ-0042', subWorkflowInputs: { query: '{keyword}' } },
+		notes: [
+			'Workflow nodes only; it is added from the Sub-Workflow Library, not from the Node Components palette.',
+			'Every sub-workflow is a ticket of type sub_workflow with its own ticket ID; its definition is .agents/sub_workflow.json in the ticket folder.',
+			'To create one from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; node ids must be unique and links must connect given nodes; without a definition it starts empty.'
+		],
 		help: builtinHelp('Call Sub-Workflow',
-			'Calls a reusable sub-workflow from the Sub-Workflow Library inside a node: passes inputs in, runs it, and hands its outputs to the next steps.',
+			'Calls a reusable sub-workflow inside a node: passes inputs in, runs it, and hands its outputs to the next steps. Every sub-workflow is a ticket of type sub_workflow with its own ticket ID, so it can be called from the workflow it came from and from any other workflow.',
 			[
-				{ name: 'Sub-Workflow', desc: 'Required. Chosen from the Sub-Workflow Library ("+" button or drag onto a node).' },
-				{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs; each can be an expression or a {variable}.' }
+				{ name: 'Sub-Workflow', desc: 'Required. The sub-workflow ticket ID (e.g. FINDJ-0042). In the editor: pick it from the Sub-Workflow Library ("+" button or drag onto a node). For AI / code: find it with GET_TICKETS(ticket_type="sub_workflow") (each result has a short inputs / outputs summary), read the full contract with GET_TICKET(id), then put the ticket ID into this step.' },
+				{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs, by input name; each can be an expression or a {variable}.' }
 			],
 			[
-				{ step: '1. Run', detail: 'Runs the sub-workflow with the given Inputs.' },
-				{ step: '2. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name.' }
+				{ step: '1. Resolve', detail: 'Finds the sub_workflow ticket by its ID and reads its definition (.agents/sub_workflow.json in the ticket folder). Steps saved before sub-workflows became tickets keep their old subwf_... id, which still resolves.' },
+				{ step: '2. Run', detail: 'Runs the sub-workflow with the given Inputs. When the source workflow is available, its current canvas nodes are used (the source canvas is the source of truth).' },
+				{ step: '3. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name.' }
 			],
 			'Later steps read the result from the output variable.',
 			['{call_sub_workflow_result}'],
-			['To create a new sub-workflow, select nodes in a workflow and save them to the library; this component only calls existing ones.'])
+			['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes), or create a sub_workflow ticket from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; without a definition it starts empty. This component only calls existing ones.'])
 	}
 } as const satisfies { readonly [T in CustomFieldType]: IComponentSpec & { readonly type: T } };
 
