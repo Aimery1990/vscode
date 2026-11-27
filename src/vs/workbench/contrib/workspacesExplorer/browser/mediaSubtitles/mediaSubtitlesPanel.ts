@@ -4,19 +4,18 @@
 
 import { $, addDisposableListener, append, clearNode, getWindow, scheduleAtNextAnimationFrame } from '../../../../../base/browser/dom.js';
 import { RunOnceScheduler } from '../../../../../base/common/async.js';
-import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
-import { CancellationError, isCancellationError } from '../../../../../base/common/errors.js';
+import { CancellationTokenSource } from '../../../../../base/common/cancellation.js';
+import { isCancellationError } from '../../../../../base/common/errors.js';
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
-import { listenStream } from '../../../../../base/common/stream.js';
 import { IDialogService, IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IVoiceModelService } from '../../../voiceModels/common/voiceModel.js';
-import { extractSubtitles } from '../../../voiceModels/browser/subtitleExtractor.js';
-import { findLastStartedSegment, findSegmentAt, formatClock, ISubtitleDocument, ISubtitleSegment, parseSubtitleDocument, toSrt, toVtt } from '../../../voiceModels/common/subtitles.js';
+import { confirmLargeMediaDecode, confirmSubtitleReextract, extractMediaSubtitleDocument, readMediaSubtitleDocument, resolveMediaUri, writeMediaSubtitleDocument } from '../../../voiceModels/browser/mediaSubtitleJob.js';
+import { findLastStartedSegment, findSegmentAt, formatClock, ISubtitleDocument, ISubtitleSegment, matchSubtitleDocument, toSrt, toVtt } from '../../../voiceModels/common/subtitles.js';
 import { buildDictationUnits, DictationUnitKind, diffWords, findUnitAt, IDictationAnswer, IDictationUnit, IWordDiffOp, MIN_DICTATION_SECONDS } from '../../../voiceModels/common/dictation.js';
-import { checkMediaLimits, describeMediaFacts, estimateDecodePeakMb, formatMediaDuration, formatMediaSize, LARGE_DECODE_WARN_SECONDS, IMediaSubtitlesConfig, IMediaSubtitlesState, MEDIA_BYTES_PER_MB, mediaDurationLimitMessage, mediaSizeLimitMessage, SubtitleDisplayMode } from '../../../voiceModels/common/subtitleConfig.js';
+import { dictationModeToggleTitle, IMediaSubtitlesConfig, IMediaSubtitlesState, SubtitleDisplayMode } from '../../../voiceModels/common/subtitleConfig.js';
 
 /** What the media player card provides to the subtitle panel. */
 export interface IMediaSubtitlesHost {
@@ -139,7 +138,7 @@ export class MediaSubtitlesPanel extends Disposable {
 		this.modeBtns = {
 			single: append(toolbar, iconButton('symbol-string', 'Single line: show the current subtitle')),
 			scroll: append(toolbar, iconButton('list-flat', 'Scrolling: all subtitles, current line centred (click a line to jump)')),
-			dictation: append(toolbar, iconButton('keyboard', 'Dictation: type what you hear and compare'))
+			dictation: append(toolbar, iconButton('keyboard', 'Dictation practice: type what you hear and compare'))
 		};
 		this.exportBtn = append(toolbar, iconButton('desktop-download', 'Export subtitles as SRT or VTT'));
 
@@ -163,7 +162,7 @@ export class MediaSubtitlesPanel extends Disposable {
 		this.prevBtn = append(dictHeader, iconButton('chevron-left', 'Previous unit (Ctrl+B)'));
 		this.replayBtn = append(dictHeader, iconButton('debug-restart', 'Replay this unit (Ctrl+R)'));
 		this.nextBtn = append(dictHeader, iconButton('chevron-right', 'Next unit (Ctrl+N)'));
-		this.autoPauseBtn = append(dictHeader, iconButton('debug-pause', 'Auto-pause at the end of each unit'));
+		this.autoPauseBtn = append(dictHeader, iconButton('debug-pause', dictationModeToggleTitle(this.autoPause, this.unitKind, this.unitSeconds)));
 		this.revealBtn = append(dictHeader, iconButton('eye', 'Reveal the original text (Ctrl+E)'));
 		this.unitSelect = append(dictHeader, $<HTMLSelectElement>('select', { title: 'Dictation unit', style: 'background: rgba(0, 122, 204, 0.22); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 5px; padding: 2px 4px; font-size: 10.5px; outline: none;' },
 			$('option', { value: 'segment', style: 'background: #1e1e2e; color: #f8fafc;' }, 'Sentence'),
@@ -253,14 +252,37 @@ export class MediaSubtitlesPanel extends Disposable {
 
 	/** Called by the card when a file was loaded or cleared. */
 	onMediaChanged(): void {
-		const src = this.host.getMediaSource();
-		if (this.doc && src && this.doc.mediaName && this.doc.mediaName !== src.name) {
-			this.setStatus(`Subtitles were extracted from "${this.doc.mediaName}". Extract again for this file.`);
-		} else {
-			this.updateStatusSummary();
-		}
+		this.updateStatusSummary();
+		this.checkDocumentIsCurrent().catch(() => { /* the summary stays */ });
 		this.rebuildUnits();
 		this.render();
+	}
+
+	/** Says so when the stored subtitles belong to another file, or the file changed since (CI-46). */
+	private async checkDocumentIsCurrent(): Promise<void> {
+		const doc = this.doc;
+		const src = this.host.getMediaSource();
+		if (!doc || !src) {
+			return;
+		}
+		const uri = resolveMediaUri(src.path, this.host.ticketFolder);
+		let sizeBytes: number | undefined;
+		if (uri) {
+			try {
+				sizeBytes = (await this.fileService.stat(uri)).size;
+			} catch {
+				// size unknown: compare by name / path only
+			}
+		}
+		if (doc !== this.doc || this._store.isDisposed) {
+			return;
+		}
+		const match = matchSubtitleDocument(doc, { name: src.name, path: uri?.fsPath ?? src.path, sizeBytes });
+		if (match === 'other-file') {
+			this.setStatus(`These subtitles were extracted from "${doc.mediaName}". Extract again for this file.`);
+		} else if (match === 'changed') {
+			this.setStatus(`"${src.name}" changed since its subtitles were extracted. Extract again.`);
+		}
 	}
 
 	private async loadStoredSubtitles(): Promise<void> {
@@ -273,14 +295,40 @@ export class MediaSubtitlesPanel extends Disposable {
 			this.setStatus('Saved subtitles file is missing. Extract again.');
 			return;
 		}
-		const content = await this.fileService.readFile(uri);
-		const doc = parseSubtitleDocument(content.value.toString());
+		const doc = await readMediaSubtitleDocument(this.fileService, this.host.ticketFolder, this.subtitlesFile);
 		if (!doc) {
 			this.showError(`${this.subtitlesFile} is not a valid subtitles file.`);
 			return;
 		}
 		this.setDocument(doc);
 		this.onMediaChanged();
+	}
+
+	// --- used by the component settings dialog (CI-46) ---------------------------------------
+
+	/** The subtitles shown by the card, if any. */
+	getDocument(): ISubtitleDocument | undefined {
+		return this.doc;
+	}
+
+	/** Number of saved dictation answers. */
+	answerCount(): number {
+		return Object.keys(this.answers).length;
+	}
+
+	/** True while the card's own extraction runs. */
+	isExtracting(): boolean {
+		return !!this.running;
+	}
+
+	/** Saves subtitles extracted elsewhere (the settings dialog) for this field and shows them at once. */
+	async storeExtracted(doc: ISubtitleDocument): Promise<void> {
+		await this.writeDocument(doc);
+		this.showError(undefined);
+		this.setDocument(doc);
+		this.onMediaChanged();
+		this.saveScheduler.cancel();
+		this.host.saveState(this.getState());
 	}
 
 	private setDocument(doc: ISubtitleDocument | undefined): void {
@@ -323,32 +371,12 @@ export class MediaSubtitlesPanel extends Disposable {
 			this.showError('Load an audio or video file first.');
 			return;
 		}
-		const answerCount = Object.keys(this.answers).length;
-		if (this.segments.length > 0) {
-			const { confirmed } = await this.dialogService.confirm({
-				type: answerCount > 0 ? 'warning' : 'question',
-				message: 'Extract the subtitles again?',
-				detail: answerCount > 0
-					? `The current subtitles will be replaced. You have ${answerCount} saved dictation answer(s); they are kept, but they are keyed by the old timings and may no longer line up with the new subtitles.`
-					: 'The current subtitles will be replaced.',
-				primaryButton: 'Extract Again'
-			});
-			if (!confirmed) {
-				return;
-			}
+		if (this.segments.length > 0 && !(await confirmSubtitleReextract(this.dialogService, this.answerCount()))) {
+			return;
 		}
 		const playerDuration = this.knownMediaDuration();
-		if (playerDuration && playerDuration > LARGE_DECODE_WARN_SECONDS && !checkMediaLimits(this.config, { durationSec: playerDuration }).durationExceeded) {
-			const peakGb = (estimateDecodePeakMb(playerDuration) / 1024).toFixed(1);
-			const { confirmed } = await this.dialogService.confirm({
-				type: 'warning',
-				message: `Extract subtitles from ${formatMediaDuration(playerDuration)} of audio?`,
-				detail: `The audio track is decoded in the app, which for a long file temporarily needs up to about ${peakGb} GB of memory (48 kHz stereo; less for mono or lower quality audio). If the computer runs low on memory the window can become slow or close. A shorter part, or the audio exported as a mono 16 kHz M4A / MP3, needs much less.`,
-				primaryButton: 'Extract'
-			});
-			if (!confirmed) {
-				return;
-			}
+		if (!(await confirmLargeMediaDecode(this.dialogService, playerDuration, this.config))) {
+			return;
 		}
 
 		const cts = new CancellationTokenSource();
@@ -356,42 +384,7 @@ export class MediaSubtitlesPanel extends Disposable {
 		this.syncControls();
 		this.setProgress(0, 'Reading the media file...');
 		try {
-			// The player already knows the duration: refuse too long media before reading and decoding it
-			if (playerDuration && checkMediaLimits(this.config, { durationSec: playerDuration }).durationExceeded) {
-				throw new Error(mediaDurationLimitMessage(src.name, playerDuration, this.config.maxDurationMin));
-			}
-			const { data, size } = await this.readMedia(src, cts.token);
-			if (cts.token.isCancellationRequested) {
-				throw new CancellationError();
-			}
-			this.setProgress(5, `Extracting the audio track of ${describeMediaFacts({ sizeBytes: size, durationSec: playerDuration })} (long files take a few seconds)...`);
-			const result = await extractSubtitles(this.voiceModelService, data, {
-				provider: this.config.provider || undefined,
-				modelId: this.config.model || undefined,
-				language: this.config.language || undefined,
-				maxDurationSeconds: this.config.maxDurationMin > 0 ? this.config.maxDurationMin * 60 : undefined,
-				mediaName: src.name
-			}, p => {
-				if (p.phase === 'decoding') {
-					return;
-				}
-				const pct = p.phase === 'analyzing' ? 10 : p.phase === 'done' ? 100 : 10 + 90 * ((p.current ?? 1) - 1) / Math.max(1, p.total ?? 1);
-				this.setProgress(pct, p.message);
-			}, cts.token);
-			if (result.segments.length === 0) {
-				throw new Error('The model returned no subtitles for this audio.');
-			}
-			const doc: ISubtitleDocument = {
-				version: 1,
-				mediaName: src.name,
-				mediaSize: size,
-				duration: Math.round(result.duration * 1000) / 1000,
-				provider: result.model.provider,
-				model: result.model.modelId,
-				language: this.config.language || undefined,
-				createdAt: Date.now(),
-				segments: result.segments
-			};
+			const doc = await extractMediaSubtitleDocument(this.voiceModelService, this.fileService, { ...src, durationSec: playerDuration }, this.config, this.host.ticketFolder, (pct, message) => this.setProgress(pct, message), cts.token);
 			await this.writeDocument(doc);
 			this.setDocument(doc);
 			this.updateStatusSummary();
@@ -423,79 +416,11 @@ export class MediaSubtitlesPanel extends Disposable {
 		return Number.isFinite(d) && d > 0 ? d : undefined;
 	}
 
-	/**
-	 * Reads the media bytes into one buffer (handed to the decoder without another copy). The size comes from the
-	 * file's stat, so a file over the limit is refused before anything is read; reading shows progress.
-	 */
-	private async readMedia(src: { name: string; path?: string; blobUrl?: string }, token: CancellationToken): Promise<{ data: ArrayBuffer; size: number }> {
-		const maxMb = Math.max(1, this.config.maxUploadMb);
-		if (src.path) {
-			const uri = src.path.startsWith('file://') ? URI.parse(src.path) : URI.file(src.path);
-			if (await this.fileService.exists(uri)) {
-				const stat = await this.fileService.stat(uri);
-				if (stat.size > maxMb * MEDIA_BYTES_PER_MB) {
-					throw new Error(mediaSizeLimitMessage(src.name, stat.size, maxMb));
-				}
-				return { data: await this.readFileWithProgress(uri, stat.size, token), size: stat.size };
-			}
-		}
-		if (src.blobUrl) {
-			const blob = await (await fetch(src.blobUrl)).blob();
-			if (blob.size > maxMb * MEDIA_BYTES_PER_MB) {
-				throw new Error(mediaSizeLimitMessage(src.name, blob.size, maxMb));
-			}
-			return { data: await blob.arrayBuffer(), size: blob.size };
-		}
-		throw new Error(`Cannot read "${src.name}". Select the file again.`);
-	}
-
-	private async readFileWithProgress(uri: URI, size: number, token: CancellationToken): Promise<ArrayBuffer> {
-		const target = new Uint8Array(size);
-		const total = formatMediaSize(size);
-		let offset = 0;
-		let shownPercent = -1;
-		const stream = await this.fileService.readFileStream(uri, undefined, token);
-		const cancelled = new DisposableStore();
-		try {
-			await new Promise<void>((resolve, reject) => {
-				cancelled.add(token.onCancellationRequested(() => reject(new CancellationError())));
-				listenStream(stream.value, {
-					onData: chunk => {
-						if (offset + chunk.byteLength > target.byteLength) {
-							reject(new Error(`"${uri.path.split('/').pop()}" changed while it was being read. Try again.`));
-							return;
-						}
-						target.set(chunk.buffer, offset);
-						offset += chunk.byteLength;
-						const percent = size > 0 ? Math.floor(offset * 100 / size) : 100;
-						if (percent !== shownPercent) {
-							shownPercent = percent;
-							// Reading is the first 5 % of the bar
-							this.setProgress(percent * 0.05, `Reading the media file: ${formatMediaSize(offset)} of ${total}...`);
-						}
-					},
-					onError: reject,
-					onEnd: () => resolve()
-				}, token);
-			});
-		} finally {
-			cancelled.dispose();
-		}
-		return offset === size ? target.buffer : target.slice(0, offset).buffer;
-	}
-
-	private subtitlesFileName(): string {
-		const safeKey = this.host.fieldKey.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'media';
-		return `attachments/subtitles_${safeKey}.json`;
-	}
-
 	private async writeDocument(doc: ISubtitleDocument): Promise<void> {
 		if (!this.host.ticketFolder) {
 			throw new Error('The ticket folder is not available, so the subtitles cannot be saved.');
 		}
-		const rel = this.subtitlesFileName();
-		await this.fileService.writeFile(URI.joinPath(this.host.ticketFolder, rel), VSBuffer.fromString(JSON.stringify(doc, undefined, '\t')));
-		this.subtitlesFile = rel;
+		this.subtitlesFile = await writeMediaSubtitleDocument(this.fileService, this.host.ticketFolder, this.host.fieldKey, doc);
 	}
 
 	private async onExport(): Promise<void> {
@@ -611,7 +536,8 @@ export class MediaSubtitlesPanel extends Disposable {
 			setActive(this.modeBtns[mode], this.mode === mode);
 		}
 		setActive(this.autoPauseBtn, this.autoPause);
-		this.autoPauseBtn.title = this.autoPause ? 'Auto-pause is on: playback stops at the end of each unit' : 'Auto-pause is off: playback continues through the units';
+		this.autoPauseBtn.title = dictationModeToggleTitle(this.autoPause, this.unitKind, this.unitSeconds);
+		this.autoPauseBtn.setAttribute('aria-label', this.autoPauseBtn.title);
 		setActive(this.revealBtn, this.revealed);
 		this.unitSelect.value = this.unitKind;
 		this.secondsInput.value = String(this.unitSeconds);
