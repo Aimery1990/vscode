@@ -4975,9 +4975,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 								sqlOutput: f.debugSqlOutput || ''
 							});
 						} else if (f.type === 'browser') {
+							// The template's credentials are not copied: a run falls back to them while the ticket has none of its own
 							customMetadata[fKey] = JSON.stringify({
 								url: f.defaultUrl || '',
-								credentials: Array.isArray(f.credentials) ? f.credentials : [],
+								credentials: [],
 								content: f.defaultContent || '',
 								lastFetched: ''
 							});

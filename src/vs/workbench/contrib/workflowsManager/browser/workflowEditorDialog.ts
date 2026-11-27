@@ -843,12 +843,12 @@ export async function createWorkflowDialog(
 								value: field.defaultUrl || '',
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box;'
 							})) as HTMLInputElement;
-							const creds = field.credentials || [];
 							customFieldInputs.push({
 								label: field.label, collect: (label, ctx) => {
+									// The template's credentials are not copied: a run falls back to them while the ticket has none of its own
 									ctx.customMetadata[label] = JSON.stringify({
 										url: urlInput.value.trim(),
-										credentials: creds,
+										credentials: [],
 										content: field.defaultContent || '',
 										lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
 									});
