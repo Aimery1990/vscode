@@ -70,42 +70,42 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		title: 'Browser (Web Application)',
 		icon: Codicon.globe,
 		category: 'Web Application & Navigation',
-		summary: 'Automates URL navigation, headless DOM rendering, and readable text extraction to provide real-time external web data for AI reasoning.',
+		summary: 'Opens a URL and extracts the readable text of the page so later steps (e.g. an AI Prompt) can use it. Retries on failure and falls back to a plain HTTP GET.',
 		designerConfig: [
-			{ name: 'Target URL Template', desc: 'Target URL supporting dynamic variable interpolation (e.g. https://news.ycombinator.com?q={topic}).' },
-			{ name: 'Credential Binding', desc: 'Optional authentication credentials or session tokens for protected endpoints.' },
+			{ name: 'Target URL', desc: 'URL to open. Supports {variable} references to Inputs and earlier outputs (e.g. https://news.ycombinator.com/item?id={item_id}) and {name} references to Credentials.' },
+			{ name: 'Credentials', desc: 'Any number of name = value pairs (names are yours, e.g. user, password, my_api_key). Write {name} in the URL; at run time it is replaced with the URL-encoded value. A value may itself be a variable reference such as {SITE_API_KEY}. Credentials are used only through {name} in the URL: they are not sent as headers, cookies or form logins. A ticket can keep its own credentials; when it has none, the template\'s are used.' },
 			{ name: 'Retries', desc: 'Max retries (default 3, up to 10) and delay between retries (default 1000 ms).' }
 		],
 		runTicketsFlow: {
 			headline: 'How RUN_TICKETS Executes Browser Primitive',
 			steps: [
 				{
-					step: '1. Dynamic URL Interpolation',
-					detail: 'Substitutes {variable} placeholders in the Target URL with values from preceding Inputs or earlier steps.'
+					step: '1. URL Resolution',
+					detail: 'Replaces each {name} of a credential with its URL-encoded value (a credential wins over a variable with the same name), then replaces other {variable} references with Inputs or earlier outputs. Unknown {x} stay as written.'
 				},
 				{
-					step: '2. Web Content Fetching & Headless Engine',
-					detail: 'Calls IWebContentExtractorService for headless browser rendering. If headless is unavailable, falls back to direct HTTP fetch.'
+					step: '2. Fetch with Retries',
+					detail: 'Extracts the page with the built-in web content extractor; if it fails, falls back to a plain HTTP GET with tags stripped. Failed attempts are retried with the configured delay.'
 				},
 				{
-					step: '3. Noise Reduction & Markdown Conversion',
-					detail: 'Strips out script tags, ads, navigation bars, and converts core article body into clean, token-efficient Markdown text.'
+					step: '3. Secret Masking',
+					detail: 'Credential values are shown as *** in the stored URL, {FieldLabel_url}, run details, logs and error messages. The fetched page text itself is not changed.'
 				},
 				{
-					step: '4. Context & Field Output Storage',
-					detail: 'Stores full text into contextVariables[FieldLabel] and sets {FieldLabel_url} to the resolved URL.'
+					step: '4. Output',
+					detail: 'Stores the page text as {FieldLabel} and the masked URL as {FieldLabel_url}.'
 				}
 			],
-			variableResolution: 'Access extracted content via {Field Label}, {{Field Label}}, or {{Field Label.content}}.',
-			downstreamPassing: 'Subsequent AI Prompt primitives can reference {{Browser 1}} to summarize, analyze, or synthesize the web page.'
+			variableResolution: 'Access the extracted text via {Field Label} or {{Field Label}}; the masked URL via {Field Label_url}.',
+			downstreamPassing: 'Subsequent AI Prompt primitives can reference {{Browser 1}} to summarize or analyze the page.'
 		},
 		syntaxExamples: [
+			'https://site/api?user={user}&key={my_api_key}',
 			'{Browser 1}',
-			'{{Browser 1.content}}',
-			'{{Browser 1_url}}'
+			'{Browser 1_url}'
 		],
 		tips: [
-			'Use parameters to dynamically build the search query or target URL path.',
+			'Put secrets in Credentials, not directly in the URL: only credential values are masked.',
 			'Keep URLs fully qualified (including https://).'
 		]
 	},

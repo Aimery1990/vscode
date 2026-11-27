@@ -12,6 +12,7 @@ import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/w
 import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, normalizeFieldType } from '../../../entityPersistence/common/entityPersistence.js';
 import { resolveDefaultModel } from '../../../agentsManager/common/agentsManager.js';
 import { getReservedTemplateNameError } from '../../common/freestyleTicket.js';
+import { findPlaintextBrowserCredentials, normalizeBrowserCredentials } from '../../common/browserCredentials.js';
 
 export const ListCustomModulesToolId = 'anyagent_list_custom_modules';
 export const GenerateCustomModuleToolId = 'anyagent_generate_custom_module';
@@ -160,17 +161,17 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'browser',
 		label: 'Browser (Web Application)',
-		description: 'Embedded web browser primitive for navigating URLs, interacting with web applications, and managing credentials.',
+		description: 'Opens defaultUrl and extracts the readable page text (retries, then falls back to a plain HTTP GET). The URL supports {variable} references. credentials is a list of {key, value} pairs with names of your choice; write {key} in the URL and the run replaces it with the URL-encoded value (a credential wins over a variable with the same name). Credentials are used only in the URL (no headers, cookies or form login) and are shown as *** in logs, outputs and the stored URL. Values written by the AI must be variable references like {SITE_API_KEY}, never plain text.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: {
 			id: 'web_browser',
 			label: 'Browser',
 			type: 'browser',
-			defaultUrl: 'https://example.com',
+			defaultUrl: 'https://example.com/api?user={user}&key={api_key}',
 			credentials: [
-				{ id: 'cred_1', key: 'username', value: 'admin' },
-				{ id: 'cred_2', key: 'password', value: 'secret' }
+				{ id: 'cred_1', key: 'user', value: '{SITE_USER}' },
+				{ id: 'cred_2', key: 'api_key', value: '{SITE_API_KEY}' }
 			]
 		}
 	},
@@ -468,7 +469,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	}
 ];
 
-type ConfigPropKind = 'string' | 'number' | 'boolean' | 'stringArray' | 'objectArray' | 'object';
+type ConfigPropKind = 'string' | 'number' | 'boolean' | 'stringArray' | 'objectArray' | 'object' | 'credentialArray';
 
 /**
  * Per-component configuration the AI may set through `config` (validated and copied onto the field). This is the single
@@ -491,7 +492,7 @@ const COMPONENT_CONFIG_PROPS: Readonly<Record<string, Readonly<Record<string, Co
 	python: { pythonCode: 'string', pythonPath: 'string', pythonEnvMode: 'string', externalScripts: 'stringArray' },
 	http_request: { httpUrl: 'string', httpMethod: 'string', httpParams: 'objectArray', httpHeaders: 'objectArray', httpAuthType: 'string', httpAuthToken: 'string', httpApiKeyName: 'string', httpApiKeyValue: 'string', httpApiKeyLocation: 'string', httpAuthUsername: 'string', httpAuthPassword: 'string', httpBodyType: 'string', httpBodyContent: 'string', httpTimeoutMs: 'number' },
 	ssh: { sshHost: 'string', sshPort: 'number', sshUser: 'string', sshPassword: 'string', sshCwd: 'string', sshCommands: 'stringArray', sshOutputLines: 'number' },
-	browser: { defaultUrl: 'string', browserMaxRetries: 'number', browserRetryDelayMs: 'number' },
+	browser: { defaultUrl: 'string', browserMaxRetries: 'number', browserRetryDelayMs: 'number', credentials: 'credentialArray' },
 	tts: { defaultContent: 'string', ttsVoice: 'string', ttsFormat: 'string', targetProvider: 'string', targetModel: 'string', targetCredentialId: 'string', ttsAutoPlay: 'boolean', ttsPlaybackRate: 'number' },
 	media_player: { mediaFilePath: 'string', mediaPlaybackRate: 'number', mediaAutoPlay: 'boolean', mediaSubtitlesEnabled: 'boolean', mediaSubtitleProvider: 'string', mediaSubtitleModel: 'string', mediaSubtitleLanguage: 'string', mediaMaxUploadMb: 'number', mediaMaxDurationMin: 'number', mediaSubtitleDisplayMode: 'string', mediaDictationUnit: 'string', mediaDictationSeconds: 'number', mediaDictationAutoPause: 'boolean' },
 	voice_note: { voiceRunInFlow: 'boolean', voiceAutoTranscribe: 'boolean' },
@@ -545,6 +546,16 @@ function applyComponentConfig(field: ICustomField, type: string, config: Record<
 			case 'object': {
 				if (typeof raw !== 'object' || Array.isArray(raw)) { return `'${field.label}.${key}' must be an object.`; }
 				target[key] = { ...(raw as object) };
+				break;
+			}
+			case 'credentialArray': {
+				// Browser credentials: [{ key, value }], referenced in the URL as {key}; values must be variable references
+				if (!Array.isArray(raw)) { return `'${field.label}.${key}' must be an array of { key, value }.`; }
+				const plaintext = findPlaintextBrowserCredentials(raw);
+				if (plaintext.length > 0) {
+					return `'${field.label}.${key}' value(s) for ${plaintext.join(', ')} must reference a variable such as {SITE_API_KEY}; plain-text secrets are not allowed.`;
+				}
+				target[key] = Array.from(normalizeBrowserCredentials(raw).entries()).map(([name, value], idx) => ({ id: `cred_${idx + 1}`, key: name, value }));
 				break;
 			}
 		}
@@ -878,7 +889,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 								},
 								config: {
 									type: 'object',
-									description: `Component settings, by type (all optional; omitted settings use the defaults): ${describeComponentConfigProps()}. Every type also accepts outputVariableName and disabled. Text can reference earlier values as {variable}. Secrets (httpAuthToken, httpApiKeyValue, httpAuthPassword, sshPassword) MUST be a variable reference like {API_TOKEN}, never the plain value. Inputs use 'parameters', Output uses 'outputSpecs', table columns use 'tableColumns'.`,
+									description: `Component settings, by type (all optional; omitted settings use the defaults): ${describeComponentConfigProps()}. Every type also accepts outputVariableName and disabled. Text can reference earlier values as {variable}. Secrets (httpAuthToken, httpApiKeyValue, httpAuthPassword, sshPassword, and every browser credentials value) MUST be a variable reference like {API_TOKEN}, never the plain value. Browser credentials are [{key, value}] pairs referenced in defaultUrl as {key}. Inputs use 'parameters', Output uses 'outputSpecs', table columns use 'tableColumns'.`,
 									additionalProperties: true
 								},
 								outputSpecs: {
