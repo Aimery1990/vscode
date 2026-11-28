@@ -58,7 +58,7 @@ export class BrowserDialogHandler extends AbstractDialogHandler {
 
 		const buttons = this.getConfirmationButtons(confirmation);
 
-		const { button, checkboxChecked } = await this.doShow(confirmation.type ?? 'question', confirmation.message, buttons, confirmation.detail, buttons.length - 1, confirmation.checkbox, undefined, typeof confirmation?.custom === 'object' ? confirmation.custom : undefined, confirmation.token);
+		const { button, checkboxChecked } = await this.doShow(confirmation.type ?? 'question', confirmation.message, buttons, confirmation.detail, buttons.length - 1, confirmation.checkbox, undefined, typeof confirmation?.custom === 'object' ? confirmation.custom : undefined, confirmation.token, confirmation.cancelIsDefault ? buttons.length - 1 : undefined);
 
 		return { confirmed: button === 0, checkboxChecked };
 	}
@@ -91,7 +91,7 @@ export class BrowserDialogHandler extends AbstractDialogHandler {
 		}
 	}
 
-	private async doShow(type: Severity | DialogType | undefined, message: string, buttons?: string[], detail?: string, cancelId?: number, checkbox?: ICheckbox, inputs?: IInputElement[], customOptions?: ICustomDialogOptions, token?: CancellationToken): Promise<IDialogResult> {
+	private async doShow(type: Severity | DialogType | undefined, message: string, buttons?: string[], detail?: string, cancelId?: number, checkbox?: ICheckbox, inputs?: IInputElement[], customOptions?: ICustomDialogOptions, token?: CancellationToken, defaultButtonIndex?: number): Promise<IDialogResult> {
 		const dialogDisposables = new DisposableStore();
 
 		const renderBody = customOptions ? (parent: HTMLElement) => {
@@ -114,6 +114,7 @@ export class BrowserDialogHandler extends AbstractDialogHandler {
 			createWorkbenchDialogOptions({
 				detail,
 				cancelId,
+				defaultButtonIndex,
 				type: this.getDialogType(type),
 				renderBody,
 				icon: customOptions?.icon,

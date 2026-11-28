@@ -61,6 +61,12 @@ export interface IConfirmation extends IBaseDialogOptions {
 	 * If not provided, defaults to `Cancel`.
 	 */
 	readonly cancelButton?: string;
+
+	/**
+	 * Makes the cancel button the default button (Enter, or Space on the focused button), so that a stray key press
+	 * cannot confirm a destructive action. Defaults to `false` (the primary button is the default).
+	 */
+	readonly cancelIsDefault?: boolean;
 }
 
 export interface IConfirmationResult extends ICheckboxResult {

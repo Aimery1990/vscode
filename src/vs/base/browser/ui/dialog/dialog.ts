@@ -42,6 +42,8 @@ export enum DialogContentsAlignment {
 
 export interface IDialogOptions {
 	readonly cancelId?: number;
+	/** The button that gets focus when the dialog opens (Enter / Space activate it). Defaults to the first button. */
+	readonly defaultButtonIndex?: number;
 	readonly detail?: string;
 	readonly alignment?: DialogContentsAlignment;
 	readonly checkboxLabel?: string;
@@ -563,8 +565,9 @@ export class Dialog extends Disposable {
 				this.inputs[0].focus();
 				this.inputs[0].select();
 			} else {
+				const defaultButtonIndex = this.options.defaultButtonIndex ?? 0;
 				buttonMap.forEach((value, index) => {
-					if (value.index === 0) {
+					if (value.index === defaultButtonIndex) {
 						buttonBar.buttons[index].focus();
 					}
 				});

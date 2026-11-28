@@ -52,6 +52,7 @@ export class NativeDialogHandler extends AbstractDialogHandler {
 			detail: confirmation.detail,
 			buttons,
 			cancelId: buttons.length - 1,
+			defaultId: confirmation.cancelIsDefault ? buttons.length - 1 : undefined,
 			checkboxLabel: confirmation.checkbox?.label,
 			checkboxChecked: confirmation.checkbox?.checked,
 			targetWindowId: getActiveWindow().vscodeWindowId

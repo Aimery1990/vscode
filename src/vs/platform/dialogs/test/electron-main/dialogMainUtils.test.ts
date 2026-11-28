@@ -168,5 +168,17 @@ suite('Dialog', () => {
 		}
 	});
 
+	test('massageMessageBoxOptions keeps an explicit default button (cancel as default)', () => {
+		const testProductService: IProductService = { _serviceBrand: undefined, ...product, nameLong: 'Test' };
+		const massaged = massageMessageBoxOptions({ buttons: ['Remove', 'Cancel'], cancelId: 1, defaultId: 1, message: 'message' }, testProductService);
+		const buttons = massaged.options.buttons ?? [];
+		// whatever the platform order, the default button is still "Cancel" and maps back to index 1
+		deepEqual(buttons[massaged.options.defaultId ?? -1], 'Cancel');
+		deepEqual(massaged.buttonIndeces[massaged.options.defaultId ?? -1], 1);
+		// out of range: falls back to the platform default
+		const fallback = massageMessageBoxOptions({ buttons: ['1', '2'], cancelId: 1, defaultId: 5, message: 'message' }, testProductService);
+		deepEqual(fallback.buttonIndeces[fallback.options.defaultId ?? -1], 0);
+	});
+
 	ensureNoDisposablesAreLeakedInTestSuite();
 });

@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, append, clearNode, Dimension, h, isHTMLElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, Dimension, EventType, getActiveElement, getWindow, h, isHTMLElement, isHTMLInputElement, isHTMLTextAreaElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { Mutable } from '../../../../base/common/types.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
@@ -41,6 +41,7 @@ import { buildPriorityOptions, getPriorityColor, groupStatusOptions, ITemplateSt
 import { writeTicketFile } from './ticketChangeRecorder.js';
 import { checkTicketAttachments, readTicketAttachmentManifest, withTicketAttachmentChange } from './ticketAttachmentIntegrity.js';
 import { attachmentTamperTooltip, IAttachmentManifest } from '../common/ticketAttachmentIntegrity.js';
+import { clampFocusSelection, findFocusRestoreIndex, focusKindOf, focusOrdinalOf, IEditableFocusKey, IFocusTargetInfo, isStrayKeyboardClick, TICKET_PAGE_DESTRUCTIVE_BUTTON_SELECTOR, wasFocusedByTab } from '../common/ticketPageFocus.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
@@ -1177,6 +1178,7 @@ export class EntityDetailEditor extends EditorPane {
 		parent.appendChild(this._rootEl);
 
 		this._bindContainerEvents();
+		this._installStrayClickGuard(this._rootEl);
 
 		if (this._entityUri) {
 			this._resolvePathsAndLoadData();
@@ -1653,7 +1655,8 @@ export class EntityDetailEditor extends EditorPane {
 			type: 'warning',
 			message: `Remove the component "${label}" from this ticket?`,
 			detail: 'Only this ticket\'s structure changes. A value already entered stays in the ticket file.',
-			primaryButton: 'Remove'
+			primaryButton: 'Remove',
+			cancelIsDefault: true
 		});
 		if (confirmed) {
 			await this._queueFreestyleStructureEdit(schema => ({ next: removeComponent(schema, fieldId) }));
@@ -2473,6 +2476,7 @@ export class EntityDetailEditor extends EditorPane {
 		const { result: content, parts } = collectParts(() => this._buildContent(this._lastParsedData!, workLogContent, [], mod, agents, allTickets));
 		this._disposeMediaCleanupFns();
 		this._pageParts = parts;
+		const focusKey = this._captureEditableFocus();
 		reset(this._container, ...content);
 		this._syncComponentToolbox();
 		this._applySavedScrollPosition(scrollKey);
@@ -2488,6 +2492,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._renderBrowserCredentialNames();
 		this._appendWorkflowRuntimeBlocks(mod);
 		this._applySavedScrollPosition(scrollKey);
+		this._restoreEditableFocus(focusKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
 		const directInfoBtn = this._pageParts.statusLifecycleInfoBtn as HTMLElement | null;
@@ -2709,6 +2714,7 @@ export class EntityDetailEditor extends EditorPane {
 			const { result: content, parts } = collectParts(() => this._buildContent(parsed, workLogContent, attachments, customModule, agents, allTickets));
 			this._disposeMediaCleanupFns();
 			this._pageParts = parts;
+			const focusKey = this._captureEditableFocus();
 			reset(this._container, ...content);
 			this._ticketBoard.mount(this._pageParts.layoutContainer, this._entityUri, !this._isEmbeddedInWorkflow && (parsed.ticketType || '').toLowerCase() !== 'agent');
 			this._syncComponentToolbox();
@@ -2726,6 +2732,7 @@ export class EntityDetailEditor extends EditorPane {
 			this._applyAttachmentTamperMarks();
 			this._checkAttachmentIntegrity(this._entityUri, loadSeq);
 			this._applySavedScrollPosition(scrollKey);
+			this._restoreEditableFocus(focusKey);
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
 			// 4. Attach direct click handlers for key interactive elements
@@ -2774,6 +2781,112 @@ export class EntityDetailEditor extends EditorPane {
 				retryBtn.onclick = () => this._resolvePathsAndLoadData();
 			}
 		}
+	}
+
+	/** Fields a re-render can give focus back to (UI-28). */
+	private _editableFocusCandidates(container: HTMLElement): HTMLElement[] {
+		const fields: HTMLElement[] = [];
+		const visit = (parent: Element) => {
+			for (const el of Array.from(parent.children)) {
+				if (isHTMLElement(el) && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && el.getAttribute('type') !== 'hidden') || el.isContentEditable)) {
+					fields.push(el);
+				} else {
+					visit(el);
+				}
+			}
+		};
+		visit(container);
+		return fields;
+	}
+
+	private _focusTargetInfo(el: HTMLElement): IFocusTargetInfo {
+		const holder = el.closest('[data-component-id], [data-field-key]');
+		return {
+			scope: holder?.getAttribute('data-component-id') ?? holder?.getAttribute('data-field-key') ?? '',
+			kind: focusKindOf(el.tagName, Array.from(el.classList), { type: el.getAttribute('type'), name: el.getAttribute('name'), ariaLabel: el.getAttribute('aria-label'), inputIndex: el.getAttribute('data-input-index') })
+		};
+	}
+
+	/** Remembers the field the user is typing in, before a full re-render replaces it (UI-28). */
+	private _captureEditableFocus(): IEditableFocusKey | undefined {
+		const container = this._container;
+		const active = getActiveElement();
+		if (!container || !isHTMLElement(active) || !container.contains(active)) {
+			return undefined;
+		}
+		const fields = this._editableFocusCandidates(container);
+		const index = fields.indexOf(active);
+		if (index < 0) {
+			return undefined;
+		}
+		const infos = fields.map(f => this._focusTargetInfo(f));
+		const text = active as Partial<HTMLInputElement>;
+		let selection: Pick<IEditableFocusKey, 'selectionStart' | 'selectionEnd' | 'selectionDirection'> = {};
+		try {
+			if (typeof text.selectionStart === 'number' && typeof text.selectionEnd === 'number') {
+				selection = { selectionStart: text.selectionStart, selectionEnd: text.selectionEnd, selectionDirection: text.selectionDirection ?? undefined };
+			}
+		} catch { /* no caret on this input type */ }
+		return { ...infos[index], ordinal: focusOrdinalOf(infos, index), ...selection, scrollTop: active.scrollTop };
+	}
+
+	/**
+	 * Gives focus and caret back to the remembered field after a re-render, but only when focus was lost (it is on
+	 * the document); focus the user moved elsewhere meanwhile stays there. Nothing else gets focus (UI-28).
+	 */
+	private _restoreEditableFocus(key: IEditableFocusKey | undefined): void {
+		const container = this._container;
+		if (!key || !container) {
+			return;
+		}
+		const active = getActiveElement();
+		const doc = container.ownerDocument;
+		if (active && active !== doc.body && active !== doc.documentElement) {
+			return;
+		}
+		const fields = this._editableFocusCandidates(container);
+		const el = fields[findFocusRestoreIndex(fields.map(f => this._focusTargetInfo(f)), key)];
+		if (!el || (el as HTMLInputElement).disabled) {
+			return;
+		}
+		el.focus({ preventScroll: true });
+		if (isHTMLInputElement(el) || isHTMLTextAreaElement(el)) {
+			const range = clampFocusSelection(key, el.value.length);
+			try {
+				if (range) {
+					el.setSelectionRange(range.start, range.end, key.selectionDirection);
+				}
+			} catch { /* no caret on this input type */ }
+			if (typeof key.scrollTop === 'number') {
+				el.scrollTop = key.scrollTop;
+			}
+		}
+	}
+
+	/**
+	 * Space / Enter on a focused remove / clear button only counts when the user moved there with Tab on purpose;
+	 * pointer clicks always count. Stops stray key presses (e.g. typing on after a re-render moved focus) from
+	 * removing a component (UI-28).
+	 */
+	private _installStrayClickGuard(root: HTMLElement): void {
+		let lastTabKeyAt = 0;
+		let tabFocused: EventTarget | null = null;
+		this._register(addDisposableListener(getWindow(root), EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			if (e.key === 'Tab') {
+				lastTabKeyAt = Date.now();
+			}
+		}, true));
+		this._register(addDisposableListener(root, EventType.FOCUS_IN, (e: FocusEvent) => {
+			tabFocused = wasFocusedByTab(lastTabKeyAt, Date.now()) ? e.target : null;
+		}));
+		this._register(addDisposableListener(root, EventType.CLICK, (e: MouseEvent) => {
+			const target = e.target as Element | null;
+			const btn = target?.closest?.(TICKET_PAGE_DESTRUCTIVE_BUTTON_SELECTOR);
+			if (btn && root.contains(btn) && isStrayKeyboardClick(e.detail, tabFocused === btn)) {
+				e.preventDefault();
+				e.stopImmediatePropagation();
+			}
+		}, true));
 	}
 
 	private _bindContainerEvents(): void {
@@ -10138,7 +10251,8 @@ ${rawErr}
 					message,
 					detail,
 					primaryButton: 'Delete',
-					cancelButton: 'Cancel'
+					cancelButton: 'Cancel',
+					cancelIsDefault: true
 				});
 				return Boolean(res.confirmed);
 			}
@@ -12754,6 +12868,7 @@ ${rawErr}
 			clearFileBtn.className = 'monaco-button';
 			clearFileBtn.style.cssText = `padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171; display: ${(savedFileName || savedFilePath) ? 'inline-flex' : 'none'}; align-items: center; gap: 4px;`;
 			clearFileBtn.title = 'Clear imported media file';
+			clearFileBtn.dataset.destructive = 'true';
 			const trashIcon = document.createElement('span');
 			trashIcon.className = 'codicon codicon-trash';
 			trashIcon.style.fontSize = '11px';
@@ -14350,6 +14465,7 @@ ${rawErr}
 						delBtn.style.cssText = 'background: transparent; border: none; color: #f87171; cursor: pointer; font-size: 12px; opacity: 0.8;';
 						delBtn.textContent = '\u2715';
 						delBtn.title = 'Delete Row';
+						delBtn.dataset.destructive = 'true';
 						delBtn.onclick = () => {
 							rows.splice(actualRowIdx, 1);
 							renderGrid();
@@ -14549,6 +14665,7 @@ ${rawErr}
 					delColBtn.type = 'button';
 					delColBtn.textContent = '\u2715';
 					delColBtn.title = 'Delete Column';
+					delColBtn.dataset.destructive = 'true';
 					delColBtn.style.cssText = 'background: transparent; border: none; color: #ef4444; cursor: pointer; font-size: 12px; opacity: 0.8;';
 					delColBtn.onclick = () => {
 						if (columns.length <= 1) {
@@ -14933,6 +15050,7 @@ ${rawErr}
 
 			const deleteDbBtn = document.createElement('button');
 			deleteDbBtn.type = 'button';
+			deleteDbBtn.dataset.destructive = 'true';
 			deleteDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4); cursor: pointer;';
 			deleteDbBtn.textContent = 'Delete Data in SQLite';
 			deleteDbBtn.title = 'Delete all rows of this table inside the SQLite database';
@@ -15029,7 +15147,8 @@ ${rawErr}
 						message: `Table '${tblLabel}' Was Dropped in SQLite`,
 						detail: `The SQL execution dropped table '${tblLabel}', while you have unsaved local column edits in Table Columns.\n\nWould you like to clear Table Columns to match the dropped table, or keep your local column definitions?`,
 						primaryButton: 'Clear Table Columns',
-						cancelButton: 'Keep Local Edits'
+						cancelButton: 'Keep Local Edits',
+						cancelIsDefault: true
 					});
 					if (confirmRes.confirmed) {
 						return { nextCols: [], nextDirty: false };
@@ -15953,7 +16072,8 @@ ${rawErr}
 					message: `Delete All Rows in SQLite Table '${curTableName || 'table'}'?`,
 					detail: `This will permanently delete all rows from table '${curTableName || 'table'}' in '${pathInput.value.trim()}'. This action cannot be undone.`,
 					primaryButton: 'Delete All Data in SQLite',
-					cancelButton: 'Cancel'
+					cancelButton: 'Cancel',
+					cancelIsDefault: true
 				});
 				if (confirmDel.confirmed) {
 					await runSqliteAction('delete_data');
@@ -18003,6 +18123,7 @@ ${rawErr}
 					rowDelBtn.type = 'button';
 					rowDelBtn.style.cssText = 'padding: 3px 6px; font-size: 11px; border-radius: 4px; cursor: pointer; background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); color: #94a3b8; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;';
 					rowDelBtn.title = sshCommands.length > 1 ? `Remove Command Bar #${rowIdx + 1}` : 'Clear command';
+					rowDelBtn.dataset.destructive = 'true';
 					const delIcon = document.createElement('span');
 					delIcon.className = 'codicon codicon-close';
 					delIcon.style.fontSize = '11px';

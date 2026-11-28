@@ -99,6 +99,11 @@ export function massageMessageBoxOptions(options: MessageBoxOptions, productServ
 		}
 	}
 
+	// An explicit default button (e.g. Cancel for destructive confirmations) follows its button through the reordering
+	if (typeof options.defaultId === 'number' && options.defaultId >= 0 && buttonIndeces.includes(options.defaultId)) {
+		defaultId = buttonIndeces.indexOf(options.defaultId);
+	}
+
 	massagedOptions.buttons = buttons;
 	massagedOptions.defaultId = defaultId;
 	massagedOptions.cancelId = cancelId;
