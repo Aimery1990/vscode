@@ -93,6 +93,8 @@ export interface IWorkflowNodeExecutionState {
 	 * the node did not run in this run. Cleared when the node runs again (CI-57).
 	 */
 	carriedOverFromRunId?: string;
+	/** Run number of `carriedOverFromRunId` (shown as "From run #N" on the canvas). */
+	carriedOverFromRunNumber?: number;
 }
 
 export interface IWorkflowNodeOperation {

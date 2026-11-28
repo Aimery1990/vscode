@@ -65,7 +65,7 @@ import {
 	isWorkflowRecord,
 	hasWorkflowProperty
 } from '../common/workflowExecutionModel.js';
-import { buildInitialRunStates, isPartialWorkflowRun } from '../common/workflowRunStates.js';
+import { buildInitialRunStates, dropContextVariables, nodesClearedByRun, variablesProducedOnlyByClearedNodes } from '../common/workflowRunStates.js';
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
 
 /** A component step of a node pipeline, plus runtime-only bookkeeping the engine writes onto it. */
@@ -2667,6 +2667,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						nodeType: nState.nodeType,
 						status: nState.status,
 						carriedOverFromRunId: nState.carriedOverFromRunId,
+						carriedOverFromRunNumber: nState.carriedOverFromRunNumber,
 						startedAt: nState.startedAt,
 						completedAt: nState.completedAt,
 						durationMs: nState.durationMs,
@@ -3056,9 +3057,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			} catch { }
 		}
 		// CI-57: the flowchart decides whether this is a fresh run (from Start / an entry node) or a partial one (from a
-		// mid-workflow node, or selected nodes only); only a partial run inherits anything from an earlier run
+		// mid-workflow node, or selected nodes only); only a partial run inherits anything from an earlier run, and it
+		// clears the nodes it re-runs (everything reachable from the entry node, or exactly the selected nodes)
 		const flowchartData = await this._loadFlowchartData(uriStr, options);
-		const isPartialRun = isPartialWorkflowRun(options, flowchartData?.links);
+		const clearedNodeIds = nodesClearedByRun(options, flowchartData?.links);
+		const isPartialRun = clearedNodeIds !== undefined;
 		const existingRunId = this._activeRunsByWorkflow.get(uriStr);
 		const inheritedContextVariables: Record<string, unknown> = {};
 		let priorStateSource: IWorkflowExecutionRun | undefined;
@@ -3129,6 +3132,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 
+		// CI-57: the variables declared only by the cleared nodes are produced again when those nodes re-run (a loop counter
+		// restarts from its initial value); variables that cannot be attributed to a node (free Python code, Run Ticket
+		// outputs) are kept, and re-running nodes overwrite them
+		if (clearedNodeIds && flowchartData?.nodes) {
+			const dropped = dropContextVariables(inheritedContextVariables, variablesProducedOnlyByClearedNodes(flowchartData.nodes, clearedNodeIds));
+			if (dropped.length > 0) {
+				this.logService.info(`[WorkflowExecution] Partial run of ${uriStr}: not inheriting ${dropped.length} variable(s) of the re-run nodes: ${dropped.slice(0, 20).join(', ')}`);
+			}
+		}
+
 		// Hydrate any archived large variables inherited from prior runs so native types (dict/list/str) are restored before execution
 		if (Object.keys(inheritedContextVariables).length > 0) {
 			await this._hydrateContextVariables(uriStr, inheritedContextVariables);
@@ -3164,10 +3177,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// If any visible upstream node already has a persisted `lastExecutionOutput` (the exact value shown in UI "Last Runtime Value")
 		// that is missing from `inheritedContextVariables` (e.g. from older runs before sidecar archiving), backfill it here so
 		// downstream nodes can immediately consume it without re-running upstream nodes.
-		if (isPartialRun && !options?.isSubWorkflowRun) {
-			const selectedSet = new Set(options?.selectedNodeIds || []);
+		if (clearedNodeIds && !options?.isSubWorkflowRun) {
 			for (const n of flowchartData.nodes) {
-				if (!n || selectedSet.has(n.id)) {
+				if (!n || clearedNodeIds.has(n.id)) {
 					continue;
 				}
 				for (const st of (n.pipeline || [])) {
@@ -3197,14 +3209,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const runNumber = maxRunNumber + 1;
 
 		const isFullSpeed = Boolean(options?.fullSpeed);
-		// CI-57: a fresh run starts with empty node states, link states and visited nodes; a partial run keeps the earlier
-		// results of the nodes it does not re-run, each marked `carriedOverFromRunId`
-		const selectiveResetSet = new Set<string>(
-			Array.isArray(options?.selectedNodeIds) && options!.selectedNodeIds!.length > 0
-				? options!.selectedNodeIds!
-				: (options?.entryNodeId ? [options.entryNodeId] : [])
-		);
-		const initialStates = buildInitialRunStates(flowchartData.nodes, isPartialRun, selectiveResetSet, priorStateSource);
+		// CI-57: a fresh run starts with empty node states, link states and visited nodes; a partial run clears the nodes it
+		// re-runs and keeps the earlier results of all other nodes, each marked `carriedOverFromRunId`
+		const initialStates = buildInitialRunStates(flowchartData.nodes, clearedNodeIds, priorStateSource);
 
 		const run: IWorkflowExecutionRun = {
 			runId,
@@ -3542,6 +3549,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							nodeState.status = 'running';
 							nodeState.startedAt = Date.now();
 							nodeState.carriedOverFromRunId = undefined;
+							nodeState.carriedOverFromRunNumber = undefined;
 							nodeState.error = undefined;
 							nodeState.failedStepIndex = undefined;
 							nodeState.failedStepId = undefined;
@@ -4077,6 +4085,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							nodeState.status = 'running';
 							nodeState.startedAt = Date.now();
 							nodeState.carriedOverFromRunId = undefined;
+							nodeState.carriedOverFromRunNumber = undefined;
 							nodeState.error = undefined;
 							nodeState.failedStepIndex = undefined;
 							nodeState.failedStepId = undefined;

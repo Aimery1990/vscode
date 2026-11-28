@@ -11469,6 +11469,9 @@ export class WorkflowEditor extends EditorPane {
 					// CI-57: a partial run (run from a mid-workflow node / selected nodes) shows the earlier result of a node it did not run
 					nodeEl.classList.add('status-carried-over');
 					nodeEl.dataset.carriedOverFromRun = nodeRunState.carriedOverFromRunId;
+					nodeEl.title = nodeRunState.carriedOverFromRunNumber
+						? `From run #${nodeRunState.carriedOverFromRunNumber} (kept: this run did not re-run this node)`
+						: 'From an earlier run (kept: this run did not re-run this node)';
 				}
 				if (nodeRunState.status === 'running') {
 					if (isActiveRunLive) {
