@@ -4,8 +4,8 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, detectTicketFailure, dismissTicketRunFailure, formatTicketLastRunRecord, isDismissedRunFailure, lastRunOutcome, isFailedRunStatus, isFailingResultValue, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
-import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../../common/ticketSubtreeCount.js';
+import { classifyTestResult, collectFailingDescendants, countFailing, describeFailingBelow, describeFailingFraction, describeTestResult, describeTicketFailure, detectTicketFailure, dismissTicketRunFailure, formatTicketLastRunRecord, isDismissedRunFailure, isFailedRunStatus, isFailingResultValue, lastRunOutcome, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
+import { countSubtree, describeChildCountPill, ITicketSubtreeNode, ITicketSubtreeSummary } from '../../common/ticketSubtreeCount.js';
 import { CanonicalStatusCategory } from '../../common/workspacesExplorer.js';
 
 function n(label: string, category: CanonicalStatusCategory | undefined, children: ITicketSubtreeNode[] = [], failing?: string, removed = false): ITicketSubtreeNode {
@@ -177,6 +177,58 @@ suite('ticketFailure', () => {
 		// a sub-summary (T-2's own children) sees only its descendants
 		assert.deepStrictEqual(collectFailingDescendants({ truncated: false, children: summary.children[0].children[0].children }, none, false).failing.map(f => f.label), ['T-3 Test']);
 		assert.strictEqual(collectFailingDescendants({ truncated: false, children: [n('A', 'Todo')] }, none, false).failing.length, 0);
+	});
+
+	test('UI-32: failing / total fraction in the count pill, same count mode as the pill', () => {
+		const summary: ITicketSubtreeSummary = {
+			truncated: false,
+			children: [
+				n('T-1 Epic', 'In Progress', [
+					n('T-2 Story', 'Done', [n('T-3 Test', 'Done', [], 'Test result: Fail')]),
+					n('T-4 Task', 'Todo', [], 'Last run failed')
+				]),
+				n('T-7 Task', 'Todo', [n('T-8 Sub', 'Todo')]),
+				n('T-9 Failing', 'Done', [], 'Last run failed'),
+				n('T-5 Gone', 'Removed', [n('T-6 Child', 'Todo', [], 'Test result: Fail')], undefined, true)
+			]
+		};
+		// all levels: T-3, T-4, T-9; direct children: T-1 (through T-3 / T-4) and T-9
+		assert.deepStrictEqual(countFailing(summary, none, false), { all: 3, allHidden: 0, direct: 2, directHidden: 0 });
+		// Done hidden: failures still count (like the propagation), the hidden ones separately
+		assert.deepStrictEqual(countFailing(summary, new Set(['Done']), false), { all: 3, allHidden: 2, direct: 2, directHidden: 1 });
+		// show removed items: the removed branch counts again
+		assert.deepStrictEqual(countFailing(summary, none, true), { all: 4, allHidden: 0, direct: 3, directHidden: 0 });
+		assert.deepStrictEqual(countFailing({ truncated: false, children: [n('A', 'Todo', [n('B', 'Todo')])] }, none, false), { all: 0, allHidden: 0, direct: 0, directHidden: 0 });
+
+		const counts = countSubtree(summary, none, false);
+		const allPill = describeChildCountPill(counts, 'all')!;
+		const directPill = describeChildCountPill(counts, 'direct')!;
+		assert.strictEqual(allPill.text, '7');
+		assert.strictEqual(directPill.text, '3');
+		const failing = countFailing(summary, none, false);
+		assert.deepStrictEqual(describeFailingFraction(failing, 'all', counts), { numerator: '3', denominator: '7', summary: '3 failing of 7 tickets (All Levels)' });
+		assert.deepStrictEqual(describeFailingFraction(failing, 'direct', counts), { numerator: '2', denominator: '3', summary: '2 failing of 3 tickets (Direct Children: a child counts when it or a ticket below it fails)' });
+		// off: no pill, the tree keeps the red dot
+		assert.strictEqual(describeFailingFraction(failing, 'off', counts), undefined);
+		// nothing failing: just the total
+		assert.strictEqual(describeFailingFraction({ all: 0, allHidden: 0, direct: 0, directHidden: 0 }, 'all', counts), undefined);
+		// Done hidden: the denominator is the visible tickets (T-1, T-4, T-7, T-8) plus the hidden failing ones (T-3, T-9);
+		// the hidden, not failing T-2 is not counted
+		const doneHidden = new Set<CanonicalStatusCategory>(['Done']);
+		const hiddenCounts = countSubtree(summary, doneHidden, false);
+		assert.strictEqual(hiddenCounts.visible, 4);
+		assert.deepStrictEqual(describeFailingFraction(countFailing(summary, doneHidden, false), 'all', hiddenCounts), { numerator: '3', denominator: '6', summary: '3 failing of 6 tickets (All Levels) · 2 of them hidden by the status filter' });
+		assert.deepStrictEqual(describeFailingFraction(countFailing(summary, doneHidden, false), 'direct', hiddenCounts), { numerator: '2', denominator: '3', summary: '2 failing of 3 tickets (Direct Children: a child counts when it or a ticket below it fails) · 1 of them hidden by the status filter' });
+		// PM example: 1 visible, 2 hidden failing -> 2/3; the numerator never exceeds the denominator
+		const pm: ITicketSubtreeSummary = { truncated: false, children: [n('V', 'Todo'), n('H1', 'Done', [], 'x'), n('H2', 'Done', [], 'y')] };
+		const pmFraction = describeFailingFraction(countFailing(pm, doneHidden, false), 'all', countSubtree(pm, doneHidden, false))!;
+		assert.deepStrictEqual([pmFraction.numerator, pmFraction.denominator], ['2', '3']);
+		// all hidden, all failing: 2/2, not 2/0
+		const allHidden: ITicketSubtreeSummary = { truncated: false, children: [n('H1', 'Done', [], 'x'), n('H2', 'Done', [], 'y')] };
+		const ah = describeFailingFraction(countFailing(allHidden, doneHidden, false), 'all', countSubtree(allHidden, doneHidden, false))!;
+		assert.deepStrictEqual([ah.numerator, ah.denominator], ['2', '2']);
+		// a capped scan keeps the '+'
+		assert.strictEqual(describeFailingFraction({ all: 1, allHidden: 0, direct: 1, directHidden: 0 }, 'all', { visible: 56, total: 56, directVisible: 3, directTotal: 3, truncated: true })!.summary, '1 failing of 56+ tickets (All Levels)');
 	});
 
 	test('UI-23: test result classification and tooltips', () => {

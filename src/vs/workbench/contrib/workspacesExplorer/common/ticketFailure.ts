@@ -6,7 +6,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { CanonicalStatusCategory } from './workspacesExplorer.js';
-import { isSubtreeNodeVisible, ITicketSubtreeNode, ITicketSubtreeSummary } from './ticketSubtreeCount.js';
+import { ChildCountMode, CHILD_COUNT_MODES, isSubtreeNodeVisible, ITicketSubtreeCounts, ITicketSubtreeNode, ITicketSubtreeSummary } from './ticketSubtreeCount.js';
 
 /**
  * Failing tickets in the Workspaces tree (UI-20).
@@ -349,6 +349,95 @@ export function describeFailingBelow(summary: IFailingSummary, cap = FAILING_TOO
 		lines.push(`… and ${count - cap} more`);
 	}
 	return `${count} failing below:\n${lines.join('\n')}`;
+}
+
+// --- failing / total fraction in the count pill (UI-32) ---
+
+/** Failing tickets below a summarized folder, per count mode (see {@link countFailing}). */
+export interface IFailingCounts {
+	/** All levels: failing descendants. */
+	readonly all: number;
+	/** Of {@link all}: hidden by the status filter (themselves or through an ancestor). */
+	readonly allHidden: number;
+	/** Direct children: those failing themselves or with a failing descendant. */
+	readonly direct: number;
+	/** Of {@link direct}: hidden by the status filter. */
+	readonly directHidden: number;
+}
+
+/**
+ * The numerators of the count pill's `failing / total` fraction (UI-32), in the same count modes as the pill (UI-17).
+ * Like the propagation (UI-20) failures count regardless of the status filter (the hidden ones are counted separately
+ * for the tooltip); removed tickets and their sub-trees are skipped unless "show removed items" is on.
+ */
+export function countFailing(summary: ITicketSubtreeSummary, hidden: ReadonlySet<CanonicalStatusCategory>, includeRemoved: boolean): IFailingCounts {
+	let all = 0;
+	let allHidden = 0;
+	/** Visits a sub-tree and returns whether anything in it (the node included) fails. */
+	const visit = (node: ITicketSubtreeNode, hiddenAbove: boolean): boolean => {
+		const hiddenHere = hiddenAbove || !isSubtreeNodeVisible(node, hidden, includeRemoved);
+		let fails = false;
+		if (node.failure) {
+			all++;
+			if (hiddenHere) {
+				allHidden++;
+			}
+			fails = true;
+		}
+		for (const child of node.children) {
+			if (!(child.removed && !includeRemoved) && visit(child, hiddenHere)) {
+				fails = true;
+			}
+		}
+		return fails;
+	};
+	let direct = 0;
+	let directHidden = 0;
+	for (const child of summary.children) {
+		if (child.removed && !includeRemoved) {
+			continue;
+		}
+		if (visit(child, false)) {
+			direct++;
+			if (!isSubtreeNodeVisible(child, hidden, includeRemoved)) {
+				directHidden++;
+			}
+		}
+	}
+	return { all, allHidden, direct, directHidden };
+}
+
+/** The failing part of a count pill: the red numerator and the first tooltip line. */
+export interface IFailingFraction {
+	/** The failing count, shown in red. */
+	readonly numerator: string;
+	/** The total after the `/`: the visible tickets plus the failing ones the filter hides. */
+	readonly denominator: string;
+	/** "1 failing of 56 tickets (All Levels)" (+ how many of them the status filter hides). */
+	readonly summary: string;
+}
+
+/**
+ * The `failing / total` fraction of the count pill in `mode`, or undefined when nothing fails in that mode (the pill
+ * then shows just the total). The total is the visible tickets counted under the filter PLUS the failing tickets the
+ * filter hides (they count in both parts), so the failing count never exceeds it: 1 visible, 2 hidden failing → 2/3.
+ * Mode off has no pill: the tree keeps the UI-20 red dot instead.
+ */
+export function describeFailingFraction(failing: IFailingCounts, mode: ChildCountMode, counts: ITicketSubtreeCounts): IFailingFraction | undefined {
+	if (mode === 'off') {
+		return undefined;
+	}
+	const count = mode === 'all' ? failing.all : failing.direct;
+	if (count <= 0) {
+		return undefined;
+	}
+	const hiddenCount = mode === 'all' ? failing.allHidden : failing.directHidden;
+	const label = CHILD_COUNT_MODES.find(m => m.mode === mode)?.label ?? mode;
+	const how = mode === 'direct' ? ': a child counts when it or a ticket below it fails' : '';
+	const visible = mode === 'all' ? counts.visible : counts.directVisible;
+	const denominator = `${visible + hiddenCount}${mode === 'all' && counts.truncated ? '+' : ''}`;
+	const hiddenNote = hiddenCount > 0 ? ` · ${hiddenCount} of them hidden by the status filter` : '';
+	return { numerator: String(count), denominator, summary: `${count} failing of ${denominator} tickets (${label}${how})${hiddenNote}` };
 }
 
 /** Tooltip of a failing ticket's own marker. */

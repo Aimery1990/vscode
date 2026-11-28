@@ -60,7 +60,7 @@ import { describeRestoreDecision } from '../common/ticketRestore.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
-import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, dismissTicketRunFailure, formatFailureTime, formatTicketLastRunRecord, IFailingSummary, ITicketLastRunRecord, parseTicketLastRunRecord, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
+import { classifyTestResult, collectFailingDescendants, countFailing, describeFailingBelow, describeFailingFraction, describeTestResult, describeTicketFailure, dismissTicketRunFailure, formatFailureTime, formatTicketLastRunRecord, IFailingCounts, IFailingSummary, ITicketLastRunRecord, parseTicketLastRunRecord, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
 import { recordTicketChangeEntry } from './ticketChangeRecorder.js';
 import { createCSSRule } from '../../../../base/browser/domStylesheets.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
@@ -273,7 +273,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	/** Child-count pill mode, one global choice for the tree (UI-17). */
 	private _childCountMode: ChildCountMode;
 	/** Counts per sub-tree summary for the current filter, so re-renders do not walk unchanged sub-trees again. */
-	private readonly _childCountMemo = new WeakMap<ITicketSubtreeSummary, { key: string; counts: ITicketSubtreeCounts; failing: IFailingSummary }>();
+	private readonly _childCountMemo = new WeakMap<ITicketSubtreeSummary, { key: string; counts: ITicketSubtreeCounts; failing: IFailingSummary; failingCounts: IFailingCounts }>();
 	private _childCountRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
@@ -858,11 +858,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			memo = {
 				key: filterKey,
 				counts: countSubtree(summary, this._hiddenStatusCategories, this._showRemovedItems),
-				failing: collectFailingDescendants(summary, this._hiddenStatusCategories, this._showRemovedItems)
+				failing: collectFailingDescendants(summary, this._hiddenStatusCategories, this._showRemovedItems),
+				failingCounts: countFailing(summary, this._hiddenStatusCategories, this._showRemovedItems)
 			};
 			this._childCountMemo.set(summary, memo);
 		}
-		// UI-20: a red pill (or a red dot when the count is off) on every ancestor of a failing ticket
+		// UI-20 / UI-32: every ancestor of a failing ticket shows `failing/total` in its pill (only the failing count is
+		// red), or a red dot when the count is off
 		const failingText = describeFailingBelow(memo.failing);
 		const pill = describeChildCountPill(memo.counts, this._childCountMode);
 		if (!pill) {
@@ -877,12 +879,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 			dot.setAttribute('aria-label', failingText);
 			return `dot:${failingText}`;
 		}
-		const style = failingText
-			? 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--vscode-errorForeground); background: var(--vscode-inputValidation-errorBackground, rgba(229, 20, 0, 0.16)); border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));'
-			: 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); background: rgba(128, 128, 128, 0.14); border: 1px solid rgba(128, 128, 128, 0.28);';
-		const pillEl = append(container, $(failingText ? 'span.ticket-child-count.ticket-child-count-failing' : 'span.ticket-child-count', { style }, pill.text));
-		pillEl.title = failingText ? `${failingText}\n\n${pill.tooltip}` : pill.tooltip;
-		return `${this._childCountMode}:${pill.text}:${pillEl.title}`;
+		const fraction = failingText ? describeFailingFraction(memo.failingCounts, this._childCountMode, memo.counts) : undefined;
+		const style = 'flex-shrink: 0; font-size: 8.5px; line-height: 12px; padding: 0 5px; border-radius: 6px; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); background: rgba(128, 128, 128, 0.14); border: 1px solid rgba(128, 128, 128, 0.28);';
+		const pillEl = append(container, $(fraction ? 'span.ticket-child-count.ticket-child-count-failing' : 'span.ticket-child-count', { style }));
+		if (fraction) {
+			append(pillEl, $('span.ticket-child-count-failing-num', { style: 'font-weight: 700; color: var(--vscode-errorForeground);' }, fraction.numerator));
+			append(pillEl, $('span.ticket-child-count-total', undefined, `/${fraction.denominator}`));
+			pillEl.title = `${fraction.summary}\n\n${failingText}\n\n${pill.tooltip}`;
+		} else {
+			pillEl.textContent = pill.text;
+			pillEl.title = failingText ? `${failingText}\n\n${pill.tooltip}` : pill.tooltip;
+		}
+		return `${this._childCountMode}:${fraction ? `${fraction.numerator}/${fraction.denominator}` : pill.text}:${pillEl.title}`;
 	}
 
 	/**
