@@ -59,6 +59,8 @@ import { clashesWithBuiltInTicketType } from '../../customModules/common/templat
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { applyOutputVariableName, replaceOutputVariableReferences, validateOutputVariableName } from '../../customModules/common/outputVariable.js';
+import { renderOutputVariableChip } from '../../customModules/browser/outputVariableChip.js';
 import { MASKED_SECRET, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
 import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, IGitRunResult, IShellRunResult } from '../../entityPersistence/common/entityPersistence.js';
@@ -763,6 +765,24 @@ const COMPONENT_STRUCTURE_CSS = `
 }
 .entity-detail-root .freestyle-component-spacer {
 	flex: 1;
+}
+/* Output variable chip (UI-27): on a narrow card the chip and the buttons wrap to the next row(s) instead of cutting the name */
+.entity-detail-root.component-toolbox-open .freestyle-component-toolbar {
+	flex-wrap: wrap;
+	row-gap: 4px;
+	column-gap: 4px;
+}
+.entity-detail-root .freestyle-component-toolbar .anyagent-output-var-chip {
+	flex: 0 1 auto;
+	max-width: 100%;
+	font-size: 10.5px;
+}
+.entity-detail-root .freestyle-component-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+	margin-left: auto;
 }
 .entity-detail-root .freestyle-component-rename-input {
 	flex: 0 1 240px;
@@ -1674,6 +1694,32 @@ export class EntityDetailEditor extends EditorPane {
 		});
 	}
 
+	/**
+	 * Renames the output variable of a component from its card chip (UI-27). Saved like the component settings dialog
+	 * (a structure edit of `.agents/freestyle_schema.json`); with `updateReferences` the other components' references
+	 * to the old name are replaced in the same edit.
+	 */
+	private _renameFreestyleOutputVariable(fieldId: string, newName: string, oldName: string, updateReferences: boolean): Promise<void> {
+		return this._queueFreestyleStructureEdit(schema => {
+			const next: ICustomModule = JSON.parse(JSON.stringify(schema));
+			const fields = next.fields ?? [];
+			const field = fields.find(f => (f.id || '').toLowerCase() === fieldId.toLowerCase());
+			if (!field) {
+				return undefined;
+			}
+			const error = validateOutputVariableName(newName, fields, field.id);
+			if (error) {
+				this._notificationService.warn(error);
+				return undefined;
+			}
+			applyOutputVariableName(field, newName);
+			if (updateReferences) {
+				replaceOutputVariableReferences(fields, field.id, oldName, newName.trim());
+			}
+			return { next, revealFieldId: fieldId };
+		});
+	}
+
 	/** Replaces the label of a card's structure toolbar with an input; Enter / blur renames, Escape cancels. */
 	private _startFreestyleComponentRename(labelEl: HTMLElement, fieldId: string, currentLabel: string): void {
 		const input = $<HTMLInputElement>('input.freestyle-component-rename-input', { type: 'text', 'aria-label': 'Component name' });
@@ -1940,20 +1986,32 @@ export class EntityDetailEditor extends EditorPane {
 			};
 			return btn;
 		};
+		// Output variable chip (UI-27): only in this toolbar, so it shows while the structure is being edited
+		const outputVarChip = options.configurable ? renderOutputVariableChip({
+			field,
+			getComponents: () => this._freestyleSchema?.fields ?? [],
+			clipboardService: this._clipboardService,
+			notificationService: this._notificationService,
+			dialogService: this._dialogService,
+			commit: (newName, oldName, updateReferences) => this._renameFreestyleOutputVariable(field.id, newName, oldName, updateReferences)
+		}) : undefined;
 		const grip = options.movable ? $('span.freestyle-component-grip', { title: 'Drag to reorder' }, $(`span${ThemeIcon.asCSSSelector(Codicon.gripper)}`)) : undefined;
 		const toolbar = $('div.freestyle-component-toolbar', undefined,
 			...(grip ? [grip] : []),
 			$(`span.freestyle-component-type-icon${ThemeIcon.asCSSSelector(field.componentRef ? Codicon.symbolClass : (paletteItem?.icon ?? Codicon.symbolField))}`, { title: typeLabel }),
 			labelEl,
 			$('span.freestyle-component-type', undefined, typeLabel),
+			...(outputVarChip ? [outputVarChip] : []),
 			$('span.freestyle-component-spacer'),
-			...(options.renamable ? [iconBtn(Codicon.edit, 'Rename Component', () => this._startFreestyleComponentRename(labelEl, field.id, label))] : []),
-			...(options.configurable ? [iconBtn(Codicon.settingsGear, 'Configure Component…', () => this._openComponentSettings(field.id))] : []),
-			...(options.movable ? [
-				iconBtn(Codicon.arrowUp, 'Move Up', () => this._moveFreestyleComponentStep(field.id, -1), '', !options.canMoveUp),
-				iconBtn(Codicon.arrowDown, 'Move Down', () => this._moveFreestyleComponentStep(field.id, 1), '', !options.canMoveDown)
-			] : []),
-			iconBtn(Codicon.trash, 'Remove Component', () => this._removeFreestyleComponent(field.id, label), '.danger')
+			$('span.freestyle-component-actions', undefined,
+				...(options.renamable ? [iconBtn(Codicon.edit, 'Rename Component', () => this._startFreestyleComponentRename(labelEl, field.id, label))] : []),
+				...(options.configurable ? [iconBtn(Codicon.settingsGear, 'Configure Component…', () => this._openComponentSettings(field.id))] : []),
+				...(options.movable ? [
+					iconBtn(Codicon.arrowUp, 'Move Up', () => this._moveFreestyleComponentStep(field.id, -1), '', !options.canMoveUp),
+					iconBtn(Codicon.arrowDown, 'Move Down', () => this._moveFreestyleComponentStep(field.id, 1), '', !options.canMoveDown)
+				] : []),
+				iconBtn(Codicon.trash, 'Remove Component', () => this._removeFreestyleComponent(field.id, label), '.danger')
+			)
 		);
 		const content = cardNodes.length > 0
 			? cardNodes

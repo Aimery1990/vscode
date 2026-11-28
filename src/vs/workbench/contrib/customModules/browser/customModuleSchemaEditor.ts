@@ -51,6 +51,8 @@ import { IWorkflowExecutionService } from '../../workflowsManager/common/workflo
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField } from '../common/componentPalette.js';
 import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
+import { applyOutputVariableName, replaceOutputVariableReferences, validateOutputVariableName } from '../common/outputVariable.js';
+import { renderOutputVariableChip } from './outputVariableChip.js';
 import { GIT_CONFIG_KEYS, gitMainOutput, pickGitConfig } from '../common/gitComponent.js';
 import { renderGitConfigForm, renderGitResultView } from './gitComponentView.js';
 import { SHELL_CONFIG_KEYS, pickShellConfig, shellMainOutput } from '../common/shellComponent.js';
@@ -2087,6 +2089,40 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					e.preventDefault();
 					showPrimitiveHelpModal(this._container!, field.type, field.label || field.id, field.componentRef);
 				};
+
+				// Output variable chip (UI-27): shown, copied and renamed right on the card. The embedded single-component
+				// editor (the settings dialog) has its own Output Var row.
+				if (!isMandatory && !isEmbeddedFieldMode) {
+					const outputVarChip = renderOutputVariableChip({
+						field,
+						getComponents: () => fields,
+						clipboardService: this._clipboardService,
+						notificationService: this.notificationService,
+						dialogService: this.dialogService,
+						commit: async (newName, oldName, updateReferences) => {
+							const error = validateOutputVariableName(newName, fields, field.id);
+							if (error) {
+								this.notificationService.warn(error);
+								return;
+							}
+							// Same save path as the Output Var row below
+							applyOutputVariableName(field, newName);
+							if (updateReferences) {
+								replaceOutputVariableReferences(fields, field.id, oldName, newName.trim());
+							}
+							this._syncDraft();
+							const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
+							renderCanvas();
+							if (mainViewport) {
+								mainViewport.scrollTop = savedScroll;
+							}
+							await this._persistCurrentModule();
+						}
+					});
+					if (outputVarChip) {
+						append(headerLeft, outputVarChip);
+					}
+				}
 
 				const disabledBadge = append(headerLeft, $('span.field-disabled-status-badge', {
 					style: `font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; border: 1px dashed rgba(148, 163, 184, 0.45); letter-spacing: 0.04em; margin-left: 2px; display: ${isFieldDisabled ? 'inline-block' : 'none'};`

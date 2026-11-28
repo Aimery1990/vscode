@@ -901,3 +901,90 @@
 
 
 
+
+/* Output variable chip on component cards in edit mode (UI-27) */
+.anyagent-output-var-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 1px;
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 260px;
+	height: 20px;
+	border-radius: 10px;
+	border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+	background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	font-weight: normal;
+	text-transform: none;
+	letter-spacing: normal;
+	line-height: 18px;
+	vertical-align: middle;
+	overflow: hidden;
+	user-select: none;
+}
+.anyagent-output-var-chip button {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	min-width: 0;
+	height: 18px;
+	padding: 0 3px 0 6px;
+	border: none;
+	border-radius: 9px;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+}
+.anyagent-output-var-chip button:hover {
+	background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+.anyagent-output-var-chip button:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-arrow {
+	color: var(--vscode-descriptionForeground);
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-edit {
+	padding: 0 5px 0 2px;
+	opacity: 0.7;
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-edit .codicon {
+	font-size: 11px;
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-edit:hover {
+	opacity: 1;
+}
+.anyagent-output-var-chip.copied {
+	border-color: var(--vscode-testing-iconPassed, var(--vscode-focusBorder));
+}
+.anyagent-output-var-chip.copied .anyagent-output-var-chip-name {
+	color: var(--vscode-testing-iconPassed, inherit);
+}
+.anyagent-output-var-chip.editing {
+	border-color: var(--vscode-focusBorder);
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-input {
+	height: 16px;
+	min-width: 60px;
+	max-width: 220px;
+	padding: 0 6px;
+	border: none;
+	border-radius: 8px;
+	outline: none;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font: inherit;
+}
+.anyagent-output-var-chip .anyagent-output-var-chip-input.invalid {
+	box-shadow: inset 0 0 0 1px var(--vscode-inputValidation-errorBorder, #be1100);
+}
