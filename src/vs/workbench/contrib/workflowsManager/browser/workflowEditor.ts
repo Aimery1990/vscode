@@ -11465,6 +11465,11 @@ export class WorkflowEditor extends EditorPane {
 			const isActiveRunLive = Boolean(activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human' || activeRun.status === 'paused'));
 			const nodeRunState = activeRun?.nodeStates?.[node.id];
 			if (nodeRunState) {
+				if (nodeRunState.carriedOverFromRunId && nodeRunState.status !== 'running') {
+					// CI-57: a partial run (run from a mid-workflow node / selected nodes) shows the earlier result of a node it did not run
+					nodeEl.classList.add('status-carried-over');
+					nodeEl.dataset.carriedOverFromRun = nodeRunState.carriedOverFromRunId;
+				}
 				if (nodeRunState.status === 'running') {
 					if (isActiveRunLive) {
 						nodeEl.classList.add('status-running');

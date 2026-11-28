@@ -88,6 +88,11 @@ export interface IWorkflowNodeExecutionState {
 	failedStage?: string;
 	executedTickets: IExecutedTicketRecord[];
 	waitingHumanPrompt?: IWorkflowHumanPrompt;
+	/**
+	 * Set when this state was copied from an earlier run by a partial run (run from a mid-workflow node / selected nodes):
+	 * the node did not run in this run. Cleared when the node runs again (CI-57).
+	 */
+	carriedOverFromRunId?: string;
 }
 
 export interface IWorkflowNodeOperation {

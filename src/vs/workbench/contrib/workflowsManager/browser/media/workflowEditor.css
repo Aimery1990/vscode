@@ -477,6 +477,16 @@
 	box-shadow: 0 0 0 2px #22c55e, 0 0 12px rgba(34, 197, 94, 0.4) !important;
 }
 
+/* CI-57: result carried over from an earlier run by a partial run (the node did not run in this run) */
+.workflow-node.status-carried-over {
+	border-style: dashed !important;
+	opacity: 0.6;
+}
+
+.workflow-node.status-carried-over.status-success {
+	box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.5) !important;
+}
+
 .workflow-node.status-failed {
 	border-color: #ef4444 !important;
 	box-shadow: 0 0 0 3px #ef4444, 0 0 20px rgba(239, 68, 68, 0.65) !important;
