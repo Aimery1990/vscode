@@ -2562,6 +2562,12 @@ export class AccountManagementDialog extends Disposable {
 				this.notificationService.error(isFolderPermissionError(err)
 					? getFolderNotAccessibleMessage(rootUri.fsPath)
 					: `Could not create the global folder "${rootUri.fsPath}": ${(err as Error | undefined)?.message || err}`);
+				// CI-61: nothing was saved; show the folders that stay in use (the refused path is named in the error)
+				for (const [row, key] of rows) {
+					row.input.value = this._storageService.get(key, StorageScope.PROFILE, '');
+				}
+				updateHints();
+				rootRow.input.focus();
 				return;
 			}
 			for (const [row, key] of rows) {
