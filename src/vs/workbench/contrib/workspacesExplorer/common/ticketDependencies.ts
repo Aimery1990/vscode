@@ -57,7 +57,7 @@ export function readFollowDependencies(ticketMd: string): boolean {
  * Sets a top-level `- **Key**: value` line of ticket.md: replaces the first one, else inserts it after the Depends On
  * line (else Linked By, else Link To, else at the end).
  */
-export function setTicketLinkSectionLine(ticketMd: string, key: string, value: string): string {
+export function setTicketLinkSectionLine(ticketMd: string, key: string, value: string, anchorKeys: readonly string[] = ['Depends On', 'Linked By', 'Link To']): string {
 	const eol = ticketMd.includes('\r\n') ? '\r\n' : '\n';
 	const lines = ticketMd.split(/\r?\n/);
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -68,13 +68,23 @@ export function setTicketLinkSectionLine(ticketMd: string, key: string, value: s
 		lines[idx] = line;
 		return lines.join(eol);
 	}
-	const anchorIdx = [/^-\s*\*\*Depends On\*\*:/, /^-\s*\*\*Linked By\*\*:/, /^-\s*\*\*Link To\*\*:/].map(r => lines.findIndex(l => r.test(l))).find(i => i !== -1);
+	const anchorIdx = anchorKeys.map(k => new RegExp(`^-\\s*\\*\\*${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\*\\*:`)).map(r => lines.findIndex(l => r.test(l))).find(i => i !== -1);
 	if (anchorIdx !== undefined) {
 		lines.splice(anchorIdx + 1, 0, line);
 		return lines.join(eol);
 	}
 	const trimmedEnd = ticketMd.replace(/\s+$/, '');
 	return `${trimmedEnd}${eol}${line}${eol}`;
+}
+
+/** Removes every top-level `- **Key**:` line of ticket.md (unchanged when there is none). */
+export function removeTicketLinkSectionLine(ticketMd: string, key: string): string {
+	const eol = ticketMd.includes('\r\n') ? '\r\n' : '\n';
+	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const re = new RegExp(`^-\\s*\\*\\*${escaped}\\*\\*:`);
+	const lines = ticketMd.split(/\r?\n/);
+	const kept = lines.filter(l => !re.test(l));
+	return kept.length === lines.length ? ticketMd : kept.join(eol);
 }
 
 /** Writes the Depends On list ("None" when empty). */
@@ -212,17 +222,19 @@ export interface IPropagationStep {
 /**
  * Walks the dependents of `startId` breadth-first. `visit` re-evaluates one dependent and returns whether its own
  * (derived) outcome changed, in which case its dependents are visited too. Every ticket is evaluated at most once
- * (cycles end there, including back at `startId`), and at most `maxDepth` levels deep. Returns the steps in order.
+ * (cycles end there, including back at `startId`), and at most `maxDepth` levels deep. `firstLevel` (CI-62) replaces
+ * the first level (e.g. only the parent of a ticket whose Status changed). Returns the steps in order.
  */
 export async function propagateDependencies(
 	startId: string,
 	dependents: ReadonlyMap<string, readonly string[]>,
 	visit: (step: IPropagationStep) => Promise<boolean>,
-	maxDepth: number = MAX_DEPENDENCY_DEPTH
+	maxDepth: number = MAX_DEPENDENCY_DEPTH,
+	firstLevel?: readonly string[]
 ): Promise<IPropagationStep[]> {
 	const done: IPropagationStep[] = [];
 	const seen = new Set<string>([startId.toUpperCase()]);
-	let frontier: IPropagationStep[] = (dependents.get(startId.toUpperCase()) ?? []).map(id => ({ ticketId: id, triggerId: startId.toUpperCase(), depth: 1 }));
+	let frontier: IPropagationStep[] = (firstLevel ?? dependents.get(startId.toUpperCase()) ?? []).map(id => ({ ticketId: id.toUpperCase(), triggerId: startId.toUpperCase(), depth: 1 }));
 	while (frontier.length > 0) {
 		const next: IPropagationStep[] = [];
 		for (const step of frontier) {

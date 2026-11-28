@@ -15,7 +15,7 @@ import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWor
 import { parseTicketChangeRecords, TICKET_CHANGE_RECORDS_HEADING } from '../../workspacesExplorer/common/ticketChangeLog.js';
 import { isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { getTicketDependencyUpdater } from './ticketDependencyUpdater.js';
-import { decideStatusAfterRun, FAILED_RUN_STATUS_SETTING_KEY, hasStatusChangeSince, RUN_STATUS_SETTING_KEY, RunOutcome, RunStatusDecision } from '../common/runCompletionStatus.js';
+import { decideStatusAfterRun, effectiveRunStatusSetting, FAILED_RUN_STATUS_SETTING_KEY, hasStatusChangeSince, readTicketRunStatusOverride, RUN_STATUS_SETTING_KEY, RunOutcome, RunStatusDecision } from '../common/runCompletionStatus.js';
 
 /**
  * Status after a successful run (CI-58), the reading / writing side. The decision itself is the pure
@@ -28,6 +28,9 @@ export interface IRunCompletionStatusDeps {
 	readonly customModulesService: ICustomModulesService;
 	readonly logService: ILogService;
 }
+
+/** What a template (or a Freestyle structure) holds of the CI-58 settings. */
+export type IRunStatusSettingsSource = Pick<ICustomModule, 'statusOnSuccessfulRun' | 'statusOnFailedRun' | 'statuses'>;
 
 /** The ticket folder's ticket.md text (`.agents/ticket.md`, else `ticket.md`), or undefined. */
 async function readTicketMd(fileService: IFileService, ticketFolder: URI): Promise<string | undefined> {
@@ -109,8 +112,9 @@ export async function decideTicketRunStatus(deps: IRunCompletionStatusDeps, args
 	const changed = !!args.statusAtStart && !!currentStatus && args.statusAtStart.trim().toLowerCase() !== currentStatus.trim().toLowerCase();
 	const decision = decideStatusAfterRun({
 		outcome: args.outcome,
-		setting: args.schema?.statusOnSuccessfulRun,
-		failureSetting: args.schema?.statusOnFailedRun,
+		// the ticket's own setting (ticket.md) wins over the template's / structure's
+		setting: effectiveRunStatusSetting(text !== undefined ? readTicketRunStatusOverride(text, 'success') : undefined, args.schema?.statusOnSuccessfulRun),
+		failureSetting: effectiveRunStatusSetting(text !== undefined ? readTicketRunStatusOverride(text, 'failure') : undefined, args.schema?.statusOnFailedRun),
 		explicitStatus: args.explicitStatus,
 		statusChangedDuringRun: changed,
 		currentStatus,
@@ -124,7 +128,7 @@ export async function decideTicketRunStatus(deps: IRunCompletionStatusDeps, args
  * The two settings of a workflow: `statusOnSuccessfulRun` / `statusOnFailedRun` of its `workflow_flowchart.json` when
  * present (any value; an empty one means the default), else the workflow template's setting (unset: the default).
  */
-async function workflowSettings(fileService: IFileService, workflowFolder: URI, template: ICustomModule | undefined): Promise<{ success: unknown; failure: unknown }> {
+export async function workflowSettings(fileService: IFileService, workflowFolder: URI, template: IRunStatusSettingsSource | undefined): Promise<{ success: unknown; failure: unknown }> {
 	let raw: Record<string, unknown> | undefined;
 	try {
 		const parsed = JSON.parse((await fileService.readFile(URI.joinPath(workflowFolder, '.agents', 'workflow_flowchart.json'))).value.toString());
@@ -138,29 +142,51 @@ async function workflowSettings(fileService: IFileService, workflowFolder: URI, 
 
 /** The CI-58 settings of a ticket and what resolving them needs. */
 export interface ITicketStatusSettings {
+	/** The settings that apply (the ticket's own value, else the inherited one). */
 	readonly success: unknown;
 	readonly failure: unknown;
+	/** The settings of the template / workflow / Freestyle structure (what "Use template default" means). */
+	readonly inheritedSuccess: unknown;
+	readonly inheritedFailure: unknown;
+	readonly source: 'template' | 'workflow' | 'structure';
 	readonly templateStatuses?: readonly ITemplateStatusLike[];
 	readonly lifecycle?: IWorkspaceStatusesInfo;
 }
 
 /**
- * The "status after a run" settings of any ticket (used by the dependency updates, CI-59): a Freestyle ticket's own
- * structure, a workflow's flowchart (then its template), else its template.
+ * The inherited "status after a run" settings of a ticket: a Freestyle ticket's own structure, a workflow's flowchart
+ * (then its template), else its template. `template` is the ticket's template when the caller has it already.
+ */
+export async function loadInheritedRunStatusSettings(fileService: IFileService, ticketFolder: URI, type: string | undefined, template: IRunStatusSettingsSource | undefined): Promise<{ success: unknown; failure: unknown; source: 'template' | 'workflow' | 'structure'; templateStatuses?: readonly ITemplateStatusLike[] }> {
+	if (isFreestyleTicketType(type)) {
+		const schema = await readFreestyleSchema(fileService, ticketFolder).catch(() => undefined);
+		return { success: schema?.statusOnSuccessfulRun, failure: schema?.statusOnFailedRun, source: 'structure', templateStatuses: schema?.statuses };
+	}
+	if ((type || '').toLowerCase() === 'workflow') {
+		const settings = await workflowSettings(fileService, ticketFolder, template);
+		return { ...settings, source: 'workflow', templateStatuses: template?.statuses };
+	}
+	return { success: template?.statusOnSuccessfulRun, failure: template?.statusOnFailedRun, source: 'template', templateStatuses: template?.statuses };
+}
+
+/**
+ * The "status after a run" settings of any ticket (used by the dependency / children updates, CI-59 / CI-62): the
+ * ticket's own value in ticket.md first, then the inherited one ({@link loadInheritedRunStatusSettings}).
  */
 export async function loadTicketStatusSettings(deps: IRunCompletionStatusDeps, ticketFolder: URI, ticketMd: string): Promise<ITicketStatusSettings> {
 	const type = readTopLevelMetadata(ticketMd, 'Ticket Type') || readTopLevelMetadata(ticketMd, 'Type');
 	const lifecycle = await workspaceLifecycleOf(deps, ticketFolder);
-	if (isFreestyleTicketType(type)) {
-		const schema = await readFreestyleSchema(deps.fileService, ticketFolder).catch(() => undefined);
-		return { success: schema?.statusOnSuccessfulRun, failure: schema?.statusOnFailedRun, templateStatuses: schema?.statuses, lifecycle };
-	}
-	const template = await templateOfType(deps, ticketFolder, type);
-	if ((type || '').toLowerCase() === 'workflow') {
-		const settings = await workflowSettings(deps.fileService, ticketFolder, template);
-		return { ...settings, templateStatuses: template?.statuses, lifecycle };
-	}
-	return { success: template?.statusOnSuccessfulRun, failure: template?.statusOnFailedRun, templateStatuses: template?.statuses, lifecycle };
+	const template = isFreestyleTicketType(type) ? undefined : await templateOfType(deps, ticketFolder, type);
+	const inherited = await loadInheritedRunStatusSettings(deps.fileService, ticketFolder, type, template);
+	return {
+		success: effectiveRunStatusSetting(readTicketRunStatusOverride(ticketMd, 'success'), inherited.success),
+		failure: effectiveRunStatusSetting(readTicketRunStatusOverride(ticketMd, 'failure'), inherited.failure),
+		inheritedSuccess: inherited.success,
+		inheritedFailure: inherited.failure,
+		source: inherited.source,
+		templateStatuses: inherited.templateStatuses,
+		lifecycle
+	};
 }
 
 /**
@@ -185,8 +211,8 @@ export async function applyStatusAfterWorkflowRun(deps: IRunCompletionStatusDeps
 		const settings = await workflowSettings(deps.fileService, folder, template);
 		const decision = decideStatusAfterRun({
 			outcome,
-			setting: settings.success,
-			failureSetting: settings.failure,
+			setting: effectiveRunStatusSetting(readTicketRunStatusOverride(text, 'success'), settings.success),
+			failureSetting: effectiveRunStatusSetting(readTicketRunStatusOverride(text, 'failure'), settings.failure),
 			statusChangedDuringRun: await statusChangedSince(deps.fileService, folder, startedAt),
 			currentStatus: readTicketStatus(text),
 			templateStatuses: template?.statuses,

@@ -58,6 +58,9 @@ import { CustomModuleSchemaEditorInput } from '../../customModules/browser/custo
 import { CustomModuleSchemaEditor } from '../../customModules/browser/customModuleSchemaEditor.js';
 import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHelpGuide.js';
 import { buildRunStatusSettingsControl } from '../../workflowsManager/browser/runStatusSettingControl.js';
+import { loadInheritedRunStatusSettings } from '../../workflowsManager/browser/runCompletionStatus.js';
+import { parseTicketRunStatusOverride, RUN_STATUS_INHERIT, RUN_STATUS_SETTING_KEY, setTicketRunStatusOverrideLine, TICKET_FAILED_RUN_STATUS_FIELD_KEY, TICKET_RUN_STATUS_FIELD_KEY } from '../../workflowsManager/common/runCompletionStatus.js';
+import { FOLLOW_CHILDREN_FIELD_KEY, isFollowOn, setFollowChildrenLine } from '../common/ticketFollowChildren.js';
 import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { SUB_WORKFLOW_TICKET_ICON, getSubWorkflowTicketVisual, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
@@ -1040,6 +1043,8 @@ export class EntityDetailEditor extends EditorPane {
 	private _isComponentToolboxOpen: boolean = false;
 	/** The Freestyle ticket's own structure as stored on disk (`undefined` for every other page). */
 	private _freestyleSchema: ICustomModule | undefined;
+	/** The template's / workflow's "status after a run" settings this ticket inherits (per-ticket row). */
+	private _inheritedRunStatus: Awaited<ReturnType<typeof loadInheritedRunStatusSettings>> | undefined;
 	/** Sub-Workflow tickets only (CI-23): the definition read from `.agents/sub_workflow.json`, shown read-only. */
 	private _subWorkflowDef: ISubWorkflowDefinition | undefined;
 	private _subWorkflowDefMissing = false;
@@ -2692,6 +2697,7 @@ export class EntityDetailEditor extends EditorPane {
 				: undefined;
 			const customModule = freestyleSchema ?? await this._readCustomModule(this._entityUri, this._entityType);
 			this._lastCustomModule = customModule;
+			this._inheritedRunStatus = freestyleSchema ? undefined : await loadInheritedRunStatusSettings(this._fileService, this._entityUri, this._entityType, customModule ?? undefined).catch(() => undefined);
 			// Kept apart from `customModule` (which rendering may adjust): structure edits start from what is stored
 			this._freestyleSchema = freestyleSchema ? JSON.parse(JSON.stringify(freestyleSchema)) : undefined;
 
@@ -5333,6 +5339,77 @@ export class EntityDetailEditor extends EditorPane {
 			$('div', { style: 'padding: 2px 0;' }, value),
 			...(ids.length > 0 ? [$('div', { style: `font-size: 0.78em; ${THEMED_DESCRIPTION_COLOR}` }, follow ? 'Status follows these tickets\' runs' : 'Status does not follow these tickets (off)')] : [])
 		);
+	}
+
+	/**
+	 * Ticket page sidebar: Follow Children (CI-62), next to Depends On. An icon toggle: On (default) → this ticket's
+	 * status (and Result) follows its direct children's results; Off → it does not. Saved in ticket.md (CI-50: User).
+	 */
+	private _buildFollowChildrenSidebarRow(data: IParsedTicketData): HTMLElement {
+		const follow = isFollowOn(data.metadata?.[FOLLOW_CHILDREN_FIELD_KEY]);
+		const title = follow
+			? 'Follow Children: On. When all child tickets pass (test cases: Result Pass; others: a Done status), this ticket moves to its "on successful run" status; when one fails, to its "on failed run" status. Click to turn off.'
+			: 'Follow Children: Off. This ticket\'s status does not follow its child tickets. Click to turn on.';
+		const toggle = $<HTMLButtonElement>('button.ticket-follow-children-toggle', {
+			type: 'button', title, 'aria-label': 'Follow Children', 'aria-pressed': String(follow), role: 'switch', 'aria-checked': String(follow),
+			style: `display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; border-radius: 4px; cursor: pointer; ${follow
+				? 'background: var(--vscode-inputOption-activeBackground); color: var(--vscode-inputOption-activeForeground, var(--vscode-foreground)); border: 1px solid var(--vscode-inputOption-activeBorder, transparent);'
+				: 'background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-input-border, transparent);'}`
+		}, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchySub), { style: 'font-size: 12px; pointer-events: none;' }));
+		toggle.onclick = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			void this._saveTicketMdLine(md => setFollowChildrenLine(md, !follow), 'Follow Children');
+		};
+		return $('div.sidebar-row.ticket-follow-children-row', undefined,
+			$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+				$('span.sidebar-label', { title }, 'FOLLOW CHILDREN'),
+				toggle
+			),
+			$('div', { style: `font-size: 0.78em; ${THEMED_DESCRIPTION_COLOR}` }, follow ? 'Status follows the child tickets\' results' : 'Status does not follow the child tickets (off)')
+		);
+	}
+
+	/**
+	 * Ticket page sidebar: this ticket's own "status after a run" settings (any ticket type but Freestyle, whose row edits
+	 * its structure). "Use template default (…)" (no per-ticket value) is the initial state; a value is saved in
+	 * ticket.md and wins over the template / workflow setting. Also used when the ticket follows its children (CI-62).
+	 */
+	private _buildTicketRunStatusSidebarRow(data: IParsedTicketData): HTMLElement {
+		const inherited = this._inheritedRunStatus;
+		return $('div.sidebar-row.run-status-sidebar-row.ticket-run-status-row', undefined,
+			$('span.sidebar-label', { title: 'Status this ticket moves to when its run ends, or when its children / dependencies all pass or one fails. Unset: the template\'s (or workflow\'s) setting, else Done / Blocked.' }, 'AFTER A RUN'),
+			buildRunStatusSettingsControl({
+				lifecycle: this._workspaceStatuses,
+				templateStatuses: inherited?.templateStatuses,
+				success: parseTicketRunStatusOverride(data.metadata?.[TICKET_RUN_STATUS_FIELD_KEY]),
+				failure: parseTicketRunStatusOverride(data.metadata?.[TICKET_FAILED_RUN_STATUS_FIELD_KEY]),
+				inherit: { source: inherited?.source ?? 'template', success: inherited?.success, failure: inherited?.failure },
+				onChange: (key, value) => {
+					const kind = key === RUN_STATUS_SETTING_KEY ? 'success' : 'failure';
+					void this._saveTicketMdLine(md => setTicketRunStatusOverrideLine(md, kind, value === RUN_STATUS_INHERIT ? undefined : value), 'the status after a run');
+				}
+			})
+		);
+	}
+
+	/** Rewrites this ticket's ticket.md with `edit` (recorded as the User, CI-50) and reloads the page. */
+	private async _saveTicketMdLine(edit: (md: string) => string, what: string): Promise<void> {
+		const target = this._ticketFileUri;
+		if (!target) {
+			return;
+		}
+		try {
+			const content = await this._safeReadFile(target);
+			const updated = edit(content);
+			if (updated !== content) {
+				await writeTicketFile(this._fileService, target, updated, 'User');
+				invalidateTicketDependencyIndex(this._fileService);
+			}
+			await this._resolvePathsAndLoadData();
+		} catch (err) {
+			this._notificationService.error(`Failed to save ${what}: ${(err as Error | undefined)?.message || err}`);
+		}
 	}
 
 	/** The Depends On editor under `anchor`: an ID list and the follow switch; Save writes ticket.md (CI-50: User). */
@@ -24138,7 +24215,9 @@ ${interpolatedPrompt}`;
 					),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildLabelsSidebarRow(data)] : []),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildDependsOnSidebarRow(data)] : []),
+					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildFollowChildrenSidebarRow(data)] : []),
 					...(this._isFreestyleStructureEditable() ? [this._buildRunStatusSidebarRow()] : []),
+					...(!isAgent && !this._isPreviewMode && !this._isEmbeddedInWorkflow && !isFreestyleTicketType(data.ticketType) && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildTicketRunStatusSidebarRow(data)] : []),
 					...(isAgent ? [
 						$('div.sidebar-row', undefined,
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },

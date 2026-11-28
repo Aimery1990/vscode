@@ -6,8 +6,8 @@ import { $, append, getWindow } from '../../../../base/browser/dom.js';
 import { ITemplateStatusLike, IWorkspaceLifecycleLike } from '../../workspacesExplorer/common/ticketStatusPicker.js';
 import { themedOverlayHost } from '../../workspacesExplorer/browser/workspaceLifecycleEditor.js';
 import {
-	buildRunStatusOptionGroups, describeRunStatusSetting, FAILED_RUN_STATUS_SETTING_KEY, FAILED_RUN_STATUS_SETTING_LABEL, RUN_STATUS_SETTING_KEY,
-	RUN_STATUS_SETTING_LABEL, RunStatusSettingKind, runStatusSelectValue
+	buildRunStatusOptionGroups, describeRunStatusSetting, FAILED_RUN_STATUS_SETTING_KEY, FAILED_RUN_STATUS_SETTING_LABEL, inheritRunStatusLabel, RUN_STATUS_INHERIT,
+	RUN_STATUS_SETTING_KEY, RUN_STATUS_SETTING_LABEL, RunStatusSettingKind, runStatusSelectValue
 } from '../common/runCompletionStatus.js';
 
 /**
@@ -24,6 +24,12 @@ export interface IRunStatusSettingsControlOptions {
 	/** Stored values (undefined / empty: the default). */
 	readonly success: unknown;
 	readonly failure: unknown;
+	/**
+	 * Per-ticket use: the settings inherited from the template / workflow. A first option "Use template default (…)"
+	 * ({@link RUN_STATUS_INHERIT}) shows the effective inherited value and is selected while `success` / `failure`
+	 * (the ticket's own values) are undefined.
+	 */
+	readonly inherit?: { readonly source: 'template' | 'workflow' | 'structure'; readonly success: unknown; readonly failure: unknown };
 	readonly onChange: (key: RunStatusSettingKey, value: string) => void;
 }
 
@@ -39,7 +45,15 @@ function buildSelect(kind: RunStatusSettingKind, opts: IRunStatusSettingsControl
 		? 'Status this ticket moves to when a whole run ends successfully (Done by default). A status set by a step of the run (e.g. an Approve button) wins.'
 		: 'Status this ticket moves to when a whole run fails (Blocked by default). A run stopped by the user leaves the status unchanged.';
 	const select = $<HTMLSelectElement>('select.run-status-setting-select', { style: SELECT_STYLE, title: `${tooltip}\nCurrent: ${describe()}`, 'aria-label': label, 'data-run-status-setting': key });
-	const current = runStatusSelectValue(stored, opts.lifecycle, opts.templateStatuses, kind);
+	const inherit = opts.inherit;
+	const inheritOwn = inherit && (stored === undefined || stored === '');
+	const current = inheritOwn ? RUN_STATUS_INHERIT : runStatusSelectValue(stored, opts.lifecycle, opts.templateStatuses, kind);
+	if (inherit) {
+		const inherited = kind === 'success' ? inherit.success : inherit.failure;
+		const el = append(select, $<HTMLOptionElement>('option', { value: RUN_STATUS_INHERIT }, inheritRunStatusLabel(inherit.source, inherited, opts.lifecycle, opts.templateStatuses, kind)));
+		el.selected = current === RUN_STATUS_INHERIT;
+		select.title = `${tooltip}\nCurrent: ${inheritOwn ? el.text : describe()}`;
+	}
 	for (const group of buildRunStatusOptionGroups(opts.lifecycle, opts.templateStatuses, stored)) {
 		const parent = group.category ? append(select, $<HTMLOptGroupElement>('optgroup', { label: group.category })) : select;
 		for (const option of group.options) {

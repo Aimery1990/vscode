@@ -7,7 +7,8 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import type { CanonicalStatusCategory } from '../../../workspacesExplorer/common/workspacesExplorer.js';
 import {
 	buildRunStatusOptionGroups, decideStatusAfterRun, defaultBlockedStatus, defaultDoneStatus, describeRunStatusSetting, hasStatusChangeSince,
-	parseRunStatusSetting, resolveRunStatusName, RUN_STATUS_DONT_CHANGE, runStatusSelectValue
+	effectiveRunStatusSetting, inheritRunStatusLabel, parseRunStatusSetting, parseTicketRunStatusOverride, readTicketRunStatusOverride, resolveRunStatusName,
+	RUN_STATUS_DONT_CHANGE, RUN_STATUS_INHERIT, runStatusSelectValue, setTicketRunStatusOverrideLine
 } from '../../common/runCompletionStatus.js';
 
 function lifecycle(map: Record<string, CanonicalStatusCategory>) {
@@ -115,5 +116,41 @@ suite('runCompletionStatus (CI-58)', () => {
 		const records = [{ field: 'status', at: '2026-11-28T09:59:59.000Z' }, { field: 'title', at: '2026-11-28T10:00:05.000Z' }];
 		assert.strictEqual(hasStatusChangeSince(records, t0), false);
 		assert.strictEqual(hasStatusChangeSince([...records, { field: 'status', at: '2026-11-28T10:00:01.000Z' }], t0), true);
+	});
+
+	suite('per-ticket settings', () => {
+		const TICKET = ['# T-1', '- **Status**: In Progress', '### Link', '- **Link To**: None', '- **Linked By**: None', '- **Follow Children**: On', ''].join('\n');
+
+		test('precedence: the ticket\'s own value, then the template / workflow value, then the default', () => {
+			assert.strictEqual(effectiveRunStatusSetting('To be verified', 'Shipped'), 'To be verified');
+			assert.strictEqual(effectiveRunStatusSetting(undefined, 'Shipped'), 'Shipped');
+			assert.strictEqual(effectiveRunStatusSetting('Default', undefined), undefined);
+			assert.strictEqual(effectiveRunStatusSetting('Don\'t change', 'Shipped'), RUN_STATUS_DONT_CHANGE);
+			const decide = (own: string | undefined, inherited: unknown) => decideStatusAfterRun({ outcome: 'success', setting: effectiveRunStatusSetting(own, inherited), currentStatus: 'In Progress', lifecycle: standard });
+			assert.deepStrictEqual(decide('To be verified', undefined), { action: 'set', status: 'To be verified', reason: 'set after a successful run' });
+			assert.deepStrictEqual(decide(undefined, 'Blocked'), { action: 'set', status: 'Blocked', reason: 'set after a successful run' });
+			assert.deepStrictEqual(decide(undefined, undefined), { action: 'set', status: 'Done', reason: 'default (Done) after a successful run' });
+			assert.strictEqual(decide('Don\'t change', 'Blocked').action, 'keep');
+		});
+
+		test('ticket.md lines: read, write next to Follow Children, remove on inherit', () => {
+			assert.strictEqual(readTicketRunStatusOverride(TICKET, 'success'), undefined);
+			const own = setTicketRunStatusOverrideLine(TICKET, 'success', 'To be verified');
+			assert.ok(own.includes('- **Follow Children**: On\n- **Status On Successful Run**: To be verified'), own);
+			assert.strictEqual(readTicketRunStatusOverride(own, 'success'), 'To be verified');
+			const both = setTicketRunStatusOverrideLine(own, 'failure', RUN_STATUS_DONT_CHANGE);
+			assert.ok(both.includes('- **Status On Successful Run**: To be verified\n- **Status On Failed Run**: Don\'t change'), both);
+			assert.strictEqual(readTicketRunStatusOverride(both, 'failure'), RUN_STATUS_DONT_CHANGE);
+			assert.strictEqual(setTicketRunStatusOverrideLine(setTicketRunStatusOverrideLine(both, 'success', RUN_STATUS_INHERIT), 'failure', undefined), TICKET);
+			assert.strictEqual(parseTicketRunStatusOverride('  '), undefined);
+			assert.strictEqual(parseTicketRunStatusOverride('Use template default'), undefined);
+		});
+
+		test('"Use template default" label shows the effective inherited value', () => {
+			assert.strictEqual(inheritRunStatusLabel('template', undefined, standard, undefined, 'success'), 'Use template default (Done)');
+			assert.strictEqual(inheritRunStatusLabel('template', undefined, custom, undefined, 'failure'), 'Use template default (On Hold)');
+			assert.strictEqual(inheritRunStatusLabel('workflow', RUN_STATUS_DONT_CHANGE, standard, undefined, 'success'), 'Use workflow default (Don\'t change)');
+			assert.strictEqual(inheritRunStatusLabel('template', 'To be verified', standard, undefined, 'success'), 'Use template default (To be verified)');
+		});
 	});
 });

@@ -3,8 +3,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CanonicalStatusCategory } from '../../workspacesExplorer/common/workspacesExplorer.js';
-import { STATUS_CATEGORIES } from '../../workspacesExplorer/common/workspaceLifecycle.js';
+import { readTopLevelMetadata, STATUS_CATEGORIES } from '../../workspacesExplorer/common/workspaceLifecycle.js';
 import { ITemplateStatusLike, IWorkspaceLifecycleLike } from '../../workspacesExplorer/common/ticketStatusPicker.js';
+import { removeTicketLinkSectionLine, setTicketLinkSectionLine } from '../../workspacesExplorer/common/ticketDependencies.js';
 
 /**
  * Status after a run (CI-58): when a whole-ticket run or a workflow run ends, the ticket (or workflow ticket) moves to
@@ -261,4 +262,73 @@ export function describeRunStatusSetting(storedValue: unknown, lifecycle: IWorks
  */
 export function hasStatusChangeSince(records: readonly { readonly field: string; readonly at: string }[], sinceEpochMs: number): boolean {
 	return records.some(r => r.field === 'status' && Date.parse(r.at) >= sinceEpochMs);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Per-ticket settings (every ticket can override its template / workflow settings)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** ticket.md line of a ticket's own successful-run setting (next to Depends On / Follow Children). */
+export const TICKET_RUN_STATUS_FIELD_KEY = 'Status On Successful Run';
+/** ticket.md line of a ticket's own failed-run setting. */
+export const TICKET_FAILED_RUN_STATUS_FIELD_KEY = 'Status On Failed Run';
+/** Dropdown value: no per-ticket value, the template's / workflow's setting (else the default) applies. */
+export const RUN_STATUS_INHERIT = '__inherit__';
+/** Values of a ticket.md line meaning "inherit" (case-insensitive), besides an empty value. */
+const INHERIT_VALUES = ['default', 'inherit', 'none', 'use template default', 'use workflow default'];
+
+/** The ticket.md key of a setting kind. */
+export function ticketRunStatusFieldKey(kind: RunStatusSettingKind): string {
+	return kind === 'success' ? TICKET_RUN_STATUS_FIELD_KEY : TICKET_FAILED_RUN_STATUS_FIELD_KEY;
+}
+
+/**
+ * A ticket's own setting read from its ticket.md, as a stored setting value: a status name, {@link RUN_STATUS_DONT_CHANGE}
+ * ("Don't change"), or undefined when it has none (missing line, empty, "Default").
+ */
+export function readTicketRunStatusOverride(ticketMd: string, kind: RunStatusSettingKind): string | undefined {
+	return parseTicketRunStatusOverride(readTopLevelMetadata(ticketMd, ticketRunStatusFieldKey(kind)));
+}
+
+/** A ticket.md line value as a stored setting value (see {@link readTicketRunStatusOverride}). */
+export function parseTicketRunStatusOverride(value: string | undefined): string | undefined {
+	const v = (value || '').trim();
+	if (!v || v === RUN_STATUS_INHERIT || INHERIT_VALUES.includes(v.toLowerCase())) {
+		return undefined;
+	}
+	if (v === RUN_STATUS_DONT_CHANGE || sameText(v, RUN_STATUS_DONT_CHANGE_LABEL) || sameText(v, 'dont change')) {
+		return RUN_STATUS_DONT_CHANGE;
+	}
+	return v;
+}
+
+/**
+ * Writes a ticket's own setting (`value`: a status, {@link RUN_STATUS_DONT_CHANGE}) or removes it (undefined /
+ * {@link RUN_STATUS_INHERIT}: the template / workflow setting applies again).
+ */
+export function setTicketRunStatusOverrideLine(ticketMd: string, kind: RunStatusSettingKind, value: string | undefined): string {
+	const key = ticketRunStatusFieldKey(kind);
+	const v = parseTicketRunStatusOverride(value);
+	if (v === undefined) {
+		return removeTicketLinkSectionLine(ticketMd, key);
+	}
+	const anchors = kind === 'success'
+		? ['Follow Children', 'Update Status From Dependencies', 'Depends On', 'Linked By', 'Link To']
+		: [TICKET_RUN_STATUS_FIELD_KEY, 'Follow Children', 'Update Status From Dependencies', 'Depends On', 'Linked By', 'Link To'];
+	return setTicketLinkSectionLine(ticketMd, key, v === RUN_STATUS_DONT_CHANGE ? RUN_STATUS_DONT_CHANGE_LABEL : v, anchors);
+}
+
+/**
+ * The setting that applies: the ticket's own value first, then the inherited one (template, workflow or Freestyle
+ * structure; undefined / empty there means the default Done / Blocked).
+ */
+export function effectiveRunStatusSetting(ticketOverride: string | undefined, inherited: unknown): unknown {
+	const own = parseTicketRunStatusOverride(ticketOverride);
+	return own !== undefined ? own : inherited;
+}
+
+/** Label of the "inherit" option: "Use template default (Done)", "Use workflow default (Don't change)". */
+export function inheritRunStatusLabel(source: 'template' | 'workflow' | 'structure', inherited: unknown, lifecycle: IWorkspaceLifecycleLike | undefined, templateStatuses: readonly ITemplateStatusLike[] | undefined, kind: RunStatusSettingKind): string {
+	const value = parseRunStatusSetting(inherited).kind === 'dontChange' ? RUN_STATUS_DONT_CHANGE_LABEL : runStatusSelectValue(inherited, lifecycle, templateStatuses, kind);
+	return `Use ${source === 'structure' ? 'structure' : source} default (${value})`;
 }
