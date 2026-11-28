@@ -383,41 +383,58 @@ export interface ITicketBoardRenderOptions {
 }
 
 export const TICKET_BOARD_CSS = `
-.ticket-board { display: flex; flex-direction: column; gap: 10px; padding: 12px 0 16px; color: var(--vscode-foreground); }
-.ticket-board-toolbar { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-.ticket-board-toolbar button { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
-	background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-widget-border, transparent); }
-.ticket-board-toolbar button[aria-pressed="true"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-.ticket-board-scroll { overflow-x: auto; padding-bottom: 6px; }
-.ticket-board-groups { display: flex; gap: 16px; align-items: stretch; min-width: min-content; }
-.ticket-board-group { display: flex; flex-direction: column; gap: 8px; flex-basis: 0; min-width: 0; }
-.ticket-board-capsule { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
-	color: var(--vscode-foreground); background: var(--vscode-badge-background); border: 1px solid var(--vscode-widget-border, transparent); }
-.ticket-board-capsule .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.ticket-board-capsule .count { font-weight: 400; opacity: 0.85; }
-.ticket-board-columns { display: flex; gap: 8px; flex: 1; }
-.ticket-board-column { flex: 1 1 0; min-width: 220px; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; min-height: 240px;
-	background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent)); }
-.ticket-board-column.drop-target { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
-.ticket-board-column-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; padding: 0 2px 4px; color: var(--vscode-foreground); }
-.ticket-board-column-header .count { font-weight: 400; color: var(--vscode-descriptionForeground); }
-.ticket-board-empty { font-size: 12px; color: var(--vscode-descriptionForeground); font-style: italic; padding: 4px 2px; }
-.ticket-board-card { display: flex; flex-direction: column; gap: 4px; padding: 7px 9px; border-radius: 5px; cursor: pointer; font-size: 12px;
-	background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent)); }
-.ticket-board-card:hover { border-color: var(--vscode-focusBorder); }
+/* Warm "settings panel" look (reference: media player Subtitles & dictation section). Tokens first, then rules. */
+.ticket-board {
+	--tb-panel-bg: #1c1a17; --tb-panel-border: #3d3427; --tb-inset-bg: #141210; --tb-input-border: #8b7355;
+	--tb-accent: #f5c451; --tb-accent-fill: rgba(245, 196, 81, 0.12); --tb-text: #e7e5e4; --tb-muted: #a8a29e; --tb-divider: #3d3427;
+	--tb-capsule-bg: #0d0c0b;
+}
+.monaco-workbench.vs .ticket-board, .monaco-workbench.hc-light .ticket-board {
+	--tb-panel-bg: #fbf7ef; --tb-panel-border: #e2d3b5; --tb-inset-bg: #ffffff; --tb-input-border: #b08d57;
+	--tb-accent: #8a5a00; --tb-accent-fill: rgba(176, 122, 20, 0.10); --tb-text: #292524; --tb-muted: #6b6259; --tb-divider: #e2d3b5;
+	--tb-capsule-bg: #ffffff;
+}
+.ticket-board { display: flex; flex-direction: column; gap: 14px; padding: 16px 0 20px; color: var(--tb-text); font-size: 14px; }
+.ticket-board-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.ticket-board-help { font-size: 14px; color: var(--tb-muted); flex: 1; min-width: 200px; }
+.ticket-board-toolbar button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 13.5px; font-weight: 600;
+	background: var(--tb-accent-fill); color: var(--tb-accent); border: 1px solid var(--tb-input-border); }
+.ticket-board-toolbar button:hover { border-color: var(--tb-accent); }
+.ticket-board-toolbar button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.ticket-board-toolbar button[aria-pressed="true"] { background: var(--tb-accent); color: var(--tb-capsule-bg); border-color: var(--tb-accent); }
+.ticket-board-scroll { overflow-x: auto; padding-bottom: 8px; }
+.ticket-board-groups { display: flex; gap: 18px; align-items: stretch; min-width: min-content; }
+.ticket-board-group { display: flex; flex-direction: column; gap: 10px; flex-basis: 0; min-width: 0; }
+.ticket-board-capsule { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 14px; border-radius: 999px; font-size: 14px; font-weight: 600;
+	color: var(--tb-text); background: var(--tb-capsule-bg); border: 1px solid var(--tb-input-border); }
+.ticket-board-capsule .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.ticket-board-capsule .count { font-weight: 400; color: var(--tb-muted); }
+.ticket-board-columns { display: flex; gap: 12px; flex: 1; }
+.ticket-board-column { flex: 1 1 0; min-width: 260px; display: flex; flex-direction: column; gap: 10px; padding: 16px; border-radius: 8px; min-height: 260px;
+	background: var(--tb-panel-bg); border: 1px solid var(--tb-panel-border); }
+.ticket-board-column.drop-target { border-color: var(--tb-accent); box-shadow: inset 0 0 0 1px var(--tb-accent); }
+.ticket-board-column-header { display: flex; align-items: center; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--tb-divider); }
+.ticket-board-column-header .icon { font-size: 14px; color: var(--tb-muted); }
+.ticket-board-column-header .name { font-size: 16px; font-weight: 600; color: var(--tb-accent); flex: 1; }
+.ticket-board-column-header .count { font-size: 14px; color: var(--tb-muted); }
+.ticket-board-empty { font-size: 14px; color: var(--tb-muted); font-style: italic; padding: 4px 2px; }
+.ticket-board-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 6px; cursor: pointer; font-size: 14.5px;
+	background: var(--tb-inset-bg); color: var(--tb-text); border: 1px solid var(--tb-panel-border); }
+.ticket-board-card:hover { border-color: var(--tb-input-border); }
+.ticket-board-card:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 .ticket-board-card.dragging { opacity: 0.5; }
-.ticket-board-card .row { display: flex; align-items: center; gap: 6px; }
-.ticket-board-card .prio { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.ticket-board-card .id { font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-descriptionForeground); }
-.ticket-board-card .title { line-height: 1.35; word-break: break-word; color: var(--vscode-foreground); }
+.ticket-board-card .row { display: flex; align-items: center; gap: 8px; }
+.ticket-board-card .prio { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.ticket-board-card .id { font-family: var(--vscode-editor-font-family, monospace); font-size: 13px; color: var(--tb-accent); }
+.ticket-board-card .title { line-height: 1.45; word-break: break-word; color: var(--tb-text); }
 .ticket-board-card .spacer { flex: 1; }
-.ticket-board-card .children { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--vscode-descriptionForeground); }
-.ticket-board-card .mark { font-size: 13px; }
-.ticket-board-card .mark.failed { color: var(--vscode-errorForeground); }
-.ticket-board-card .mark.passed { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
-.ticket-board-card .mark.notRun { color: var(--vscode-descriptionForeground); }
-.ticket-board-card .labels { display: flex; flex-wrap: wrap; gap: 4px; }
-.ticket-board-card .label { font-size: 10.5px; padding: 0 6px; border-radius: 8px; border: 1px solid; color: var(--vscode-foreground); }
+.ticket-board-card .children { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--tb-muted); }
+.ticket-board-card .mark { font-size: 15px; }
+.ticket-board-card .mark.failed { color: var(--vscode-errorForeground, #f87171); }
+.ticket-board-card .mark.passed { color: var(--vscode-testing-iconPassed, #34d399); }
+.ticket-board-card .mark.notRun { color: var(--tb-muted); }
+.ticket-board-card .labels { display: flex; flex-wrap: wrap; gap: 5px; }
+.ticket-board-card .label { font-size: 12.5px; padding: 1px 8px; border-radius: 4px; border: 1px solid; color: var(--tb-text); }
 `;
 
 function categoryDotColor(group: IBoardGroup<ITicketBoardCard>): string {
@@ -431,7 +448,7 @@ export function renderTicketBoard(host: HTMLElement, opts: ITicketBoardRenderOpt
 
 	const toolbar = append(root, $('div.ticket-board-toolbar'));
 	const board = opts.board;
-	append(toolbar, $('span', undefined, board ? `${board.total} child ticket${board.total === 1 ? '' : 's'}` : 'Loading child tickets…'));
+	append(toolbar, $('span.ticket-board-help', undefined, board ? `${board.total} child ticket${board.total === 1 ? '' : 's'}. Click a card to open it; drag it onto another status to change its status.` : 'Loading child tickets…'));
 	const removedBtn = append(toolbar, $<HTMLButtonElement>('button.ticket-board-removed-toggle', { type: 'button', title: opts.showRemoved ? 'Hide Removed tickets' : 'Show Removed tickets' }));
 	removedBtn.setAttribute('aria-pressed', opts.showRemoved ? 'true' : 'false');
 	append(removedBtn, $('span', { class: ThemeIcon.asClassName(opts.showRemoved ? Codicon.eye : Codicon.eyeClosed) }));
@@ -463,7 +480,8 @@ export function renderTicketBoard(host: HTMLElement, opts: ITicketBoardRenderOpt
 			const colEl = append(columnsEl, $('div.ticket-board-column', { 'data-status': column.status }));
 			if (group.showStatusHeaders) {
 				const header = append(colEl, $('div.ticket-board-column-header'));
-				append(header, $('span', undefined, column.status));
+				append(header, iconSpan('icon', Codicon.listFlat));
+				append(header, $('span.name', undefined, column.status));
 				append(header, $('span.count', undefined, String(column.cards.length)));
 			}
 			if (column.cards.length === 0) {
