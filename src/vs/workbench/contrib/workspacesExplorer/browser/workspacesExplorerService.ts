@@ -87,6 +87,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private readonly _subtreeLevelInFlight = new Map<string, Promise<readonly ISubtreeLevelEntry[]>>();
 	/** UI-20: failing tickets (normalized folder URI), refreshed whenever a sub-tree summary containing them is built. */
 	private readonly _ticketFailures = new Map<string, ITicketFailure>();
+	/** UI-23: result fields of test-case tickets (normalized folder URI), refreshed like {@link _ticketFailures}. */
+	private readonly _ticketTestResults = new Map<string, { label: string; value: string }>();
 	/** UI-17: assembled sub-tree summaries; a stale entry is still served by peek (no flicker) until recomputed. */
 	private readonly _subtreeSummaryCache = new Map<string, { summary: ITicketSubtreeSummary; timestamp: number; stale: boolean }>();
 	private readonly _subtreeSummaryInFlight = new Map<string, Promise<ITicketSubtreeSummary>>();
@@ -1260,6 +1262,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return this._ticketFailures.get(this.normalizeUriString(ticketUri));
 	}
 
+	peekTicketTestResult(ticketUri: URI): { readonly label: string; readonly value: string } | undefined {
+		return this._ticketTestResults.get(this.normalizeUriString(ticketUri));
+	}
+
 	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined {
 		return this._subtreeSummaryCache.get(this.normalizeUriString(this._subtreeBaseUri(folderUri)))?.summary;
 	}
@@ -1352,6 +1358,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						this._ticketFailures.set(failureKey, failure);
 					} else {
 						this._ticketFailures.delete(failureKey);
+					}
+					if (e.resultField && !removed) {
+						this._ticketTestResults.set(failureKey, e.resultField);
+					} else {
+						this._ticketTestResults.delete(failureKey);
 					}
 					return {
 						category: e.status ? wsStatuses.getCategory(e.status) : undefined,

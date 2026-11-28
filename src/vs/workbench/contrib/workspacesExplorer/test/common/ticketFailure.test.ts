@@ -4,7 +4,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { collectFailingDescendants, describeFailingBelow, describeTicketFailure, detectTicketFailure, formatTicketLastRunRecord, isFailedRunStatus, isFailingResultValue, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
+import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, detectTicketFailure, formatTicketLastRunRecord, isFailedRunStatus, isFailingResultValue, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../../common/ticketSubtreeCount.js';
 import { CanonicalStatusCategory } from '../../common/workspacesExplorer.js';
 
@@ -110,6 +110,37 @@ suite('ticketFailure', () => {
 		// a sub-summary (T-2's own children) sees only its descendants
 		assert.deepStrictEqual(collectFailingDescendants({ truncated: false, children: summary.children[0].children[0].children }, none, false).failing.map(f => f.label), ['T-3 Test']);
 		assert.strictEqual(collectFailingDescendants({ truncated: false, children: [n('A', 'Todo')] }, none, false).failing.length, 0);
+	});
+
+	test('UI-23: test result classification and tooltips', () => {
+		assert.strictEqual(classifyTestResult('Pass'), 'passed');
+		assert.strictEqual(classifyTestResult(' "PASSED" '), 'passed');
+		assert.strictEqual(classifyTestResult('Fail'), 'failed');
+		assert.strictEqual(classifyTestResult('failure'), 'failed');
+		assert.strictEqual(classifyTestResult('Blocked'), 'blocked');
+		assert.strictEqual(classifyTestResult('Not Run'), 'notRun');
+		assert.strictEqual(classifyTestResult(''), 'notRun');
+		assert.strictEqual(classifyTestResult(undefined), 'notRun');
+		assert.strictEqual(describeTestResult('passed'), 'Test result: Passed');
+		assert.strictEqual(describeTestResult('failed'), 'Test result: Failed');
+		assert.strictEqual(describeTestResult('notRun'), 'Test result: Not run');
+		assert.strictEqual(describeTestResult('blocked'), 'Test result: Blocked');
+		// every value that classifies as failed also makes the ticket fail (one red marker, propagated)
+		for (const v of ['Fail', 'FAILED', 'failure']) {
+			assert.strictEqual(classifyTestResult(v) === 'failed', isFailingResultValue(v));
+			assert.ok(detectTicketFailure({ removed: false, resultField: { label: 'Result', value: v } }));
+		}
+	});
+
+	test('UI-23: pass / not run / blocked never propagate', () => {
+		for (const value of ['Pass', 'Not Run', '', 'Blocked']) {
+			assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, resultField: { label: 'Result', value } }), undefined);
+		}
+		const summary: ITicketSubtreeSummary = {
+			truncated: false,
+			children: [n('T-1 Suite', 'In Progress', [n('T-2 Passing test', 'Done'), n('T-3 Not run test', 'Todo')])]
+		};
+		assert.strictEqual(collectFailingDescendants(summary, none, false).failing.length, 0);
 	});
 
 	test('tooltip: count, first reason, hidden note, capped list', () => {

@@ -60,7 +60,7 @@ import { describeRestoreDecision } from '../common/ticketRestore.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
-import { collectFailingDescendants, describeFailingBelow, describeTicketFailure, IFailingSummary } from '../common/ticketFailure.js';
+import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, IFailingSummary } from '../common/ticketFailure.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
@@ -873,20 +873,48 @@ export class MainWorkspaceViewPane extends ViewPane {
 		return `${this._childCountMode}:${pill.text}:${pillEl.title}`;
 	}
 
-	/** UI-20: a red error icon after the title of a failing ticket, explaining why on hover. */
+	/**
+	 * UI-20: a red error icon after the title of a failing ticket, explaining why on hover.
+	 * UI-23: a test-case ticket (one with a result field) always shows exactly one result icon: the red error icon when
+	 * failing, otherwise a green check (Pass), a muted slashed circle (Blocked) or a muted circle (Not Run / empty).
+	 * Only failures propagate to the ancestors (see {@link _appendChildCountPill}).
+	 */
 	private _appendTicketFailureMarker(container: HTMLElement, ticketUri: URI): string {
 		const failure = this.workspacesExplorerService.peekTicketFailure(ticketUri);
-		if (!failure) {
+		const testResult = this.workspacesExplorerService.peekTicketTestResult(ticketUri);
+		const resultState = testResult ? classifyTestResult(testResult.value) : undefined;
+		if (failure) {
+			const reasons = describeTicketFailure(failure);
+			const text = resultState === 'failed' ? `${describeTestResult('failed')}\n${reasons}` : reasons;
+			this._appendTicketMarker(container, 'span.ticket-failing-marker', Codicon.error, 'var(--vscode-errorForeground)', text);
+			return `fail:${text}`;
+		}
+		if (!resultState) {
 			return '';
 		}
-		const text = describeTicketFailure(failure);
-		const marker = append(container, $('span.ticket-failing-marker' + ThemeIcon.asCSSSelector(Codicon.error), {
-			style: 'flex-shrink: 0; font-size: 11px; color: var(--vscode-errorForeground);'
+		const text = describeTestResult(resultState);
+		switch (resultState) {
+			case 'passed':
+				this._appendTicketMarker(container, 'span.ticket-test-result-marker.ticket-test-passed', Codicon.pass, 'var(--vscode-testing-iconPassed, #22c55e)', text);
+				break;
+			case 'blocked':
+				this._appendTicketMarker(container, 'span.ticket-test-result-marker.ticket-test-blocked', Codicon.circleSlash, 'var(--vscode-disabledForeground, var(--vscode-descriptionForeground))', text);
+				break;
+			default:
+				// 'failed' without a failure cannot happen (a failing value always fails); shown as not run
+				this._appendTicketMarker(container, 'span.ticket-test-result-marker.ticket-test-not-run', Codicon.circleLargeOutline, 'var(--vscode-disabledForeground, var(--vscode-descriptionForeground))', text, '9.5px');
+				break;
+		}
+		return `test:${resultState}:${testResult?.value ?? ''}`;
+	}
+
+	private _appendTicketMarker(container: HTMLElement, selector: string, icon: ThemeIcon, color: string, text: string, fontSize = '11px'): void {
+		const marker = append(container, $(selector + ThemeIcon.asCSSSelector(icon), {
+			style: `flex-shrink: 0; font-size: ${fontSize}; color: ${color};`
 		}));
 		marker.title = text;
 		marker.setAttribute('role', 'img');
 		marker.setAttribute('aria-label', text);
-		return `fail:${text}`;
 	}
 
 	private _scheduleChildCountRender(): void {

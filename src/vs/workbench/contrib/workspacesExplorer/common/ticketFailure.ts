@@ -273,3 +273,38 @@ export function describeFailingBelow(summary: IFailingSummary, cap = FAILING_TOO
 export function describeTicketFailure(failure: ITicketFailure): string {
 	return `Failing:\n${failure.reasons.map(r => `• ${r}`).join('\n')}`;
 }
+
+// --- test result indicator (UI-23) ---
+
+/** Values of a result field that mean the test passed (case-insensitive). */
+export const PASSING_RESULT_VALUES: readonly string[] = ['pass', 'passed', 'success'];
+/** Values of a result field that mean the test is blocked (case-insensitive). */
+export const BLOCKED_RESULT_VALUES: readonly string[] = ['blocked'];
+
+/** The single test-result indicator of a test-case ticket (a ticket with a result field). */
+export type TestResultState = 'passed' | 'failed' | 'blocked' | 'notRun';
+
+/** Classifies a result field value: Pass / Fail / Blocked; anything else (Not Run, empty, unknown) is not run. */
+export function classifyTestResult(value: string | undefined): TestResultState {
+	const v = stripQuotes(value || '').toLowerCase();
+	if (FAILING_RESULT_VALUES.includes(v)) {
+		return 'failed';
+	}
+	if (PASSING_RESULT_VALUES.includes(v)) {
+		return 'passed';
+	}
+	if (BLOCKED_RESULT_VALUES.includes(v)) {
+		return 'blocked';
+	}
+	return 'notRun';
+}
+
+/** Tooltip of the test-result indicator. */
+export function describeTestResult(state: TestResultState): string {
+	switch (state) {
+		case 'passed': return 'Test result: Passed';
+		case 'failed': return 'Test result: Failed';
+		case 'blocked': return 'Test result: Blocked';
+		default: return 'Test result: Not run';
+	}
+}

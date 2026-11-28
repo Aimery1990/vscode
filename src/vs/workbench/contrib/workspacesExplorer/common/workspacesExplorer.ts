@@ -235,6 +235,12 @@ export interface IWorkspacesExplorerService {
 	 */
 	peekTicketFailure(ticketUri: URI): { readonly reasons: readonly string[] } | undefined;
 	/**
+	 * UI-23: the test result field (label and raw value) of the test-case ticket folder `ticketUri`, read from its
+	 * parent's cached sub-tree level like {@link peekTicketFailure}; undefined for tickets without a result field,
+	 * removed tickets, or before the scan.
+	 */
+	peekTicketTestResult(ticketUri: URI): { readonly label: string; readonly value: string } | undefined;
+	/**
 	 * UI-21: every ticket of every managed workspace (all levels) with ID, title, type, status and parent chain, built
 	 * from the cached sub-tree summaries of {@link getTicketSubtreeSummary} (no rescan unless the watcher invalidated them).
 	 */
