@@ -3,6 +3,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
+import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { ISubWorkflowDefinition, IWorkflowInputParamDef, IWorkflowOutputDef } from './workflowExecutionModel.js';
 
 /**
@@ -774,4 +775,71 @@ export async function findEnclosingWorkflowFolder(start: URI, isWorkflowFolder: 
 		curr = next;
 	}
 	return undefined;
+}
+
+/** A ticket node of a scanned ticket tree (the workspaces explorer's sub-tree summary). */
+export interface ISubWorkflowScanNode {
+	readonly resource?: URI;
+	readonly ticketId?: string;
+	readonly type?: string;
+	readonly children?: readonly ISubWorkflowScanNode[];
+}
+
+/** A Sub-Workflow ticket found on disk that is not loaded yet. */
+export interface ISubWorkflowTicketCandidate {
+	readonly folderUri: string;
+	readonly id: string;
+}
+
+/**
+ * CI-60: the `sub_workflow` tickets in scanned ticket trees (all levels) whose folder is not in `knownFolders`, each
+ * once, in tree order. A fresh profile has no ticket index and no snapshots, so this is how the library finds them.
+ */
+export function collectSubWorkflowTicketCandidates(roots: readonly ISubWorkflowScanNode[], knownFolders: ReadonlySet<string>): ISubWorkflowTicketCandidate[] {
+	const result: ISubWorkflowTicketCandidate[] = [];
+	const seen = new Set(knownFolders);
+	const stack: ISubWorkflowScanNode[] = [...roots].reverse();
+	while (stack.length > 0) {
+		const node = stack.pop()!;
+		if (node.resource && isSubWorkflowTicketType(node.type)) {
+			const folderUri = node.resource.toString();
+			if (!seen.has(folderUri)) {
+				seen.add(folderUri);
+				result.push({ folderUri, id: node.ticketId || node.resource.path.split('/').filter(Boolean).pop() || '' });
+			}
+		}
+		const children = node.children || [];
+		for (let i = children.length - 1; i >= 0; i--) {
+			stack.push(children[i]);
+		}
+	}
+	return result;
+}
+
+/** The ticket folder of a Sub-Workflow definition file (`<folder>/.agents/sub_workflow.json`), else `undefined`. */
+export function getSubWorkflowTicketFolderOfDefinitionFile(fileUri: URI): URI | undefined {
+	const suffix = `/.agents/${SUB_WORKFLOW_DEFINITION_FILE_NAME}`;
+	if (!fileUri.path.toLowerCase().endsWith(suffix)) {
+		return undefined;
+	}
+	return fileUri.with({ path: fileUri.path.slice(0, -suffix.length) || '/' });
+}
+
+/**
+ * CI-60: the loaded definitions without the Sub-Workflow tickets whose folder (or definition file, or an ancestor
+ * folder) was deleted. Legacy definitions (no ticket folder) are kept.
+ */
+export function withoutDeletedSubWorkflowTickets(defs: readonly ISubWorkflowDefinition[], deleted: readonly URI[]): ISubWorkflowDefinition[] {
+	if (deleted.length === 0) {
+		return [...defs];
+	}
+	const strip = (u: string) => u.replace(/\/+$/, '');
+	const deletedKeys = deleted.map(u => strip((getSubWorkflowTicketFolderOfDefinitionFile(u) || u).toString()));
+	return defs.filter(def => {
+		if (!def.ticketFolderUri) {
+			return true;
+		}
+		const folder = strip(def.ticketFolderUri);
+		return !deletedKeys.some(d => folder === d || folder.startsWith(d + '/'));
+	});
 }

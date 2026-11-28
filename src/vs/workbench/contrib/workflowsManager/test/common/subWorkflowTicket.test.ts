@@ -17,6 +17,9 @@ import {
 	buildSubWorkflowTicketIndex,
 	buildSubWorkflowTicketMetadata,
 	buildSubWorkflowTicketSummary,
+	collectSubWorkflowTicketCandidates,
+	getSubWorkflowTicketFolderOfDefinitionFile,
+	withoutDeletedSubWorkflowTickets,
 	getSubWorkflowDefinitionUri,
 	getSubWorkflowMigrationRetryDelay,
 	SUB_WORKFLOW_MIGRATION_RETRY_DELAYS_MS,
@@ -359,5 +362,57 @@ suite('subWorkflowTicket', () => {
 		// Already clean: nothing to write
 		assert.strictEqual(removeMigratedSubWorkflowNodesFromCanvas(result.canvas, [def]), undefined);
 		assert.strictEqual(removeMigratedSubWorkflowNodesFromCanvas({}, [def]), undefined);
+	});
+
+	suite('CI-60 discovery on disk', () => {
+		const ws = URI.file('/ws/Find-Jobs');
+		const wf = URI.joinPath(ws, 'FINDJ-3436');
+		const tree = [
+			{
+				resource: wf, ticketId: 'FINDJ-3436', type: 'workflow', children: [
+					{ resource: URI.joinPath(wf, 'FINDJ-3813'), ticketId: 'FINDJ-3813', type: 'sub_workflow', children: [] },
+					{ resource: URI.joinPath(wf, 'FINDJ-3814'), ticketId: 'FINDJ-3814', type: 'Sub Workflow' },
+					{
+						resource: URI.joinPath(wf, 'FINDJ-3900'), ticketId: 'FINDJ-3900', type: 'task', children: [
+							{ resource: URI.joinPath(wf, 'FINDJ-3900', 'FINDJ-3901'), type: 'sub-workflow', children: [] }
+						]
+					}
+				]
+			},
+			{ resource: URI.joinPath(ws, 'FINDJ-1'), ticketId: 'FINDJ-1', type: 'task', children: [] }
+		];
+
+		test('finds sub_workflow tickets at every level, in tree order, any type spelling', () => {
+			const found = collectSubWorkflowTicketCandidates(tree, new Set());
+			assert.deepStrictEqual(found.map(c => c.id), ['FINDJ-3813', 'FINDJ-3814', 'FINDJ-3901']);
+			assert.strictEqual(found[0].folderUri, URI.joinPath(wf, 'FINDJ-3813').toString());
+		});
+
+		test('skips known folders and duplicates', () => {
+			const known = new Set([URI.joinPath(wf, 'FINDJ-3813').toString()]);
+			const found = collectSubWorkflowTicketCandidates([...tree, ...tree], known);
+			assert.deepStrictEqual(found.map(c => c.id), ['FINDJ-3814', 'FINDJ-3901']);
+			assert.deepStrictEqual(collectSubWorkflowTicketCandidates([], new Set()), []);
+		});
+
+		test('definition file -> ticket folder', () => {
+			const folder = URI.joinPath(wf, 'FINDJ-3813');
+			assert.strictEqual(getSubWorkflowTicketFolderOfDefinitionFile(getSubWorkflowDefinitionUri(folder))?.toString(), folder.toString());
+			assert.strictEqual(getSubWorkflowTicketFolderOfDefinitionFile(URI.joinPath(folder, '.agents', 'ticket.md')), undefined);
+			assert.strictEqual(getSubWorkflowTicketFolderOfDefinitionFile(URI.joinPath(folder, 'sub_workflow.json')), undefined);
+		});
+
+		test('drops tickets whose folder, definition file or an ancestor was deleted; keeps legacy definitions', () => {
+			const mk = (id: string, folder?: URI): ISubWorkflowDefinition => ({ id, name: id, nodeIds: [], nodes: [], links: [], inputs: [], outputs: [], ticketFolderUri: folder?.toString() } as unknown as ISubWorkflowDefinition);
+			const a = mk('FINDJ-3813', URI.joinPath(wf, 'FINDJ-3813'));
+			const b = mk('FINDJ-3814', URI.joinPath(wf, 'FINDJ-3814'));
+			const c = mk('FINDJ-38140', URI.joinPath(wf, 'FINDJ-38140'));
+			const legacy = mk('subwf_1');
+			const all = [a, b, c, legacy];
+			assert.deepStrictEqual(withoutDeletedSubWorkflowTickets(all, []), all);
+			assert.deepStrictEqual(withoutDeletedSubWorkflowTickets(all, [URI.joinPath(wf, 'FINDJ-3814')]), [a, c, legacy]);
+			assert.deepStrictEqual(withoutDeletedSubWorkflowTickets(all, [getSubWorkflowDefinitionUri(URI.joinPath(wf, 'FINDJ-3813'))]), [b, c, legacy]);
+			assert.deepStrictEqual(withoutDeletedSubWorkflowTickets(all, [wf]), [legacy]);
+		});
 	});
 });

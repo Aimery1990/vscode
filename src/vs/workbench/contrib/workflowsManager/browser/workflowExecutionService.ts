@@ -44,7 +44,11 @@ import {
 	planSubWorkflowMigration,
 	removeMigratedSubWorkflowNodesFromCanvas,
 	serializeSubWorkflowDefinition,
-	stripHeavyMediaFromSubWorkflow
+	stripHeavyMediaFromSubWorkflow,
+	collectSubWorkflowTicketCandidates,
+	getSubWorkflowTicketFolderOfDefinitionFile,
+	ISubWorkflowTicketCandidate,
+	withoutDeletedSubWorkflowTickets
 } from '../common/subWorkflowTicket.js';
 import {
 	ISubWorkflowDefinition,
@@ -1002,6 +1006,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private readonly _lastWrittenSubWorkflowMeta = new Map<string, string>();
 	private _subWorkflowDiscoveryTimer: ReturnType<typeof setTimeout> | undefined;
 	private _subWorkflowSnapshotListener: IDisposable | undefined;
+	private _subWorkflowFileListener: IDisposable | undefined;
 
 	private readonly _runs = new Map<string, IWorkflowExecutionRun>();
 	private readonly _activeRunsByWorkflow = new Map<string, string>();
@@ -1597,7 +1602,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return undefined;
 		}
 		await this.whenSubWorkflowsReady();
-		const known = this.getSubWorkflowById(ref);
+		let known = this.getSubWorkflowById(ref);
+		if (!known) {
+			// CI-60: not loaded (yet): rescan the managed workspaces once (cached scans; only changed folders are re-read)
+			await this._subWorkflowTicketSequencer.queue(() => this._discoverSubWorkflowTicketsFromSnapshots())
+				.catch(err => this.logService.warn('[WorkflowExecution] Sub-Workflow ticket discovery failed:', err));
+			known = this.getSubWorkflowById(ref);
+		}
 		if (known?.ticketFolderUri) {
 			return this._reloadSubWorkflowTicket(known);
 		}
@@ -1754,8 +1765,67 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this._subWorkflowsReady = this._subWorkflowTicketSequencer.queue(() => this._loadSubWorkflowTickets())
 				.catch(err => this.logService.error('[WorkflowExecution] Failed to load Sub-Workflow tickets:', err));
 			this._subWorkflowSnapshotListener ??= this.entityPersistenceService.onDidChangeSnapshots(() => this._scheduleSubWorkflowSnapshotDiscovery());
+			this._subWorkflowFileListener ??= this.fileService.onDidFilesChange(e => this._onSubWorkflowFilesChanged(e.rawAdded, e.rawDeleted));
 		}
 		return this._subWorkflowsReady;
+	}
+
+	/**
+	 * CI-60: the sub_workflow ticket folders in the managed workspaces (and the global `workflows` folder) that are not
+	 * in `knownFolders`. Uses the workspaces explorer's sub-tree summaries: cached there, and invalidated by its file
+	 * watchers on every managed workspace (UI-30), so a repeated scan only re-reads what changed. Never throws.
+	 */
+	private async _scanSubWorkflowTicketFolders(knownFolders: ReadonlySet<string>): Promise<ISubWorkflowTicketCandidate[]> {
+		const roots: URI[] = [];
+		try {
+			roots.push(...(await this.workspacesExplorerService.getWorkspaces()).filter(w => !w.isMissing).map(w => w.uri));
+		} catch (err) {
+			this.logService.warn('[WorkflowExecution] Could not list the managed workspaces for Sub-Workflow tickets:', err);
+		}
+		try {
+			const globalWorkflows = this._getAnyAgentGlobalFolders().workflows;
+			if (await this.fileService.exists(globalWorkflows)) {
+				roots.push(globalWorkflows);
+			}
+		} catch {
+			// no global folder
+		}
+		const summaries = await Promise.all(roots.map(root => this.workspacesExplorerService.getTicketSubtreeSummary(root).catch(err => {
+			this.logService.warn(`[WorkflowExecution] Could not scan ${root.toString()} for Sub-Workflow tickets:`, err);
+			return undefined;
+		})));
+		return collectSubWorkflowTicketCandidates(summaries.flatMap(s => s ? s.children : []), knownFolders);
+	}
+
+	/** CI-60: a Sub-Workflow definition file added (copied, cloned, created elsewhere) or a ticket folder deleted. */
+	private _onSubWorkflowFilesChanged(added: readonly URI[], deleted: readonly URI[]): void {
+		if (added.some(u => !!getSubWorkflowTicketFolderOfDefinitionFile(u))) {
+			this._scheduleSubWorkflowSnapshotDiscovery();
+		}
+		if (deleted.length > 0 && this._subWorkflowsCache) {
+			const list = this._subWorkflowsCache;
+			const next = withoutDeletedSubWorkflowTickets(list, deleted);
+			if (next.length !== list.length) {
+				this._subWorkflowTicketSequencer.queue(async () => {
+					const current = this._subWorkflowsCache || [];
+					const remaining = withoutDeletedSubWorkflowTickets(current, deleted);
+					if (remaining.length === current.length) {
+						return;
+					}
+					// a folder that was only moved / renamed is picked up again by the next discovery
+					const gone = current.filter(d => !remaining.includes(d) && !!d.ticketFolderUri);
+					const stillThere = await Promise.all(gone.map(d => this.fileService.exists(getSubWorkflowDefinitionUri(URI.parse(d.ticketFolderUri!))).catch(() => false)));
+					const removed = new Set(gone.filter((_, i) => !stillThere[i]));
+					if (removed.size === 0) {
+						return;
+					}
+					this._rebuildSubWorkflowIndexes(current.filter(d => !removed.has(d)));
+					this._storeSubWorkflowTicketIndex();
+					this._onDidChangeSubWorkflows.fire();
+				}).catch(err => this.logService.warn('[WorkflowExecution] Could not drop deleted Sub-Workflow tickets:', err));
+				this._scheduleSubWorkflowSnapshotDiscovery();
+			}
+		}
 	}
 
 	private _readLegacySubWorkflowLibrary(): ISubWorkflowDefinition[] {
@@ -1850,6 +1920,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (isSubWorkflowTicketType(snap.entityType) && snap.entityUri && !seenFolders.has(snap.entityUri)) {
 				addTicketDef(await this._readSubWorkflowTicket(URI.parse(snap.entityUri), snap.ticketId || snap.entityName));
 			}
+		}
+		// CI-60: and every sub_workflow ticket on disk in the managed workspaces (a fresh profile has no index or snapshots)
+		for (const candidate of await this._scanSubWorkflowTicketFolders(seenFolders)) {
+			addTicketDef(await this._readSubWorkflowTicket(URI.parse(candidate.folderUri), candidate.id));
 		}
 
 		// 2. One-time migration of the legacy profile-storage library (the stored data is kept as a backup)
@@ -2013,25 +2087,35 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}, 1500);
 	}
 
-	/** Picks up sub_workflow tickets the explorer found on disk that are not loaded yet (e.g. copied or cloned in). */
-	private async _discoverSubWorkflowTicketsFromSnapshots(): Promise<void> {
+	/**
+	 * Picks up sub_workflow tickets that are not loaded yet (e.g. copied or cloned in): the ones the explorer has
+	 * snapshots of and (CI-60) the ones on disk in the managed workspaces. Returns true when any was added.
+	 */
+	private async _discoverSubWorkflowTicketsFromSnapshots(): Promise<boolean> {
 		const knownFolders = new Set((this._subWorkflowsCache || []).map(d => d.ticketFolderUri).filter((u): u is string => !!u));
 		let added = false;
-		for (const snap of this.entityPersistenceService.getAllSnapshots()) {
-			if (!isSubWorkflowTicketType(snap.entityType) || !snap.entityUri || knownFolders.has(snap.entityUri)) {
-				continue;
-			}
-			knownFolders.add(snap.entityUri);
-			const def = await this._readSubWorkflowTicket(URI.parse(snap.entityUri), snap.ticketId || snap.entityName);
+		const tryAdd = async (folderUri: string, fallbackId: string) => {
+			knownFolders.add(folderUri);
+			const def = await this._readSubWorkflowTicket(URI.parse(folderUri), fallbackId);
 			if (def && !this._subWorkflowByIdCache.has(def.id)) {
 				this._rebuildSubWorkflowIndexes([...(this._subWorkflowsCache || []), def]);
 				added = true;
 			}
+		};
+		for (const snap of this.entityPersistenceService.getAllSnapshots()) {
+			if (!isSubWorkflowTicketType(snap.entityType) || !snap.entityUri || knownFolders.has(snap.entityUri)) {
+				continue;
+			}
+			await tryAdd(snap.entityUri, snap.ticketId || snap.entityName);
+		}
+		for (const candidate of await this._scanSubWorkflowTicketFolders(knownFolders)) {
+			await tryAdd(candidate.folderUri, candidate.id);
 		}
 		if (added) {
 			this._storeSubWorkflowTicketIndex();
 			this._onDidChangeSubWorkflows.fire();
 		}
+		return added;
 	}
 
 	private _upsertSubWorkflowTicket(def: ISubWorkflowDefinition): void {
