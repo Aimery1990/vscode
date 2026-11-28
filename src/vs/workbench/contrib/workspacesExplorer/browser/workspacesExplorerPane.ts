@@ -2856,6 +2856,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		const statusMatrix = renderStatusLifecycleMatrix(statusBody, createDefaultCategoryMap(), {
+			showPresets: true,
 			onChange: () => {
 				summarySpan.innerText = `(${summarizeCategoryMap(statusMatrix.getCategoryMap())})`;
 			}

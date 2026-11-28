@@ -93,18 +93,25 @@ export interface IStatusLifecycleMatrixOptions {
 	onChange?: () => void;
 	/** Double-click a status chip to rename it (the edit dialog; tickets are migrated on save). */
 	allowRename?: boolean;
+	/**
+	 * Show the "Preset:" row (Default / Agile / Scrum / Kanban), which replaces ALL statuses, custom ones included.
+	 * Only the New Workspace dialog sets it; default false (UI-33: never in the edit lifecycle dialog).
+	 */
+	showPresets?: boolean;
 }
 
-/** Renders the preset buttons and the 5-category status matrix into `parent`. */
+/** Renders the preset buttons (only with `showPresets`) and the 5-category status matrix into `parent`. */
 export function renderStatusLifecycleMatrix(parent: HTMLElement, initial: StatusCategoryMap, options: IStatusLifecycleMatrixOptions = {}): IStatusLifecycleMatrix {
 	let currentCategoryMap = cloneCategoryMap(initial);
 	let renames: { [original: string]: string } = {};
 	const changed = () => options.onChange?.();
 	ensureThemedControlRules();
 
-	// Presets Row
-	const presetsRow = append(parent, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
-	append(presetsRow, $('span', { style: `font-size: 10.5px; font-weight: 500; ${THEMED_DESCRIPTION_COLOR}` }, 'Preset:'));
+	// Presets Row (new workspaces only, UI-33)
+	const presetsRow = options.showPresets ? append(parent, $('div.status-lifecycle-presets', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' })) : undefined;
+	if (presetsRow) {
+		append(presetsRow, $('span', { style: `font-size: 10.5px; font-weight: 500; ${THEMED_DESCRIPTION_COLOR}` }, 'Preset:'));
+	}
 
 	const matrixContainer = append(parent, $('.category-matrix-container', {
 		style: 'display: flex; flex-direction: column; gap: 5px;'
@@ -237,19 +244,21 @@ export function renderStatusLifecycleMatrix(parent: HTMLElement, initial: Status
 
 	renderMatrix();
 
-	for (const [pName, pMap] of Object.entries(STATUS_LIFECYCLE_PRESETS)) {
-		const prBtn = append(presetsRow, $('button.monaco-button.anyag-btn-secondary', {
-			title: `Replace the statuses with the ${pName} preset`,
-			style: `padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; ${THEMED_SECONDARY_BUTTON_COLORS}`
-		}));
-		prBtn.innerText = pName;
-		prBtn.onclick = (e) => {
-			e.preventDefault();
-			currentCategoryMap = cloneCategoryMap(pMap);
-			renames = {};
-			renderMatrix();
-			changed();
-		};
+	if (presetsRow) {
+		for (const [pName, pMap] of Object.entries(STATUS_LIFECYCLE_PRESETS)) {
+			const prBtn = append(presetsRow, $('button.monaco-button.anyag-btn-secondary', {
+				title: `Replace the statuses with the ${pName} preset`,
+				style: `padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; ${THEMED_SECONDARY_BUTTON_COLORS}`
+			}));
+			prBtn.innerText = pName;
+			prBtn.onclick = (e) => {
+				e.preventDefault();
+				currentCategoryMap = cloneCategoryMap(pMap);
+				renames = {};
+				renderMatrix();
+				changed();
+			};
+		}
 	}
 
 	return {
