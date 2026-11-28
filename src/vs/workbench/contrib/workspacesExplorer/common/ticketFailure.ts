@@ -26,6 +26,10 @@ import { ChildCountMode, CHILD_COUNT_MODES, isSubtreeNodeVisible, ITicketSubtree
  *
  * Tickets whose status counts as removed never fail. Done tickets still do (a Done task with a failed test is a problem).
  * Failures propagate to every ancestor regardless of the status filter; failures hidden by the filter are marked so.
+ *
+ * UI-34: tickets whose status belongs to the Blocked category also count as "problems" in an ancestor's count pill
+ * (red numerator, tooltip list, red dot when the count is off), but they are not failures: no red marker on the row
+ * and no red propagation of the ticket itself.
  */
 
 /** Labels of the custom fields holding a test result (case-insensitive). */
@@ -311,17 +315,41 @@ export interface IFailingDescendant {
 	readonly hiddenByFilter: boolean;
 }
 
+/** A descendant whose status belongs to the Blocked category (UI-34), as listed in an ancestor's tooltip. */
+export interface IBlockedDescendant {
+	readonly label: string;
+	/** The ticket's status name (e.g. `Blocked`, `Waiting`). */
+	readonly status?: string;
+	readonly hiddenByFilter: boolean;
+}
+
 export interface IFailingSummary {
 	readonly failing: readonly IFailingDescendant[];
+	/** UI-34: descendants with a Blocked-category status (a failing one is listed here too when it is blocked). */
+	readonly blocked?: readonly IBlockedDescendant[];
 }
 
 /**
- * Every failing descendant of a summarized folder, in tree order. Failures propagate regardless of the status filter
- * (flagged `hiddenByFilter`); removed tickets (unless "show removed items" is on) and their sub-trees are skipped,
- * like in the tree.
+ * Whether a ticket's status belongs to the Blocked category of the workspace lifecycle (UI-14 / UI-34). Removed
+ * tickets never count.
+ */
+export function isBlockedSubtreeNode(node: ITicketSubtreeNode): boolean {
+	return !node.removed && node.category === 'Blocked';
+}
+
+/** UI-34: a "problem" ticket fails (UI-20) or has a Blocked-category status; it counts once either way. */
+export function isProblemSubtreeNode(node: ITicketSubtreeNode): boolean {
+	return !!node.failure || isBlockedSubtreeNode(node);
+}
+
+/**
+ * Every failing descendant of a summarized folder, in tree order, plus (UI-34) every blocked one. Failures propagate
+ * regardless of the status filter (flagged `hiddenByFilter`); removed tickets (unless "show removed items" is on) and
+ * their sub-trees are skipped, like in the tree.
  */
 export function collectFailingDescendants(summary: ITicketSubtreeSummary, hidden: ReadonlySet<CanonicalStatusCategory>, includeRemoved: boolean): IFailingSummary {
 	const failing: IFailingDescendant[] = [];
+	const blocked: IBlockedDescendant[] = [];
 	const visit = (nodes: readonly ITicketSubtreeNode[], hiddenAbove: boolean) => {
 		for (const node of nodes) {
 			if (node.removed && !includeRemoved) {
@@ -331,11 +359,14 @@ export function collectFailingDescendants(summary: ITicketSubtreeSummary, hidden
 			if (node.failure) {
 				failing.push({ label: node.label || 'Untitled ticket', reasons: node.failure.reasons, hiddenByFilter: hiddenHere });
 			}
+			if (isBlockedSubtreeNode(node)) {
+				blocked.push({ label: node.label || 'Untitled ticket', status: node.status, hiddenByFilter: hiddenHere });
+			}
 			visit(node.children, hiddenHere);
 		}
 	};
 	visit(summary.children, false);
-	return { failing };
+	return { failing, blocked };
 }
 
 /** "N failing below: A, B, …" (at most `cap` names, each with its first reason), or undefined when none fail. */
@@ -351,77 +382,124 @@ export function describeFailingBelow(summary: IFailingSummary, cap = FAILING_TOO
 	return `${count} failing below:\n${lines.join('\n')}`;
 }
 
-// --- failing / total fraction in the count pill (UI-32) ---
+/** UI-34: "N blocked below: A, B, …" (at most `cap` names, each with its status), or undefined when none is blocked. */
+export function describeBlockedBelow(summary: IFailingSummary, cap = FAILING_TOOLTIP_CAP): string | undefined {
+	const blocked = summary.blocked ?? [];
+	if (blocked.length === 0) {
+		return undefined;
+	}
+	const lines = blocked.slice(0, cap).map(b => `• ${b.label}${b.status ? ` — Status: ${b.status.trim()}` : ''}${b.hiddenByFilter ? ' (hidden by status filter)' : ''}`);
+	if (blocked.length > cap) {
+		lines.push(`… and ${blocked.length - cap} more`);
+	}
+	return `${blocked.length} blocked below:\n${lines.join('\n')}`;
+}
 
-/** Failing tickets below a summarized folder, per count mode (see {@link countFailing}). */
+/** UI-34: the failing list and the blocked list of a tooltip (blank line between), or undefined when both are empty. */
+export function describeProblemsBelow(summary: IFailingSummary, cap = FAILING_TOOLTIP_CAP): string | undefined {
+	const parts = [describeFailingBelow(summary, cap), describeBlockedBelow(summary, cap)].filter((p): p is string => !!p);
+	return parts.length ? parts.join('\n\n') : undefined;
+}
+
+// --- problem / total fraction in the count pill (UI-32, UI-34) ---
+
+/**
+ * Problem tickets (failing or Blocked-category, UI-34) below a summarized folder, per count mode (see
+ * {@link countFailing}).
+ */
 export interface IFailingCounts {
-	/** All levels: failing descendants. */
+	/** All levels: problem descendants (each counted once). */
 	readonly all: number;
 	/** Of {@link all}: hidden by the status filter (themselves or through an ancestor). */
 	readonly allHidden: number;
-	/** Direct children: those failing themselves or with a failing descendant. */
+	/** Direct children: those with a problem themselves or with a problem descendant. */
 	readonly direct: number;
 	/** Of {@link direct}: hidden by the status filter. */
 	readonly directHidden: number;
+	/**
+	 * UI-34: how many of {@link all} / {@link direct} are blocked rather than failing. The split is disjoint: a ticket
+	 * that is failing AND blocked counts as failing; a direct child counts as blocked only when nothing in its sub-tree
+	 * fails. Missing = 0 (failures only).
+	 */
+	readonly allBlocked?: number;
+	readonly directBlocked?: number;
 }
 
 /**
- * The numerators of the count pill's `failing / total` fraction (UI-32), in the same count modes as the pill (UI-17).
- * Like the propagation (UI-20) failures count regardless of the status filter (the hidden ones are counted separately
- * for the tooltip); removed tickets and their sub-trees are skipped unless "show removed items" is on.
+ * The numerators of the count pill's `problems / total` fraction (UI-32, UI-34), in the same count modes as the pill
+ * (UI-17). A problem ticket fails (UI-20) or has a Blocked-category status, and counts once. Like the propagation
+ * (UI-20) problems count regardless of the status filter (the hidden ones are counted separately for the tooltip and
+ * the denominator); removed tickets and their sub-trees are skipped unless "show removed items" is on, and a removed
+ * ticket is never a problem itself.
  */
 export function countFailing(summary: ITicketSubtreeSummary, hidden: ReadonlySet<CanonicalStatusCategory>, includeRemoved: boolean): IFailingCounts {
 	let all = 0;
 	let allHidden = 0;
-	/** Visits a sub-tree and returns whether anything in it (the node included) fails. */
-	const visit = (node: ITicketSubtreeNode, hiddenAbove: boolean): boolean => {
+	let allBlocked = 0;
+	/** Visits a sub-tree and returns whether anything in it (the node included) fails / is blocked. */
+	const visit = (node: ITicketSubtreeNode, hiddenAbove: boolean): { fails: boolean; blocked: boolean } => {
 		const hiddenHere = hiddenAbove || !isSubtreeNodeVisible(node, hidden, includeRemoved);
-		let fails = false;
-		if (node.failure) {
+		let fails = !!node.failure;
+		let blocked = isBlockedSubtreeNode(node);
+		if (fails || blocked) {
 			all++;
+			if (!fails) {
+				allBlocked++;
+			}
 			if (hiddenHere) {
 				allHidden++;
 			}
-			fails = true;
 		}
 		for (const child of node.children) {
-			if (!(child.removed && !includeRemoved) && visit(child, hiddenHere)) {
-				fails = true;
+			if (child.removed && !includeRemoved) {
+				continue;
 			}
+			const below = visit(child, hiddenHere);
+			fails = fails || below.fails;
+			blocked = blocked || below.blocked;
 		}
-		return fails;
+		return { fails, blocked };
 	};
 	let direct = 0;
 	let directHidden = 0;
+	let directBlocked = 0;
 	for (const child of summary.children) {
 		if (child.removed && !includeRemoved) {
 			continue;
 		}
-		if (visit(child, false)) {
+		const below = visit(child, false);
+		if (below.fails || below.blocked) {
 			direct++;
+			if (!below.fails) {
+				directBlocked++;
+			}
 			if (!isSubtreeNodeVisible(child, hidden, includeRemoved)) {
 				directHidden++;
 			}
 		}
 	}
-	return { all, allHidden, direct, directHidden };
+	return { all, allHidden, direct, directHidden, allBlocked, directBlocked };
 }
 
-/** The failing part of a count pill: the red numerator and the first tooltip line. */
+/** The problem part of a count pill: the red numerator and the first tooltip line. */
 export interface IFailingFraction {
-	/** The failing count, shown in red. */
+	/** The problem count (failing + blocked), shown in red. */
 	readonly numerator: string;
-	/** The total after the `/`: the visible tickets plus the failing ones the filter hides. */
+	/** The total after the `/`: the visible tickets plus the problem ones the filter hides. */
 	readonly denominator: string;
-	/** "1 failing of 56 tickets (All Levels)" (+ how many of them the status filter hides). */
+	/**
+	 * "1 failing of 56 tickets (All Levels)" when nothing is blocked; UI-34 with blocked tickets: "3 with problems of 56
+	 * tickets (All Levels): 1 failing, 2 blocked" (+ how many of them the status filter hides).
+	 */
 	readonly summary: string;
 }
 
 /**
- * The `failing / total` fraction of the count pill in `mode`, or undefined when nothing fails in that mode (the pill
- * then shows just the total). The total is the visible tickets counted under the filter PLUS the failing tickets the
- * filter hides (they count in both parts), so the failing count never exceeds it: 1 visible, 2 hidden failing → 2/3.
- * Mode off has no pill: the tree keeps the UI-20 red dot instead.
+ * The `problems / total` fraction of the count pill in `mode`, or undefined when there is no problem in that mode (the
+ * pill then shows just the total). The total is the visible tickets counted under the filter PLUS the problem tickets
+ * the filter hides (they count in both parts), so the numerator never exceeds it: 1 visible, 2 hidden failing → 2/3;
+ * a blocked ticket hidden by filtering out the Blocked category still counts. Mode off has no pill: the tree keeps the
+ * UI-20 red dot instead (UI-34: also for blocked-only sub-trees).
  */
 export function describeFailingFraction(failing: IFailingCounts, mode: ChildCountMode, counts: ITicketSubtreeCounts): IFailingFraction | undefined {
 	if (mode === 'off') {
@@ -431,13 +509,17 @@ export function describeFailingFraction(failing: IFailingCounts, mode: ChildCoun
 	if (count <= 0) {
 		return undefined;
 	}
+	const blocked = (mode === 'all' ? failing.allBlocked : failing.directBlocked) ?? 0;
 	const hiddenCount = mode === 'all' ? failing.allHidden : failing.directHidden;
 	const label = CHILD_COUNT_MODES.find(m => m.mode === mode)?.label ?? mode;
-	const how = mode === 'direct' ? ': a child counts when it or a ticket below it fails' : '';
+	const how = mode === 'direct' ? `: a child counts when it or a ticket below it ${blocked > 0 ? 'fails or is blocked' : 'fails'}` : '';
 	const visible = mode === 'all' ? counts.visible : counts.directVisible;
 	const denominator = `${visible + hiddenCount}${mode === 'all' && counts.truncated ? '+' : ''}`;
 	const hiddenNote = hiddenCount > 0 ? ` · ${hiddenCount} of them hidden by the status filter` : '';
-	return { numerator: String(count), denominator, summary: `${count} failing of ${denominator} tickets (${label}${how})${hiddenNote}` };
+	const summary = blocked > 0
+		? `${count} with problems of ${denominator} tickets (${label}${how}): ${count > blocked ? `${count - blocked} failing, ` : ''}${blocked} blocked${hiddenNote}`
+		: `${count} failing of ${denominator} tickets (${label}${how})${hiddenNote}`;
+	return { numerator: String(count), denominator, summary };
 }
 
 /** Tooltip of a failing ticket's own marker. */

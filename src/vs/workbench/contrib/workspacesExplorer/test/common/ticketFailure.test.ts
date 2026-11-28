@@ -4,7 +4,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { classifyTestResult, collectFailingDescendants, countFailing, describeFailingBelow, describeFailingFraction, describeTestResult, describeTicketFailure, detectTicketFailure, dismissTicketRunFailure, formatTicketLastRunRecord, isDismissedRunFailure, isFailedRunStatus, isFailingResultValue, lastRunOutcome, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
+import { classifyTestResult, collectFailingDescendants, countFailing, describeBlockedBelow, describeFailingBelow, describeFailingFraction, describeProblemsBelow, describeTestResult, describeTicketFailure, detectTicketFailure, dismissTicketRunFailure, formatTicketLastRunRecord, isDismissedRunFailure, isFailedRunStatus, isFailingResultValue, lastRunOutcome, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
 import { countSubtree, describeChildCountPill, ITicketSubtreeNode, ITicketSubtreeSummary } from '../../common/ticketSubtreeCount.js';
 import { CanonicalStatusCategory } from '../../common/workspacesExplorer.js';
 
@@ -179,6 +179,85 @@ suite('ticketFailure', () => {
 		assert.strictEqual(collectFailingDescendants({ truncated: false, children: [n('A', 'Todo')] }, none, false).failing.length, 0);
 	});
 
+	function b(label: string, children: ITicketSubtreeNode[] = [], failing?: string, status = 'Blocked'): ITicketSubtreeNode {
+		return { ...n(label, 'Blocked', children, failing), status };
+	}
+
+	test('UI-34: blocked-only sub-tree counts as a problem (not a failure)', () => {
+		const summary: ITicketSubtreeSummary = { truncated: false, children: [n('T-1 Epic', 'In Progress', [b('T-2 Waiting', [], undefined, 'Waiting on vendor'), n('T-3 Task', 'Todo')]), n('T-4 Task', 'Done')] };
+		const counts = countSubtree(summary, none, false);
+		const problems = countFailing(summary, none, false);
+		assert.deepStrictEqual(problems, { all: 1, allHidden: 0, direct: 1, directHidden: 0, allBlocked: 1, directBlocked: 1 });
+		assert.deepStrictEqual(describeFailingFraction(problems, 'all', counts), { numerator: '1', denominator: '4', summary: '1 with problems of 4 tickets (All Levels): 1 blocked' });
+		const collected = collectFailingDescendants(summary, none, false);
+		assert.strictEqual(collected.failing.length, 0);
+		assert.strictEqual(describeFailingBelow(collected), undefined);
+		assert.strictEqual(describeBlockedBelow(collected), '1 blocked below:\n• T-2 Waiting — Status: Waiting on vendor');
+		assert.strictEqual(describeProblemsBelow(collected), '1 blocked below:\n• T-2 Waiting — Status: Waiting on vendor');
+		// the blocked ticket's own sub-tree: nothing below it is a problem
+		assert.strictEqual(countFailing({ truncated: false, children: summary.children[0].children[0].children }, none, false).all, 0);
+	});
+
+	test('UI-34: a ticket both failing and blocked counts once (as failing); tooltip split and lists', () => {
+		const summary: ITicketSubtreeSummary = {
+			truncated: false,
+			children: [b('T-1 Both', [], 'Last run failed'), b('T-2 Blocked'), n('T-3 Fail', 'Todo', [], 'Test result: Fail'), n('T-4 Ok', 'Todo')]
+		};
+		const problems = countFailing(summary, none, false);
+		assert.deepStrictEqual(problems, { all: 3, allHidden: 0, direct: 3, directHidden: 0, allBlocked: 1, directBlocked: 1 });
+		const counts = countSubtree(summary, none, false);
+		assert.strictEqual(describeFailingFraction(problems, 'all', counts)!.summary, '3 with problems of 4 tickets (All Levels): 2 failing, 1 blocked');
+		const text = describeProblemsBelow(collectFailingDescendants(summary, none, false))!;
+		assert.strictEqual(text, '2 failing below:\n• T-1 Both — Last run failed\n• T-3 Fail — Test result: Fail\n\n2 blocked below:\n• T-1 Both — Status: Blocked\n• T-2 Blocked — Status: Blocked');
+		// the blocked list is capped like the failing one
+		const many = { failing: [], blocked: Array.from({ length: 7 }, (_, i) => ({ label: `B-${i}`, status: 'Blocked', hiddenByFilter: false })) };
+		const blockedText = describeBlockedBelow(many)!;
+		assert.ok(blockedText.startsWith('7 blocked below:\n'));
+		assert.ok(blockedText.includes('B-4') && !blockedText.includes('B-5'));
+		assert.ok(blockedText.endsWith('… and 2 more'));
+	});
+
+	test('UI-34: blocked tickets hidden by the status filter still count, in the denominator too', () => {
+		const blockedHidden = new Set<CanonicalStatusCategory>(['Blocked']);
+		const summary: ITicketSubtreeSummary = { truncated: false, children: [n('V1', 'Todo'), n('V2', 'Todo'), b('H1', [b('H2')]), n('F', 'Todo', [], 'x')] };
+		const counts = countSubtree(summary, blockedHidden, false);
+		assert.strictEqual(counts.visible, 3);
+		const problems = countFailing(summary, blockedHidden, false);
+		// H1 hidden, H2 hidden through H1: both count
+		assert.deepStrictEqual(problems, { all: 3, allHidden: 2, direct: 2, directHidden: 1, allBlocked: 2, directBlocked: 1 });
+		assert.deepStrictEqual(describeFailingFraction(problems, 'all', counts), { numerator: '3', denominator: '5', summary: '3 with problems of 5 tickets (All Levels): 1 failing, 2 blocked · 2 of them hidden by the status filter' });
+		assert.deepStrictEqual(collectFailingDescendants(summary, blockedHidden, false).blocked!.map(x => [x.label, x.hiddenByFilter]), [['H1', true], ['H2', true]]);
+		// every child hidden and blocked: 1/1, never 1/0
+		const only: ITicketSubtreeSummary = { truncated: false, children: [b('H')] };
+		const f = describeFailingFraction(countFailing(only, blockedHidden, false), 'direct', countSubtree(only, blockedHidden, false))!;
+		assert.deepStrictEqual([f.numerator, f.denominator], ['1', '1']);
+	});
+
+	test('UI-34: Direct mode counts a child once when it or anything below it has a problem', () => {
+		const summary: ITicketSubtreeSummary = {
+			truncated: false,
+			children: [
+				n('C-1', 'In Progress', [b('G-1'), n('G-2', 'Todo', [], 'x')]), // failing below: counts as failing
+				n('C-2', 'In Progress', [n('G-3', 'Todo', [b('GG-1')])]), // blocked only, two levels down
+				n('C-3', 'Todo', [n('G-4', 'Todo')]) // fine
+			]
+		};
+		const problems = countFailing(summary, none, false);
+		assert.deepStrictEqual(problems, { all: 3, allHidden: 0, direct: 2, directHidden: 0, allBlocked: 2, directBlocked: 1 });
+		const counts = countSubtree(summary, none, false);
+		assert.deepStrictEqual(describeFailingFraction(problems, 'direct', counts), { numerator: '2', denominator: '3', summary: '2 with problems of 3 tickets (Direct Children: a child counts when it or a ticket below it fails or is blocked): 1 failing, 1 blocked' });
+		assert.strictEqual(describeFailingFraction(problems, 'off', counts), undefined);
+	});
+
+	test('UI-34: removed tickets are never problems', () => {
+		const removedBlocked: ITicketSubtreeNode = { ...b('R-1'), removed: true };
+		const summary: ITicketSubtreeSummary = { truncated: false, children: [removedBlocked, n('R-2', 'Removed', [b('R-3')], undefined, true), n('OK', 'Todo')] };
+		assert.deepStrictEqual(countFailing(summary, none, false), { all: 0, allHidden: 0, direct: 0, directHidden: 0, allBlocked: 0, directBlocked: 0 });
+		assert.strictEqual(describeProblemsBelow(collectFailingDescendants(summary, none, false)), undefined);
+		// "show removed items": the removed ticket itself still does not count, its live blocked child does
+		assert.deepStrictEqual(countFailing(summary, none, true), { all: 1, allHidden: 0, direct: 1, directHidden: 0, allBlocked: 1, directBlocked: 1 });
+	});
+
 	test('UI-32: failing / total fraction in the count pill, same count mode as the pill', () => {
 		const summary: ITicketSubtreeSummary = {
 			truncated: false,
@@ -193,12 +272,12 @@ suite('ticketFailure', () => {
 			]
 		};
 		// all levels: T-3, T-4, T-9; direct children: T-1 (through T-3 / T-4) and T-9
-		assert.deepStrictEqual(countFailing(summary, none, false), { all: 3, allHidden: 0, direct: 2, directHidden: 0 });
+		assert.deepStrictEqual(countFailing(summary, none, false), { all: 3, allHidden: 0, direct: 2, directHidden: 0, allBlocked: 0, directBlocked: 0 });
 		// Done hidden: failures still count (like the propagation), the hidden ones separately
-		assert.deepStrictEqual(countFailing(summary, new Set(['Done']), false), { all: 3, allHidden: 2, direct: 2, directHidden: 1 });
+		assert.deepStrictEqual(countFailing(summary, new Set(['Done']), false), { all: 3, allHidden: 2, direct: 2, directHidden: 1, allBlocked: 0, directBlocked: 0 });
 		// show removed items: the removed branch counts again
-		assert.deepStrictEqual(countFailing(summary, none, true), { all: 4, allHidden: 0, direct: 3, directHidden: 0 });
-		assert.deepStrictEqual(countFailing({ truncated: false, children: [n('A', 'Todo', [n('B', 'Todo')])] }, none, false), { all: 0, allHidden: 0, direct: 0, directHidden: 0 });
+		assert.deepStrictEqual(countFailing(summary, none, true), { all: 4, allHidden: 0, direct: 3, directHidden: 0, allBlocked: 0, directBlocked: 0 });
+		assert.deepStrictEqual(countFailing({ truncated: false, children: [n('A', 'Todo', [n('B', 'Todo')])] }, none, false), { all: 0, allHidden: 0, direct: 0, directHidden: 0, allBlocked: 0, directBlocked: 0 });
 
 		const counts = countSubtree(summary, none, false);
 		const allPill = describeChildCountPill(counts, 'all')!;
