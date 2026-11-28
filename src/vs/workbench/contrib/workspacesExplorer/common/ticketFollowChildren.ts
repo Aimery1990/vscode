@@ -5,7 +5,7 @@
 import { CanonicalStatusCategory } from './workspacesExplorer.js';
 import { readTopLevelMetadata } from './workspaceLifecycle.js';
 import { classifyTestResult } from './ticketFailure.js';
-import { DependencyEvaluation, FOLLOW_DEPENDENCIES_FIELD_KEY, IOutcomeRecord, setTicketLinkSectionLine } from './ticketDependencies.js';
+import { DependencyEvaluation, FOLLOW_DEPENDENCIES_FIELD_KEY, IOutcomeRecord, removeTicketLinkSectionLine, setTicketLinkSectionLine } from './ticketDependencies.js';
 
 /**
  * Follow Children (CI-62): a ticket's direct child tickets count as implicit dependencies, next to its explicit
@@ -19,6 +19,10 @@ import { DependencyEvaluation, FOLLOW_DEPENDENCIES_FIELD_KEY, IOutcomeRecord, se
  * unfinished); any other child follows its status category (Done → success; Blocked or the UI-20 failing marker →
  * failure; Todo / In Progress → unfinished). Removed children are ignored. Explicit Depends On entries keep the CI-59
  * run-outcome semantics, except that a test-case dependency's Pass / Fail Result counts first.
+ *
+ * Independent from Parent (CI-64): a child with `- **Independent from Parent**: Yes` (e.g. a test fixture under a test
+ * case) is cut off from its parent's evaluation: it never blocks the parent's completion and its failure never makes
+ * the parent fail. Explicit Depends On entries are not affected (a ticket listed explicitly still counts).
  *
  * Guard against surprising mass changes: a failure that only comes from children is not applied while most of the
  * counted children are unfinished.
@@ -47,6 +51,29 @@ export function setFollowChildrenLine(ticketMd: string, follow: boolean): string
 	return setTicketLinkSectionLine(ticketMd, FOLLOW_CHILDREN_FIELD_KEY, follow ? 'On' : 'Off', [FOLLOW_DEPENDENCIES_FIELD_KEY, 'Depends On', 'Linked By', 'Link To']);
 }
 
+/** Per-ticket flag (CI-64), `Yes` / absent (or `No`, default): the ticket does not count toward its parent. */
+export const INDEPENDENT_FROM_PARENT_FIELD_KEY = 'Independent from Parent';
+
+/** Whether a stored flag value means Yes (missing → No). */
+export function isIndependentValue(value: string | undefined): boolean {
+	return ['yes', 'on', 'true', '1'].includes((value || '').trim().toLowerCase());
+}
+
+/** Whether the ticket is independent from its parent (CI-64). */
+export function readIndependentFromParent(ticketMd: string): boolean {
+	return isIndependentValue(readTopLevelMetadata(ticketMd, INDEPENDENT_FROM_PARENT_FIELD_KEY));
+}
+
+/**
+ * Writes the flag: `Yes` after the Follow Children / Depends On block (else Linked By, Link To, the end); turning it
+ * off removes the line (absent = No), so the ticket.md is back to what it was.
+ */
+export function setIndependentFromParentLine(ticketMd: string, independent: boolean): string {
+	return independent
+		? setTicketLinkSectionLine(ticketMd, INDEPENDENT_FROM_PARENT_FIELD_KEY, 'Yes', [FOLLOW_CHILDREN_FIELD_KEY, FOLLOW_DEPENDENCIES_FIELD_KEY, 'Depends On', 'Linked By', 'Link To'])
+		: removeTicketLinkSectionLine(ticketMd, INDEPENDENT_FROM_PARENT_FIELD_KEY);
+}
+
 export type FollowedOutcome = 'success' | 'failed' | 'unfinished';
 
 export interface IChildOutcomeInput {
@@ -56,11 +83,13 @@ export interface IChildOutcomeInput {
 	readonly statusCategory?: CanonicalStatusCategory;
 	/** The UI-20 failing marker (a failed last run, not cleared). */
 	readonly failing?: boolean;
+	/** Independent from Parent (CI-64): the child does not count toward its parent. */
+	readonly independent?: boolean;
 }
 
-/** A child's outcome for its parent; 'ignored' for a Removed child. */
+/** A child's outcome for its parent; 'ignored' for a Removed child or one independent from its parent (CI-64). */
 export function childOutcome(input: IChildOutcomeInput): FollowedOutcome | 'ignored' {
-	if (input.statusCategory === 'Removed') {
+	if (input.statusCategory === 'Removed' || input.independent) {
 		return 'ignored';
 	}
 	if (input.resultValue !== undefined) {

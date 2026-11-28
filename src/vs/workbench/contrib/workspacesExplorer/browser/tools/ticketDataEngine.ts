@@ -22,7 +22,8 @@ import { readTicketFileResolved } from '../ticketFieldFiles.js';
 import { ITicketChangeRecord, parseTicketChangeRecords, ticketChangeRecordMatchesField } from '../../common/ticketChangeLog.js';
 import { IPathService } from '../../../../services/path/common/pathService.js';
 import { coerceTicketLabelsInput, hasTicketLabel, isDefinedLabel, ITicketLabelDefinition } from '../../common/ticketLabels.js';
-import { readTicketLabels, setTicketLabelsLine } from '../../common/workspaceLifecycle.js';
+import { readTicketLabels, readTopLevelMetadata, setTicketLabelsLine } from '../../common/workspaceLifecycle.js';
+import { isIndependentValue, setIndependentFromParentLine } from '../../common/ticketFollowChildren.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { expandHomePath, getAnyAgentGlobalFolders, getRetiredGlobalWorkspaceCode, getRetiredGlobalWorkspaceMessage } from '../../../customModules/common/anyagentGlobalPaths.js';
 import { parseDependsOn, readDependsOn, setDependsOnLine, setFollowDependenciesLine } from '../../common/ticketDependencies.js';
@@ -46,6 +47,11 @@ interface IParsedTicketMd {
 }
 
 /** `item.name || item.key || item.title` of a tool-provided JSON object. */
+/** CI-64: an Independent from Parent input (boolean, or a Yes / No / On / Off / true / false string). */
+function coerceIndependentInput(value: unknown): boolean {
+	return typeof value === 'boolean' ? value : isIndependentValue(value === null || value === undefined ? '' : String(value));
+}
+
 function itemIdentity(item: object): unknown {
 	const obj = item as IJsonObject;
 	return obj.name || obj.key || obj.title;
@@ -105,6 +111,8 @@ export interface IUpdateTicketToolOptions {
 	updates?: Record<string, unknown>;
 	/** Replaces the ticket's labels (array of label names; [] clears them). */
 	labels?: string[];
+	/** CI-64: Independent from Parent (true: the ticket does not count toward its parent's completion). */
+	independent_from_parent?: boolean;
 	worklog_record: IWorklogRecord;
 }
 
@@ -1283,12 +1291,33 @@ export class TicketDataEngine {
 		if (options.labels !== undefined) {
 			newLabels = coerceTicketLabelsInput(options.labels);
 		}
-		if (Object.keys(updates).length === 0 && newLabels === undefined) {
-			throw new Error('Nothing to update: pass `updates` (path -> value) and / or `labels`.');
+		let independent: boolean | undefined;
+		for (const independentPath of ['/Independent from Parent', 'Independent from Parent', '/Attributes/Independent from Parent']) {
+			if (Object.keys(updates).includes(independentPath)) {
+				independent = coerceIndependentInput(updates[independentPath]);
+				delete updates[independentPath];
+			}
+		}
+		if (options.independent_from_parent !== undefined) {
+			independent = coerceIndependentInput(options.independent_from_parent);
+		}
+		if (Object.keys(updates).length === 0 && newLabels === undefined && independent === undefined) {
+			throw new Error('Nothing to update: pass `updates` (path -> value), `labels` and / or `independent_from_parent`.');
 		}
 		if (newLabels !== undefined) {
 			ticketContent = setTicketLabelsLine(ticketContent, newLabels);
 			ticketModified = true;
+		}
+		if (independent !== undefined) {
+			const type = (readTopLevelMetadata(ticketContent, 'Ticket Type') || readTopLevelMetadata(ticketContent, 'Type') || '').trim().toLowerCase();
+			if (type === 'workspace') {
+				throw new Error('Independent from Parent does not apply to a workspace root ticket (it has no parent).');
+			}
+			const next = setIndependentFromParentLine(ticketContent, independent);
+			if (next !== ticketContent) {
+				ticketContent = next;
+				ticketModified = true;
+			}
 		}
 
 		for (const [rawPath, rawVal] of Object.entries(updates)) {
@@ -1496,6 +1525,7 @@ export class TicketDataEngine {
 				'worklog.md'
 			].filter(Boolean),
 			applied_updates: updates,
+			...(independent !== undefined ? { independent_from_parent: independent } : {}),
 			...(newLabels !== undefined ? { labels: newLabels, ...this._undefinedLabelsWarning(newLabels, (await this.workspacesExplorerService.getWorkspaceStatuses(paths.folderUri)).labels) } : {}),
 			...(missingAttachments.length > 0 ? {
 				missing_attachments: missingAttachments,

@@ -13,7 +13,8 @@ import {
 	serializeDerivedOutcome, setResultFieldValue, workflowRunOutcome
 } from '../../workspacesExplorer/common/ticketDependencies.js';
 import {
-	buildFollowersIndex, canFollow, childOutcome, evaluateFollowedTickets, explicitDependencyOutcome, followersAfterTicketChange, IFollowedState, readFollowChildren
+	buildFollowersIndex, canFollow, childOutcome, evaluateFollowedTickets, explicitDependencyOutcome, followersAfterTicketChange, IFollowedState, readFollowChildren,
+	readIndependentFromParent
 } from '../../workspacesExplorer/common/ticketFollowChildren.js';
 import { detectTicketFailure, lastRunOutcome, parseTicketLastRunRecord, parseWorkflowRunsHead, TICKET_LAST_RUN_FILE_NAME } from '../../workspacesExplorer/common/ticketFailure.js';
 import { readTicketStatus, readTopLevelMetadata, setTicketStatusLine } from '../../workspacesExplorer/common/workspaceLifecycle.js';
@@ -57,9 +58,12 @@ interface IWorkspaceIndex {
 	readonly followers: Map<string, string[]>;
 }
 
-/** Status / Result of a ticket.md: what a "child change" (CI-62) compares. */
+/**
+ * Status / Result / Independent from Parent of a ticket.md: what a "child change" (CI-62) compares. Toggling the CI-64
+ * flag re-evaluates the parent like a status change.
+ */
 function ticketSignature(text: string): string {
-	return `${(readTicketStatus(text) || '').trim().toLowerCase()}\u0000${(readResultFieldValue(text) ?? '\u0001').trim().toLowerCase()}`;
+	return `${(readTicketStatus(text) || '').trim().toLowerCase()}\u0000${(readResultFieldValue(text) ?? '\u0001').trim().toLowerCase()}\u0000${readIndependentFromParent(text) ? 'independent' : ''}`;
 }
 
 /** Category of a status by its name when the workspace lifecycle does not know it. */
@@ -320,6 +324,9 @@ export class TicketDependencyUpdater {
 				const childText = child ? await this._readTicketMd(child.folder) : undefined;
 				if (!child || childText === undefined) {
 					continue;
+				}
+				if (readIndependentFromParent(childText)) {
+					continue; // CI-64: cut off from its parent's evaluation (explicit Depends On is not affected)
 				}
 				const status = readTicketStatus(childText);
 				const category = categoryOf(status, settings.lifecycle);

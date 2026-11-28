@@ -7,7 +7,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { IOutcomeRecord, IPropagationStep, propagateDependencies, resultValueFor, setFollowDependenciesLine } from '../../common/ticketDependencies.js';
 import {
 	buildFollowersIndex, canFollow, childOutcome, evaluateFollowedTickets, explicitDependencyOutcome, followersAfterTicketChange, IFollowedState, readFollowChildren,
-	setFollowChildrenLine
+	readIndependentFromParent, setFollowChildrenLine, setIndependentFromParentLine
 } from '../../common/ticketFollowChildren.js';
 
 const TICKET = [
@@ -141,5 +141,39 @@ suite('ticketFollowChildren (CI-62)', () => {
 		const levels: number[] = [];
 		await propagateDependencies('T-0', buildFollowersIndex(new Map(), deep), async step => { levels.push(step.depth); return true; }, 8);
 		assert.strictEqual(Math.max(...levels), 8);
+	});
+
+	test('Independent from Parent flag (CI-64): default No, Yes written after Follow Children, off removes the line', () => {
+		assert.strictEqual(readIndependentFromParent(TICKET), false);
+		const on = setIndependentFromParentLine(TICKET, true);
+		assert.strictEqual(readIndependentFromParent(on), true);
+		assert.ok(on.includes('- **Linked By**: None\n- **Independent from Parent**: Yes\n'));
+		assert.strictEqual(setIndependentFromParentLine(on, false), TICKET);
+		assert.strictEqual(setIndependentFromParentLine(TICKET, false), TICKET);
+		assert.strictEqual(setIndependentFromParentLine(on, true), on);
+		const withFollow = setIndependentFromParentLine(setFollowChildrenLine(TICKET, false), true);
+		assert.ok(withFollow.includes('- **Follow Children**: Off\n- **Independent from Parent**: Yes\n'));
+		assert.strictEqual(readIndependentFromParent(TICKET.replace('- **Linked By**: None', '- **Linked By**: None\n- **Independent from Parent**: No')), false);
+		assert.strictEqual(readIndependentFromParent(TICKET.replace('- **Linked By**: None', '- **Linked By**: None\n- **Independent from Parent**: yes')), true);
+	});
+
+	test('independent children (CI-64) are ignored: an unfinished fixture never blocks, a failing one never fails the parent', () => {
+		assert.strictEqual(childOutcome({ statusCategory: 'Todo', independent: true }), 'ignored');
+		assert.strictEqual(childOutcome({ statusCategory: 'Blocked', independent: true }), 'ignored');
+		assert.strictEqual(childOutcome({ resultValue: 'Fail', statusCategory: 'Done', independent: true }), 'ignored');
+		assert.strictEqual(childOutcome({ statusCategory: 'Todo', independent: false }), 'unfinished');
+		// what the updater builds: ignored children are left out of the counted list
+		const counted = (inputs: { id: string; independent?: boolean; statusCategory: 'Todo' | 'Done' | 'Blocked'; resultValue?: string }[]): IFollowedState[] =>
+			inputs.flatMap(i => { const o = childOutcome(i); return o === 'ignored' ? [] : [{ id: i.id, outcome: o }]; });
+		// passing TC + Todo fixture flagged independent → success
+		assert.strictEqual(evaluateFollowedTickets(counted([{ id: 'TC-1', statusCategory: 'Done', resultValue: 'Pass' }, { id: 'FX-1', statusCategory: 'Todo', independent: true }]), []).result, 'success');
+		// unflagged → pending (no change)
+		assert.strictEqual(evaluateFollowedTickets(counted([{ id: 'TC-1', statusCategory: 'Done', resultValue: 'Pass' }, { id: 'FX-1', statusCategory: 'Todo' }]), []).result, 'pending');
+		// a failing independent child is ignored
+		assert.strictEqual(evaluateFollowedTickets(counted([{ id: 'TC-1', statusCategory: 'Done', resultValue: 'Pass' }, { id: 'FX-1', statusCategory: 'Blocked', independent: true }]), []).result, 'success');
+		// all children independent → nothing counted → none (no change)
+		assert.strictEqual(evaluateFollowedTickets(counted([{ id: 'FX-1', statusCategory: 'Done', independent: true }]), []).result, 'none');
+		// explicit Depends On on an independent ticket still counts (dependencies are not filtered)
+		assert.strictEqual(evaluateFollowedTickets(counted([{ id: 'FX-1', statusCategory: 'Blocked', independent: true }]), [fail('FX-1')]).result, 'failed');
 	});
 });

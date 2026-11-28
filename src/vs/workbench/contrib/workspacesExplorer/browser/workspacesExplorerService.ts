@@ -7,6 +7,7 @@ import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js'
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../common/ticketSubtreeCount.js';
 import { canonicalTreeKey, flattenTicketSubtree, ITicketSearchEntry, ITicketSearchIndex } from '../common/ticketSearch.js';
+import { readIndependentFromParent } from '../common/ticketFollowChildren.js';
 import { detectTicketFailure, ITicketFailure, ITicketLastRunRecord, IWorkflowRunHead, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
 import { ITicketLabelDefinition, parseLabelDefinitions, renameTicketLabels, serializeLabelDefinitions, TICKET_LABELS_METADATA_KEY } from '../common/ticketLabels.js';
 import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, setTicketLabelsLine, setTicketStatusLine, STATUS_MAPPING_KEY, TICKET_STATUSES_KEY, upsertWorkspaceMetadata } from '../common/workspaceLifecycle.js';
@@ -52,6 +53,8 @@ interface ISubtreeLevelEntry {
 	readonly resultField?: { readonly label: string; readonly value: string };
 	readonly lastRun?: ITicketLastRunRecord;
 	readonly workflowRun?: IWorkflowRunHead;
+	/** CI-64: Independent from Parent. */
+	readonly independent?: boolean;
 }
 
 export class WorkspacesExplorerService extends Disposable implements IWorkspacesExplorerService {
@@ -76,6 +79,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		resultField?: { label: string; value: string };
 		/** UI-20: ticket.md is longer than the head read (a result field may follow). */
 		headTruncated?: boolean;
+		/** CI-64: Independent from Parent (found in the head, or in the full read when the head was truncated). */
+		independent?: boolean;
 		timestamp: number;
 	}>();
 	private readonly _workspaceStatusesCache = new Map<string, {
@@ -90,6 +95,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private readonly _ticketFailures = new Map<string, ITicketFailure>();
 	/** UI-23: result fields of test-case tickets (normalized folder URI), refreshed like {@link _ticketFailures}. */
 	private readonly _ticketTestResults = new Map<string, { label: string; value: string }>();
+	/** CI-64: ticket folders flagged Independent from Parent (filled with the sub-tree levels, like the test results). */
+	private readonly _ticketIndependent = new Map<string, true>();
 	/** UI-17: assembled sub-tree summaries; a stale entry is still served by peek (no flicker) until recomputed. */
 	private readonly _subtreeSummaryCache = new Map<string, { summary: ITicketSubtreeSummary; timestamp: number; stale: boolean }>();
 	private readonly _subtreeSummaryInFlight = new Map<string, Promise<ITicketSubtreeSummary>>();
@@ -247,6 +254,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			this._subtreeSummaryInFlight.clear();
 			this._ticketFailures.clear();
 			this._ticketTestResults.clear();
+			this._ticketIndependent.clear();
 			for (const computation of this._subtreeComputations) {
 				computation.dirty = true;
 			}
@@ -261,7 +269,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					this._subtreeSummaryCache.delete(k);
 				}
 			}
-			for (const map of [this._childEntityMetaCache, this._ticketFailures, this._ticketTestResults]) {
+			for (const map of [this._childEntityMetaCache, this._ticketFailures, this._ticketTestResults, this._ticketIndependent]) {
 				for (const k of Array.from(map.keys())) {
 					if (under(k)) {
 						map.delete(k);
@@ -964,7 +972,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private async _readChildEntityMetadataFast(
 		childUri: URI,
 		fallbackName: string
-	): Promise<{ type: ResourceType; status?: string; labels?: string[]; ticketId?: string; title?: string; resultField?: { label: string; value: string }; headTruncated?: boolean }> {
+	): Promise<{ type: ResourceType; status?: string; labels?: string[]; ticketId?: string; title?: string; resultField?: { label: string; value: string }; headTruncated?: boolean; independent?: boolean }> {
 		const cacheKey = this.normalizeUriString(childUri);
 		const snap = this.getMetadataSnapshot(childUri);
 		const cached = this._childEntityMetaCache.get(cacheKey);
@@ -978,7 +986,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				ticketId: resolvedId,
 				title: resolvedTitle,
 				resultField: cached.resultField,
-				headTruncated: cached.headTruncated
+				headTruncated: cached.headTruncated,
+				independent: cached.independent
 			};
 		}
 
@@ -993,6 +1002,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		let foundTicketFile = false;
 		let resultField: { label: string; value: string } | undefined;
 		let headTruncated = false;
+		let independent = false;
 
 		for (const uri of ticketUris) {
 			try {
@@ -1001,6 +1011,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				foundTicketFile = true;
 				resultField = readTestResultField(text);
 				headTruncated = content.value.byteLength >= 8192;
+				independent = readIndependentFromParent(text);
 
 				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([^\r\n]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([^\r\n]+)/i);
 				if (typeMatch && typeMatch[1]) {
@@ -1125,6 +1136,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			title: resolvedTitle || undefined,
 			resultField,
 			headTruncated,
+			independent,
 			timestamp: Date.now()
 		};
 		this._childEntityMetaCache.set(cacheKey, entry);
@@ -1257,17 +1269,22 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	 * or the whole ticket.md when the head was cut before one was found), last_run.json and the head of
 	 * workflow_runs.json (workflow tickets only).
 	 */
-	private async _readTicketFailureSignals(ticketUri: URI, meta: { type: ResourceType; status?: string; resultField?: { label: string; value: string }; headTruncated?: boolean }): Promise<Pick<ISubtreeLevelEntry, 'resultField' | 'lastRun' | 'workflowRun'>> {
+	private async _readTicketFailureSignals(ticketUri: URI, meta: { type: ResourceType; status?: string; resultField?: { label: string; value: string }; headTruncated?: boolean; independent?: boolean }): Promise<Pick<ISubtreeLevelEntry, 'resultField' | 'lastRun' | 'workflowRun' | 'independent'>> {
 		const configDir = URI.joinPath(ticketUri, '.agents');
 		let resultField = meta.resultField;
-		if (!resultField && meta.headTruncated) {
+		let independent = meta.independent;
+		// the Link section (CI-64 flag) and the result field may follow a truncated head
+		if ((!resultField || !independent) && meta.headTruncated) {
 			for (const uri of [URI.joinPath(configDir, 'ticket.md'), URI.joinPath(ticketUri, 'ticket.md')]) {
 				try {
-					resultField = readTestResultField((await this.fileService.readFile(uri, { length: 1024 * 1024 })).value.toString());
+					const fullText = (await this.fileService.readFile(uri, { length: 1024 * 1024 })).value.toString();
+					resultField = readTestResultField(fullText);
+					independent = readIndependentFromParent(fullText);
 					// remember the full read in the metadata cache (dropped with it when ticket.md changes)
 					const cachedMeta = this._childEntityMetaCache.get(this.normalizeUriString(ticketUri));
 					if (cachedMeta) {
 						cachedMeta.resultField = resultField;
+						cachedMeta.independent = independent;
 						cachedMeta.headTruncated = false;
 					}
 					break;
@@ -1291,7 +1308,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				// never ran
 			}
 		}
-		return { resultField, lastRun, workflowRun };
+		return { resultField, lastRun, workflowRun, independent };
 	}
 
 	/** The direct child ticket folders of `folderUri` (cached; reuses the cached 8KB ticket.md metadata reads). */
@@ -1356,6 +1373,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	peekTicketTestResult(ticketUri: URI): { readonly label: string; readonly value: string } | undefined {
 		return this._ticketTestResults.get(this.normalizeUriString(ticketUri));
+	}
+
+	peekTicketIndependentFromParent(ticketUri: URI): boolean {
+		return this._ticketIndependent.has(this.normalizeUriString(ticketUri));
 	}
 
 	peekTicketSubtreeSummary(folderUri: URI): ITicketSubtreeSummary | undefined {
@@ -1455,6 +1476,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						this._ticketTestResults.set(failureKey, e.resultField);
 					} else {
 						this._ticketTestResults.delete(failureKey);
+					}
+					if (e.independent) {
+						this._ticketIndependent.set(failureKey, true);
+					} else {
+						this._ticketIndependent.delete(failureKey);
 					}
 					return {
 						category: e.status ? wsStatuses.getCategory(e.status) : undefined,

@@ -3207,7 +3207,7 @@ AVAILABLE ANYAGENT TOOLS:
 - anyagent_query_workspace_tree: Explore and search the hierarchical ticket/job tree of a workspace on-demand with optional parent ticket filter and keyword query.
 - anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
 - anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
-- anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items.
+- anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items. independent_from_parent: true marks a ticket (e.g. a test fixture) as not counting toward its parent's completion.
 - anyagent_manage_links: Add, remove, or set bidirectional links between tickets (supports 1-to-N, N-to-1, N-to-M).
 - anyagent_list_custom_modules: List existing custom modules, Base Primitives catalog, and reusable classes.
 - anyagent_generate_custom_module: Synthesize and register a new Custom Module (entity type schema) or update an existing module with Type Definition, Type Prompt, and fields composed from Base Primitives and Reusable Classes.

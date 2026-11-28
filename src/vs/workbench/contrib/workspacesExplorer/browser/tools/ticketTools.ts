@@ -339,7 +339,7 @@ export class UpdateTicketTool implements IToolImpl {
 			toolReferenceName: 'updateTicket',
 			displayName: localize('ticket.tool.update.displayName', "Update Ticket"),
 			userDescription: localize('ticket.tool.update.userDescription', "Update standard fields, prompts, custom properties, or dynamic cards"),
-			modelDescription: 'Update or clear standard attributes, prompts, custom fields, and dynamic list cards using exact field paths (e.g. /Custom/education/LU Edu/degree or /Custom/education/add). Automatically appends structured execution details into worklog.md.',
+			modelDescription: 'Update or clear standard attributes, prompts, custom fields, and dynamic list cards using exact field paths (e.g. /Custom/education/LU Edu/degree or /Custom/education/add), labels, and the "Independent from Parent" flag (independent_from_parent: true makes the ticket not count toward its parent\'s completion, e.g. test fixtures). Automatically appends structured execution details into worklog.md.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.edit,
@@ -366,6 +366,10 @@ export class UpdateTicketTool implements IToolImpl {
 						type: 'array',
 						items: { type: 'string' },
 						description: 'Optional: replaces the ticket\'s labels with these label names ([] removes all labels). Prefer the workspace labels (workspace_labels in getTicketData); other names are stored but shown in a neutral color. Pass `updates` and / or `labels`.'
+					},
+					independent_from_parent: {
+						type: 'boolean',
+						description: 'Optional: the ticket\'s "Independent from Parent" flag (default false). true: the ticket does not count toward its parent\'s completion (Follow Children ignores it: it never blocks the parent from becoming Done and its failure never makes the parent Blocked), e.g. a test fixture under a test case; an explicit Depends On on it still counts. false: it counts again. Stored in ticket.md as `- **Independent from Parent**: Yes` (line removed when false). Not for workspace root tickets. Can also be passed in `updates` as \'/Independent from Parent\': true / false.'
 					},
 					worklog_record: {
 						type: 'object',

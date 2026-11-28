@@ -61,7 +61,7 @@ import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHel
 import { buildRunStatusSettingsControl } from '../../workflowsManager/browser/runStatusSettingControl.js';
 import { loadInheritedRunStatusSettings } from '../../workflowsManager/browser/runCompletionStatus.js';
 import { parseTicketRunStatusOverride, RUN_STATUS_INHERIT, RUN_STATUS_SETTING_KEY, setTicketRunStatusOverrideLine, TICKET_FAILED_RUN_STATUS_FIELD_KEY, TICKET_RUN_STATUS_FIELD_KEY } from '../../workflowsManager/common/runCompletionStatus.js';
-import { FOLLOW_CHILDREN_FIELD_KEY, isFollowOn, setFollowChildrenLine } from '../common/ticketFollowChildren.js';
+import { FOLLOW_CHILDREN_FIELD_KEY, INDEPENDENT_FROM_PARENT_FIELD_KEY, isFollowOn, isIndependentValue, setFollowChildrenLine, setIndependentFromParentLine } from '../common/ticketFollowChildren.js';
 import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { SUB_WORKFLOW_TICKET_ICON, getSubWorkflowTicketVisual, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
@@ -5368,6 +5368,34 @@ export class EntityDetailEditor extends EditorPane {
 				toggle
 			),
 			$('div', { style: `font-size: 0.78em; ${THEMED_DESCRIPTION_COLOR}` }, follow ? 'Status follows the child tickets\' results' : 'Status does not follow the child tickets (off)')
+		);
+	}
+
+	/**
+	 * Ticket page sidebar: Independent from Parent (CI-64), next to Follow Children. An icon toggle: Off (default) → this
+	 * ticket counts toward its parent's completion (CI-62); On → its parent ignores it (e.g. a test fixture). Saved in
+	 * ticket.md (`Yes` / line removed, CI-50: User).
+	 */
+	private _buildIndependentFromParentSidebarRow(data: IParsedTicketData): HTMLElement {
+		const independent = isIndependentValue(data.metadata?.[INDEPENDENT_FROM_PARENT_FIELD_KEY]);
+		const title = `When on, this ticket does not count toward its parent's completion. Currently ${independent ? 'on' : 'off'}; click to turn ${independent ? 'off' : 'on'}.`;
+		const toggle = $<HTMLButtonElement>('button.ticket-independent-from-parent-toggle', {
+			type: 'button', title, 'aria-label': 'Independent from Parent', 'aria-pressed': String(independent), role: 'switch', 'aria-checked': String(independent),
+			style: `display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; border-radius: 4px; cursor: pointer; ${independent
+				? 'background: var(--vscode-inputOption-activeBackground); color: var(--vscode-inputOption-activeForeground, var(--vscode-foreground)); border: 1px solid var(--vscode-inputOption-activeBorder, transparent);'
+				: 'background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-input-border, transparent);'}`
+		}, $('span' + ThemeIcon.asCSSSelector(Codicon.debugDisconnect), { style: 'font-size: 12px; pointer-events: none;' }));
+		toggle.onclick = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			void this._saveTicketMdLine(md => setIndependentFromParentLine(md, !independent), 'Independent from Parent');
+		};
+		return $('div.sidebar-row.ticket-independent-from-parent-row', undefined,
+			$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+				$('span.sidebar-label', { title }, 'INDEPENDENT FROM PARENT'),
+				toggle
+			),
+			$('div', { style: `font-size: 0.78em; ${THEMED_DESCRIPTION_COLOR}` }, independent ? 'Does not count toward the parent\'s completion' : 'Counts toward the parent\'s completion')
 		);
 	}
 
@@ -24227,6 +24255,7 @@ ${interpolatedPrompt}`;
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildLabelsSidebarRow(data)] : []),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildDependsOnSidebarRow(data)] : []),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildFollowChildrenSidebarRow(data)] : []),
+					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildIndependentFromParentSidebarRow(data)] : []),
 					...(this._isFreestyleStructureEditable() ? [this._buildRunStatusSidebarRow()] : []),
 					...(!isAgent && !this._isPreviewMode && !this._isEmbeddedInWorkflow && !isFreestyleTicketType(data.ticketType) && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildTicketRunStatusSidebarRow(data)] : []),
 					...(isAgent ? [

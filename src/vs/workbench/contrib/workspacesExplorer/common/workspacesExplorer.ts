@@ -247,6 +247,11 @@ export interface IWorkspacesExplorerService {
 	 */
 	peekTicketTestResult(ticketUri: URI): { readonly label: string; readonly value: string } | undefined;
 	/**
+	 * CI-64: whether the ticket folder `ticketUri` is flagged Independent from Parent, read from its parent's cached
+	 * sub-tree level like {@link peekTicketTestResult}; false before the scan.
+	 */
+	peekTicketIndependentFromParent(ticketUri: URI): boolean;
+	/**
 	 * UI-21: every ticket of every managed workspace (all levels) with ID, title, type, status and parent chain, built
 	 * from the cached sub-tree summaries of {@link getTicketSubtreeSummary} (no rescan unless the watcher invalidated them).
 	 */

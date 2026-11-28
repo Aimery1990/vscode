@@ -62,7 +62,8 @@ import { getLabelColor } from '../common/ticketLabels.js';
 import { applyStatusFilterWithPaths, describeFilterPathRow, IStatusFilterVerdict } from '../common/ticketFilterPath.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeNode, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
 import { classifyTestResult, collectFailingDescendants, countFailing, describeFailingFraction, describeProblemsBelow, describeTestResult, describeTicketFailure, dismissTicketRunFailure, formatFailureTime, formatTicketLastRunRecord, IFailingCounts, IFailingSummary, ITicketLastRunRecord, parseTicketLastRunRecord, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
-import { recordTicketChangeEntry } from './ticketChangeRecorder.js';
+import { recordTicketChangeEntry, writeTicketFile } from './ticketChangeRecorder.js';
+import { readIndependentFromParent, setIndependentFromParentLine } from '../common/ticketFollowChildren.js';
 import { createCSSRule } from '../../../../base/browser/domStylesheets.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
@@ -904,6 +905,25 @@ export class MainWorkspaceViewPane extends ViewPane {
 	}
 
 	/**
+	 * CI-64: turns Independent from Parent on / off in the ticket's ticket.md (recorded as the User, CI-50). The
+	 * dependency watcher sees the change and re-evaluates the parent (CI-62), like a status change.
+	 */
+	private async _setIndependentFromParent(ticketMdUri: URI, ticketUri: URI, ticketId: string, independent: boolean): Promise<void> {
+		try {
+			const text = (await this.fileService.readFile(ticketMdUri)).value.toString();
+			const next = setIndependentFromParentLine(text, independent);
+			if (next !== text) {
+				await writeTicketFile(this.fileService, ticketMdUri, next, 'User');
+			}
+		} catch (err) {
+			this.notificationService.error(`Could not change Independent from Parent of ${ticketId}: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+		this.workspacesExplorerService.refreshCaches(dirname(ticketUri));
+		await this.renderContent();
+	}
+
+	/**
 	 * UI-20 rework: "Clear Failure Mark" dismisses the last failed run of a ticket: `dismissedAt` / `dismissedBy` in
 	 * `.agents/last_run.json` (the next run overwrites the record, so a new failure shows red again) and a change entry
 	 * in the ticket's work log (CI-50).
@@ -971,6 +991,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				break;
 		}
 		return `test:${resultState}:${testResult?.value ?? ''}`;
+	}
+
+	/** CI-64: a small muted icon after the title of a ticket that does not count toward its parent. */
+	private _appendIndependentMarker(container: HTMLElement, child: IWorkspaceChildItem): string {
+		if (String(child.type).toLowerCase() === 'workspace' || !this.workspacesExplorerService.peekTicketIndependentFromParent(child.uri)) {
+			return '';
+		}
+		this._appendTicketMarker(container, 'span.ticket-independent-marker', Codicon.debugDisconnect, 'var(--vscode-descriptionForeground)', 'Independent from Parent: this ticket does not count toward its parent\'s completion');
+		return 'independent';
 	}
 
 	private _appendTicketMarker(container: HTMLElement, selector: string, icon: ThemeIcon, color: string, text: string, fontSize = '11px'): void {
@@ -2333,6 +2362,24 @@ export class MainWorkspaceViewPane extends ViewPane {
 					childActions.push(clearMark);
 				}
 
+				// CI-64: Independent from Parent (not for workspace root tickets)
+				if (selectedChildren.length <= 1 && isDirectory && child.type !== 'file' && child.type !== 'folder' && String(child.type).toLowerCase() !== 'workspace') {
+					const ticketMdUri = URI.joinPath(child.uri, '.agents', 'ticket.md');
+					let independent = this.workspacesExplorerService.peekTicketIndependentFromParent(child.uri);
+					try {
+						independent = readIndependentFromParent((await this.fileService.readFile(ticketMdUri)).value.toString());
+					} catch {
+						// no ticket.md under .agents: keep the cached state
+					}
+					// the menu draws an item's icon where the check mark goes: while on, the icon is the check itself
+					const toggle = new Action('toggle_independent_from_parent', 'Independent from Parent', ThemeIcon.asClassName(independent ? Codicon.check : Codicon.debugDisconnect), true, async () => {
+						await this._setIndependentFromParent(ticketMdUri, child.uri, realTicketId, !independent);
+					});
+					toggle.checked = independent;
+					toggle.tooltip = `When on, this ticket does not count toward its parent's completion (currently ${independent ? 'on' : 'off'})`;
+					childActions.push(toggle);
+				}
+
 				if (isDirectory && !isRemoved) {
 					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.sparkleFilled), true, () => {
 						this.showCreateResourceModal(child.uri, child.name);
@@ -2595,7 +2642,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			// UI-17: visible descendant tickets of this ticket, as a muted pill right after the title
 			let childCountSig = '';
 			if (isTicketEntity && isDirectory) {
-				childCountSig = `${this._appendTicketFailureMarker(childLeft, child.uri)}|${this._appendChildCountPill(childLeft, child.uri)}`;
+				childCountSig = `${this._appendTicketFailureMarker(childLeft, child.uri)}|${this._appendIndependentMarker(childLeft, child)}|${this._appendChildCountPill(childLeft, child.uri)}`;
 				if (childLeft.lastElementChild !== childTitleSpan) {
 					childTitleSpan.style.flex = '0 1 auto';
 				}
