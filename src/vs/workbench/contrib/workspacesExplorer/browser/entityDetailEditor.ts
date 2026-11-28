@@ -29,6 +29,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { isWindows } from '../../../../base/common/platform.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { resolveTicketPageLink } from '../common/ticketPageLinks.js';
 import { dirname, basename } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -2911,6 +2912,11 @@ export class EntityDetailEditor extends EditorPane {
 			const target = e.target as HTMLElement | null;
 			if (!target) { return; }
 
+			// UI-22: links in rendered markdown (worklog, README, descriptions): relative / file links open in the editor
+			if (this._handleTicketPageLinkClick(e, target)) {
+				return;
+			}
+
 			// 0. Manual Refresh Button click
 			if (target.id === 'entity-detail-refresh-btn' || target.closest('#entity-detail-refresh-btn')) {
 				e.preventDefault();
@@ -4983,6 +4989,54 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		// Default to .agents/<name>
 		return pathInAgents;
+	}
+
+	/**
+	 * UI-22: a click on a link of the rendered markdown. Relative and file links are resolved against the ticket folder
+	 * and opened in the editor (a missing file shows a notification); external links keep their default handling.
+	 * Returns whether the click was a link click (nothing else on the page should react to it).
+	 */
+	private _handleTicketPageLinkClick(e: MouseEvent, target: HTMLElement): boolean {
+		const anchor = target.closest('a[href]') as HTMLAnchorElement | null;
+		if (!anchor || !this._container?.contains(anchor) || anchor.hasAttribute('download')) {
+			return false;
+		}
+		const href = anchor.getAttribute('href');
+		const entityUri = this._entityUri;
+		const link = entityUri ? resolveTicketPageLink(href, entityUri) : undefined;
+		if (link?.kind === 'external') {
+			return true; // default handling (opens externally, as before)
+		}
+		e.preventDefault();
+		e.stopPropagation();
+		if (link?.kind === 'file') {
+			this._openTicketPageFileLink(href || '', link.candidates).catch(err => {
+				this._notificationService.error(`Failed to open '${href}': ${(err as Error | undefined)?.message || err}`);
+			});
+		}
+		return true;
+	}
+
+	private async _openTicketPageFileLink(href: string, candidates: readonly URI[]): Promise<void> {
+		let folder: URI | undefined;
+		for (const resource of candidates) {
+			try {
+				const stat = await this._fileService.stat(resource);
+				if (stat.isDirectory) {
+					folder ??= resource;
+					continue;
+				}
+			} catch {
+				continue;
+			}
+			await this._editorService.openEditor({ resource, options: { pinned: true } });
+			return;
+		}
+		if (folder) {
+			this._notificationService.info(`'${href}' is a folder: ${folder.fsPath}`);
+			return;
+		}
+		this._notificationService.warn(`File not found: '${href}' (looked for ${candidates.map(c => c.fsPath).join(', ')}).`);
 	}
 
 	private async _resolveWorkLogUri(baseUri: URI): Promise<URI> {
