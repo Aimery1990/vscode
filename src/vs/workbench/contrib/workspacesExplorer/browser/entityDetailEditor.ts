@@ -148,7 +148,6 @@ interface IEditorParts {
 	browserUrlInput?: HTMLInputElement;
 	closeStatusLifecyclePopoverBtn?: HTMLButtonElement;
 	codicon?: HTMLElement;
-	copyJsonBtnLabel?: HTMLElement;
 	customFieldView?: HTMLElement;
 	descContentBox?: HTMLElement;
 	entityDetailRunTicketBtn?: HTMLButtonElement;
@@ -171,7 +170,6 @@ interface IEditorParts {
 	outputItemViewport?: HTMLElement;
 	outputPrimitiveCard?: HTMLElement;
 	outputSpecItems?: HTMLElement[];
-	pasteJsonBtnLabel?: HTMLElement;
 	promptAgentSelect?: HTMLSelectElement;
 	promptCtxHiddenGroup?: HTMLElement;
 	promptDropdownProviderBadge?: HTMLElement;
@@ -239,7 +237,6 @@ interface IEditorParts {
 	resultFormatSelector?: HTMLSelectElement;
 	resultRawContent?: HTMLTextAreaElement;
 	resultViewportContainer?: HTMLElement;
-	runTicketBtnLabel?: HTMLElement;
 	sectionCards?: HTMLElement[];
 	resultPrimitiveCards?: HTMLElement[];
 	aiEditBtns?: HTMLButtonElement[];
@@ -593,6 +590,9 @@ const COMPONENT_DRAG_MIME = 'application/vnd.anyagent.ticket-component';
 
 /** Icon of the component toolbox (also used by "Edit Template Schema"): the tools of a toolbox. */
 const COMPONENT_TOOLBOX_ICON = Codicon.tools;
+
+/** Base style of the ticket page's icon-only header action buttons (UI-26): uniform 28px squares. */
+const ENTITY_DETAIL_ICON_BTN_STYLE = 'display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; padding: 0; border-radius: 6px; cursor: pointer;';
 
 /** A change of a Freestyle ticket's structure, applied by `_applyFreestyleStructure`. */
 interface IFreestyleStructureEdit {
@@ -2012,7 +2012,7 @@ export class EntityDetailEditor extends EditorPane {
 		const visible = this._isComponentToolboxOpen;
 		const btn = $<HTMLButtonElement>(`button.btn-secondary.component-toolbox-toggle-btn${visible ? '.active' : ''}`, {
 			type: 'button',
-			style: 'display: inline-flex; align-items: center; justify-content: center; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(45, 212, 191, 0.14); border: 1px solid rgba(45, 212, 191, 0.4); color: #2dd4bf;',
+			style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: rgba(45, 212, 191, 0.14); border: 1px solid rgba(45, 212, 191, 0.4); color: #2dd4bf;`,
 			title: visible ? 'Close Component Toolbox' : 'Component Toolbox: add, remove and arrange this ticket\'s components',
 			'aria-label': 'Component Toolbox',
 			'aria-pressed': String(visible)
@@ -6126,16 +6126,17 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		const originalContent = btnEl ? Array.from(btnEl.childNodes) : [];
+		// UI-26: the Run button is icon-only; its run state goes to the icon + tooltip
+		const setRunBtnState = (el: HTMLElement, icon: ThemeIcon, iconStyle: string, status: string) => {
+			reset(el, $('span', { class: ThemeIcon.asClassName(icon), style: iconStyle }));
+			el.title = status;
+			el.setAttribute('aria-label', status);
+		};
 		if (btnEl) {
 			btnEl.setAttribute('disabled', 'true');
 			btnEl.style.opacity = '0.9';
 			btnEl.style.pointerEvents = 'none';
-			reset(btnEl, ...[
-				$('span', { class: `${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin`, style: 'font-size: 12px;' }),
-				' ',
-				part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Running...')))
-			]);
-			refreshParts(btnEl);
+			setRunBtnState(btnEl, ThemeIcon.modify(Codicon.loading, 'spin'), 'font-size: 14px;', 'Running ticket...');
 		}
 
 		let completedStepsCount = 0;
@@ -6154,8 +6155,8 @@ export class EntityDetailEditor extends EditorPane {
 				onStepStart: (info) => {
 					const liveBtn = (this._pageParts.entityDetailRunTicketBtn as HTMLElement | null) || btnEl;
 					if (liveBtn) {
-						const labelEl = partsOf(liveBtn).runTicketBtnLabel;
-						if (labelEl) { labelEl.textContent = `Running (${info.stepIndex}/${info.totalSteps})...`; }
+						liveBtn.title = `Running ticket (${info.stepIndex}/${info.totalSteps})...`;
+						liveBtn.setAttribute('aria-label', liveBtn.title);
 					}
 					const cardEl = this._findCardElementForStep(info.fieldId, info.fieldLabel, info.fieldType);
 					if (cardEl) {
@@ -6202,22 +6203,12 @@ export class EntityDetailEditor extends EditorPane {
 			if (result.success && failedStepsCount === 0) {
 				this._notificationService.info(`Ticket '${ticketId}' executed successfully (${result.stepResults?.length || 0} step(s)).`);
 				if (liveBtn) {
-					reset(liveBtn, ...[
-						$('span', { class: ThemeIcon.asClassName(Codicon.check), style: 'font-size: 12px; color: #4ade80;' }),
-						' ',
-						part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Done')))
-					]);
-					refreshParts(liveBtn);
+					setRunBtnState(liveBtn, Codicon.check, 'font-size: 14px;', 'Ticket run done');
 				}
 			} else {
 				this._notificationService.warn(`Ticket '${ticketId}' execution completed with ${failedStepsCount} issue(s). Check components for details.`);
 				if (liveBtn) {
-					reset(liveBtn, ...[
-						$('span', { class: ThemeIcon.asClassName(Codicon.warning), style: 'font-size: 12px; color: #f87171;' }),
-						' ',
-						part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Finished with Warnings')))
-					]);
-					refreshParts(liveBtn);
+					setRunBtnState(liveBtn, Codicon.warning, 'font-size: 14px; color: var(--vscode-editorWarning-foreground, #f87171);', 'Ticket run finished with warnings');
 				}
 			}
 		} catch (err) {
@@ -6225,12 +6216,7 @@ export class EntityDetailEditor extends EditorPane {
 			this._notificationService.warn(`Ticket '${ticketId}' execution completed with errors: ${(err as Error | undefined)?.message || err}`);
 			const liveBtn = (this._pageParts.entityDetailRunTicketBtn as HTMLElement | null) || btnEl;
 			if (liveBtn) {
-				reset(liveBtn, ...[
-					$('span', { class: ThemeIcon.asClassName(Codicon.error), style: 'font-size: 12px; color: #f87171;' }),
-					' ',
-					part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Failed')))
-				]);
-				refreshParts(liveBtn);
+				setRunBtnState(liveBtn, Codicon.error, 'font-size: 14px; color: var(--vscode-errorForeground, #f87171);', 'Ticket run failed');
 			}
 		} finally {
 			this._isTicketRunning = false;
@@ -6242,7 +6228,8 @@ export class EntityDetailEditor extends EditorPane {
 					liveBtn.style.pointerEvents = '';
 					reset(liveBtn, ...originalContent);
 					refreshParts(liveBtn);
-
+					liveBtn.title = 'Run ticket';
+					liveBtn.setAttribute('aria-label', 'Run ticket');
 				}
 			}, 3500);
 		}
@@ -6266,16 +6253,16 @@ export class EntityDetailEditor extends EditorPane {
 
 			if (btnEl) {
 				const iconEl = partsOf(btnEl).codicon as HTMLElement | null;
-				const labelEl = partsOf(btnEl).copyJsonBtnLabel as HTMLElement | null;
+				const originalTitle = btnEl.title;
 				if (iconEl) { iconEl.className = 'codicon codicon-check'; }
-				if (labelEl) { labelEl.textContent = 'Copied JSON!'; }
+				btnEl.title = 'Copied ticket JSON!';
 				btnEl.style.color = '#34d399';
 				btnEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
 				btnEl.style.background = 'rgba(52, 211, 153, 0.16)';
 				setTimeout(() => {
 					if (iconEl) { iconEl.className = 'codicon codicon-copy'; }
-					if (labelEl) { labelEl.textContent = 'Copy JSON'; }
-					btnEl.style.color = '#38bdf8';
+					btnEl.title = originalTitle;
+					btnEl.style.color = 'var(--vscode-charts-blue, #38bdf8)';
 					btnEl.style.borderColor = 'rgba(56, 189, 248, 0.35)';
 					btnEl.style.background = 'rgba(56, 189, 248, 0.14)';
 				}, 1600);
@@ -6620,16 +6607,16 @@ export class EntityDetailEditor extends EditorPane {
 
 			if (btnEl) {
 				const iconEl = partsOf(btnEl).codicon as HTMLElement | null;
-				const labelEl = partsOf(btnEl).pasteJsonBtnLabel as HTMLElement | null;
+				const originalTitle = btnEl.title;
 				if (iconEl) { iconEl.className = 'codicon codicon-check'; }
-				if (labelEl) { labelEl.textContent = 'Pasted JSON!'; }
+				btnEl.title = 'Pasted ticket JSON!';
 				btnEl.style.color = '#34d399';
 				btnEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
 				btnEl.style.background = 'rgba(52, 211, 153, 0.16)';
 				setTimeout(() => {
 					if (iconEl) { iconEl.className = 'codicon codicon-clippy'; }
-					if (labelEl) { labelEl.textContent = 'Paste JSON'; }
-					btnEl.style.color = '#c084fc';
+					btnEl.title = originalTitle;
+					btnEl.style.color = 'var(--vscode-charts-purple, #c084fc)';
 					btnEl.style.borderColor = 'rgba(168, 85, 247, 0.35)';
 					btnEl.style.background = 'rgba(168, 85, 247, 0.14)';
 				}, 1600);
@@ -23471,29 +23458,24 @@ ${interpolatedPrompt}`;
 						part('componentToolboxToggleBtn', this._buildComponentToolboxToggleButton()),
 						' '
 					] : []),
-					part('entityDetailRunTicketBtn', withParts(() => $<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;', title: 'Run Ticket (Execute current ticket with default parameters)' },
-						part('codicon', $('span.codicon.codicon-play', { style: 'font-size: 12px;' })),
-						part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Run'))
+					// UI-26: icon-only square action buttons (full name in title / aria-label)
+					part('entityDetailRunTicketBtn', withParts(() => $<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: var(--vscode-testing-iconPassed, #4ade80); transition: all 0.15s ease;`, title: 'Run ticket', 'aria-label': 'Run ticket' },
+						part('codicon', $(`span${ThemeIcon.asCSSSelector(Codicon.play)}`, { style: 'font-size: 14px;' }))
 					))),
 					' ',
-					withParts(() => $<HTMLButtonElement>('button#entity-detail-copy-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;', title: 'Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)' },
-						part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 12px;' })),
-						part('copyJsonBtnLabel', $('span.copy-json-btn-label', undefined, 'Copy JSON'))
+					withParts(() => $<HTMLButtonElement>('button#entity-detail-copy-json-btn.btn-secondary', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: var(--vscode-charts-blue, #38bdf8);`, title: 'Copy ticket JSON', 'aria-label': 'Copy ticket JSON' },
+						part('codicon', $(`span${ThemeIcon.asCSSSelector(Codicon.copy)}`, { style: 'font-size: 14px;' }))
 					)),
 					' ',
-					withParts(() => $<HTMLButtonElement>('button#entity-detail-paste-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: #c084fc;', title: 'Paste Ticket JSON (Paste and overwrite fields from a copied ticket of the same type)' },
-						part('codicon', $('span.codicon.codicon-clippy', { style: 'font-size: 12px;' })),
-						part('pasteJsonBtnLabel', $('span.paste-json-btn-label', undefined, 'Paste JSON'))
+					withParts(() => $<HTMLButtonElement>('button#entity-detail-paste-json-btn.btn-secondary', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: var(--vscode-charts-purple, #c084fc);`, title: 'Paste ticket JSON', 'aria-label': 'Paste ticket JSON' },
+						part('codicon', $(`span${ThemeIcon.asCSSSelector(Codicon.clippy)}`, { style: 'font-size: 14px;' }))
 					)),
 					' ',
-					$<HTMLButtonElement>('button#entity-detail-refresh-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;', title: 'Refresh Ticket (Reload latest data from disk)' },
-						$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor', style: 'display:inline-block;' },
-							$.SVG('path', { d: 'M13.65 2.35A7.958 7.958 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24l-2.24 2.24H16V0l-2.35 2.35z' })
-						),
-						$('span', undefined, 'Refresh')
+					$<HTMLButtonElement>('button#entity-detail-refresh-btn.btn-secondary', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: rgba(255, 255, 255, 0.06); border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.1)); color: var(--vscode-foreground);`, title: 'Refresh ticket (reload from disk)', 'aria-label': 'Refresh ticket (reload from disk)' },
+						$(`span${ThemeIcon.asCSSSelector(Codicon.refresh)}`, { style: 'font-size: 14px;' })
 					),
 					' ',
-					part('entityDetailToggleAttributesBtn', $<HTMLButtonElement>('button#entity-detail-toggle-attributes-btn.btn-secondary.toggle-attributes-panel-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};`, title: (this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel') },
+					part('entityDetailToggleAttributesBtn', $<HTMLButtonElement>('button#entity-detail-toggle-attributes-btn.btn-secondary.toggle-attributes-panel-btn', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};`, title: (this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel') },
 						$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'display:inline-block;' },
 							$.SVG('rect', { x: '1.5', y: '2.5', width: '13', height: '11', rx: '1.5' }),
 							' ',
