@@ -7,7 +7,7 @@ import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js'
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../common/ticketSubtreeCount.js';
 import { canonicalTreeKey, flattenTicketSubtree, ITicketSearchEntry, ITicketSearchIndex } from '../common/ticketSearch.js';
-import { detectTicketFailure, isFailedRunStatus, ITicketFailure, ITicketLastRunRecord, IWorkflowRunHead, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
+import { detectTicketFailure, ITicketFailure, ITicketLastRunRecord, IWorkflowRunHead, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
 import { ITicketLabelDefinition, parseLabelDefinitions, renameTicketLabels, serializeLabelDefinitions, TICKET_LABELS_METADATA_KEY } from '../common/ticketLabels.js';
 import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, setTicketLabelsLine, setTicketStatusLine, STATUS_MAPPING_KEY, TICKET_STATUSES_KEY, upsertWorkspaceMetadata } from '../common/workspaceLifecycle.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -1254,8 +1254,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	/**
 	 * UI-20: the failure signals of one ticket folder besides its status: the result field (from the cached 8KB head,
-	 * or the whole ticket.md when the head was cut before one was found), last_run.json (only when the status says the
-	 * last run failed) and the head of workflow_runs.json (workflow tickets only).
+	 * or the whole ticket.md when the head was cut before one was found), last_run.json and the head of
+	 * workflow_runs.json (workflow tickets only).
 	 */
 	private async _readTicketFailureSignals(ticketUri: URI, meta: { type: ResourceType; status?: string; resultField?: { label: string; value: string }; headTruncated?: boolean }): Promise<Pick<ISubtreeLevelEntry, 'resultField' | 'lastRun' | 'workflowRun'>> {
 		const configDir = URI.joinPath(ticketUri, '.agents');
@@ -1277,12 +1277,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}
 		let lastRun: ITicketLastRunRecord | undefined;
-		if (isFailedRunStatus(meta.status)) {
-			try {
-				lastRun = parseTicketLastRunRecord((await this.fileService.readFile(URI.joinPath(configDir, TICKET_LAST_RUN_FILE_NAME), { length: 16384 })).value.toString());
-			} catch {
-				// no record (run before UI-20): the status alone explains the failure
-			}
+		try {
+			// The outcome of the last ticket run (CI-58: a run no longer writes its result into the Status)
+			lastRun = parseTicketLastRunRecord((await this.fileService.readFile(URI.joinPath(configDir, TICKET_LAST_RUN_FILE_NAME), { length: 16384 })).value.toString());
+		} catch {
+			// never ran (or ran before UI-20: a legacy Status `Failed` alone explains the failure)
 		}
 		let workflowRun: IWorkflowRunHead | undefined;
 		if (String(meta.type).toLowerCase() === 'workflow') {

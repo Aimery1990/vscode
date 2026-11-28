@@ -12,10 +12,10 @@ import { isSubtreeNodeVisible, ITicketSubtreeNode, ITicketSubtreeSummary } from 
  * Failing tickets in the Workspaces tree (UI-20).
  *
  * A ticket is "failing" when at least one of these holds (data read during the UI-17 sub-tree scan):
- * 1. Last ticket run failed: a ticket run writes its outcome into ticket.md's Status (`Failed` / `Completed`, see
- *    `TicketWorkflowRuntime._persistExecutionState`), so Status `Failed` means the most recent run failed and the next
- *    successful run (Status `Completed`) clears it. The run also writes `.agents/last_run.json`
- *    ({@link ITicketLastRunRecord}) with the time and the failed component, read only to explain the failure.
+ * 1. Last ticket run failed: every ticket run writes `.agents/last_run.json` ({@link ITicketLastRunRecord}) with its
+ *    outcome, the time and the failed component; `Failed` there means the most recent run failed and the next
+ *    successful run clears it. Since CI-58 a run no longer writes its result into the Status (status and result are
+ *    different things), so the record is the signal; a legacy Status `Failed` (runs before CI-58) still counts.
  * 2. Test result: a custom field whose label is one of {@link TEST_RESULT_FIELD_LABELS} (the Test Case template's
  *    "Result" select) has one of the {@link FAILING_RESULT_VALUES} (case-insensitive).
  * 3. Workflow tickets: the latest run in `.agents/workflow_runs.json` (newest first) has status `failed`.
@@ -196,8 +196,10 @@ export function detectTicketFailure(input: ITicketFailureInput): ITicketFailure 
 		return undefined;
 	}
 	const reasons: string[] = [];
-	if (isFailedRunStatus(input.status)) {
-		const run = input.lastRun?.status === 'Failed' ? input.lastRun : undefined;
+	const lastRunFailed = input.lastRun?.status === 'Failed';
+	// A legacy Status `Failed` counts unless a newer record says the last run succeeded
+	if (lastRunFailed || (isFailedRunStatus(input.status) && input.lastRun?.status !== 'Completed')) {
+		const run = lastRunFailed ? input.lastRun : undefined;
 		const when = formatFailureTime(run?.at);
 		let reason = when ? `Last run failed ${when}` : 'Last run failed (Status: Failed)';
 		if (run?.failedStep) {

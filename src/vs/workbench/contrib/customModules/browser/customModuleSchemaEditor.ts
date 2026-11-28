@@ -58,6 +58,8 @@ import { renderGitConfigForm, renderGitResultView } from './gitComponentView.js'
 import { SHELL_CONFIG_KEYS, pickShellConfig, shellMainOutput } from '../common/shellComponent.js';
 import { askToConfirmShellScript, isShellConfirmed, renderShellConfigForm, renderShellConfirmBar, renderShellResultView, shellConfirmationMarker, shellMarkerAfterUiEdit } from './shellComponentView.js';
 import { DEFAULT_WAITING_PROMPT } from '../../workflowsManager/common/humanDecision.js';
+import { buildRunStatusSettingsControl } from '../../workflowsManager/browser/runStatusSettingControl.js';
+import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 
 
 /**
@@ -16512,6 +16514,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			applyBtn.onclick = () => {
 				activeMod.statuses = currentStatuses;
 				renderStatusPills();
+				void renderRunStatusSettings();
 				renderCanvas();
 				overlay.remove();
 			};
@@ -16519,6 +16522,37 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		configStatusBtn.onclick = () => {
 			openStatusLifecycleModal();
 		};
+
+		// Status after a run (CI-58): "On successful run" (Done by default) / "On failed run" (Blocked by default)
+		const runStatusBox = append(statusSection, $('div.template-run-status-settings', {
+			style: 'display: flex; flex-direction: column; gap: 6px; margin-top: 4px;',
+			title: 'Status a ticket of this type moves to after a whole-ticket run'
+		}));
+		const renderRunStatusSettings = async () => {
+			let lifecycle;
+			try {
+				lifecycle = input.workspaceUri ? await this._instantiationService.invokeFunction(accessor => accessor.get(IWorkspacesExplorerService)).getWorkspaceStatuses(input.workspaceUri) : undefined;
+			} catch {
+				lifecycle = undefined;
+			}
+			clearNode(runStatusBox);
+			append(runStatusBox, buildRunStatusSettingsControl({
+				lifecycle,
+				templateStatuses: currentStatuses,
+				success: activeMod.statusOnSuccessfulRun,
+				failure: activeMod.statusOnFailedRun,
+				onChange: async (key, value) => {
+					activeMod[key] = value;
+					activeMod.updatedAt = Date.now();
+					try {
+						await this._persistCurrentModule();
+					} catch (e) {
+						this.notificationService.error(`Failed to save the run status setting: ${e}`);
+					}
+				}
+			}));
+		};
+		void renderRunStatusSettings();
 
 		renderCanvas();
 

@@ -79,8 +79,12 @@ suite('ticketFailure', () => {
 		const run = detectTicketFailure({ status: 'Failed', removed: false, lastRun: { status: 'Failed', at, failedStep: 'Git Push' } });
 		assert.deepStrictEqual(run, { reasons: [`Last run failed 2026-11-27 17:30 — component 'Git Push' failed`] });
 		assert.deepStrictEqual(detectTicketFailure({ status: 'Failed', removed: false }), { reasons: ['Last run failed (Status: Failed)'] });
-		// a later successful run rewrites Status to Completed: no failure even with an old record around
-		assert.strictEqual(detectTicketFailure({ status: 'Completed', removed: false, lastRun: { status: 'Failed', at } }), undefined);
+		// CI-58: the last_run.json record is the signal, whatever the status (a failed run may set Blocked, or nothing)
+		assert.deepStrictEqual(detectTicketFailure({ status: 'Blocked', removed: false, lastRun: { status: 'Failed', at } }), { reasons: ['Last run failed 2026-11-27 17:30'] });
+		assert.deepStrictEqual(detectTicketFailure({ status: 'In Progress', removed: false, lastRun: { status: 'Failed', at, failedStep: 'Py' } }), { reasons: [`Last run failed 2026-11-27 17:30 — component 'Py' failed`] });
+		// a later successful run clears it, also a legacy Status Failed
+		assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, lastRun: { status: 'Completed', at } }), undefined);
+		assert.strictEqual(detectTicketFailure({ status: 'Failed', removed: false, lastRun: { status: 'Completed', at } }), undefined);
 		assert.deepStrictEqual(detectTicketFailure({ status: 'Done', removed: false, resultField: { label: 'Result', value: 'Fail' } }), { reasons: ['Test result: Fail'] });
 		assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, resultField: { label: 'Result', value: 'Pass' } }), undefined);
 		assert.deepStrictEqual(detectTicketFailure({ removed: false, workflowRun: { status: 'failed', runNumber: 3 } }), { reasons: ['Last workflow run #3 failed'] });

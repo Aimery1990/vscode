@@ -27,6 +27,7 @@ import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWor
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
 import { checkTicketAttachments, withTicketAttachmentChange } from '../../workspacesExplorer/browser/ticketAttachmentIntegrity.js';
 import { readTicketFileResolved, ticketFolderOfFile } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
+import { decideTicketRunStatus } from './runCompletionStatus.js';
 import { ITicketChangeActor } from '../../workspacesExplorer/common/ticketChangeLog.js';
 import { ticketLastRunRecordFromSteps, writeTicketLastRunRecord } from '../../workspacesExplorer/common/ticketFailure.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -1487,6 +1488,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const contextVariables: Record<string, unknown> = {};
 		/** Target status of the button chosen at a Button Group gate (CI-25); replaces "Completed" at the end. */
 		let decidedStatus: string | undefined;
+		/** Set when a person stopped the run at a Button Group gate: a stop is not a failure (CI-58). */
+		let stoppedByUser = false;
 
 		try {
 			if (isCancelled()) {
@@ -2554,6 +2557,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								waitingPrompt: resolveWaitingPrompt(field.waitingPrompt, text => this._interpolateVariables(text, contextVariables))
 							}, isCancelled, this._stopRunAtGate(options.humanDecisionContext));
 							if (!decision) {
+								stoppedByUser = true;
 								throw new Error(`Stopped: the run was stopped while '${fieldLabel}' was waiting for a decision.`);
 							}
 							customMetadata[fieldLabel] = JSON.stringify(decision);
@@ -3366,9 +3370,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// Field changes of this run are recorded in the ticket's work log as the Workflow (CI-50)
 			const callerWorkflow = options.callChain?.frames.find(f => f.kind === 'workflow' || f.kind === 'sub_workflow');
 			const runActor: ITicketChangeActor = { kind: 'Workflow', name: callerWorkflow?.label || 'Ticket Run' };
+			const ticketFolder = ticketUri.path.endsWith('.md') ? ticketFolderOfFile(ticketUri) : ticketUri;
 			// UI-20: run outcome for the Workspaces tree's failure markers (before ticket.md, whose change triggers the rescan)
-			await writeTicketLastRunRecord(this.fileService, ticketUri.path.endsWith('.md') ? ticketFolderOfFile(ticketUri) : ticketUri, ticketLastRunRecordFromSteps(stepResults, new Date()));
-			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor, hasFailedSteps ? undefined : decidedStatus);
+			await writeTicketLastRunRecord(this.fileService, ticketFolder, ticketLastRunRecordFromSteps(stepResults, new Date()));
+			// CI-58: the status after the run: a Button Group target status, else the "on successful / failed run"
+			// setting (Done / Blocked by default); a stopped run leaves it
+			const explicitStatus = hasFailedSteps ? undefined : decidedStatus;
+			const statusDecision = await decideTicketRunStatus({ fileService: this.fileService, workspacesExplorerService: this.workspacesExplorerService, customModulesService: this.customModulesService, logService: this.logService }, {
+				ticketFolder,
+				schema,
+				outcome: stoppedByUser ? 'stopped' : hasFailedSteps ? 'failed' : 'success',
+				statusAtStart: ticketResult.status,
+				explicitStatus
+			});
+			const statusToWrite = explicitStatus || (statusDecision.action === 'set' ? statusDecision.status : undefined);
+			this.logService.info(`[TicketWorkflowRuntime] Status after run of '${ticketResult.ticketId}': ${statusToWrite ? `'${statusToWrite}'` : 'not changed'} (${explicitStatus ? 'set by a step of the run' : statusDecision.reason})`);
+			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor, statusToWrite);
 
 			const totalDuration = Date.now() - startTime;
 			this.logService.info(`[TicketWorkflowRuntime] Finished running ticket '${ticketResult.ticketId}' in ${totalDuration}ms (status: ${executionStatus})`);
@@ -6402,9 +6419,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return fields;
 	}
 
-	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed', actor: ITicketChangeActor = { kind: 'Workflow' }, statusOverride?: string): Promise<void> {
-		// A Button Group decision with a target status sets the ticket status instead of "Completed" (CI-25)
-		const ticketStatus = statusOverride || executionStatus;
+	/**
+	 * Saves a ticket run's values and work log entry. `newStatus` is the status after the run (CI-58: a Button Group
+	 * target status or the "on successful / failed run" setting); undefined leaves the ticket's status unchanged.
+	 */
+	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed', actor: ITicketChangeActor = { kind: 'Workflow' }, newStatus?: string): Promise<void> {
+		const ticketStatus = newStatus;
 		try {
 			// Ensure Output field is populated in customMetadata even if schema didn't explicitly run an output step
 			if (finalOutput !== undefined && customMetadata['Output'] === undefined && customMetadata['output'] === undefined) {
@@ -6422,11 +6442,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				ticketId: ticket.ticketId,
 				entityCode: ticket.ticketId,
 				entityType: ticket.ticketType,
-				status: ticketStatus,
+				status: ticketStatus ?? ticket.status,
 				description: ticket.description
 			};
 			snapshot.customMetadata = customMetadata;
-			snapshot.status = ticketStatus;
+			if (ticketStatus) {
+				snapshot.status = ticketStatus;
+			}
 			await this.entityPersistenceService.saveSnapshot(snapshot);
 
 			// 2. Persist updated customMetadata & Status directly to .agents/ticket.md (and root ticket.md if present)
@@ -6454,7 +6476,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 						for (let i = 0; i < lines.length; i++) {
 							const line = lines[i];
-							if (/^\s*-\s+\*\*Status\*\*:/i.test(line) && !inSelfDefined) {
+							if (ticketStatus && /^\s*-\s+\*\*Status\*\*:/i.test(line) && !inSelfDefined) {
 								newLines.push(line.replace(/(^\s*-\s+\*\*Status\*\*:\s*)([^\r\n]*)/i, (_, p1) => `${p1}${ticketStatus}`));
 								continue;
 							}

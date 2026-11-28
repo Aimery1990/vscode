@@ -1089,6 +1089,13 @@ export interface ICustomModule {
 	updatedAt?: number;
 	fields?: ICustomField[];
 	statuses?: IStatusDefinition[];
+	/**
+	 * Status a ticket of this type moves to after a successful whole-ticket run (CI-58): unset means the workspace's
+	 * Done status, `__dont_change__` leaves the status alone. See `workflowsManager/common/runCompletionStatus.ts`.
+	 */
+	statusOnSuccessfulRun?: string;
+	/** Status after a failed whole-ticket run (CI-58): unset means the workspace's Blocked status. */
+	statusOnFailedRun?: string;
 }
 
 export const DEFAULT_CUSTOM_MODULE_ICON_ID = 'package';

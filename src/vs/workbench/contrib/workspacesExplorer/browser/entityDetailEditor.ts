@@ -54,6 +54,7 @@ import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { CustomModuleSchemaEditor } from '../../customModules/browser/customModuleSchemaEditor.js';
 import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHelpGuide.js';
+import { buildRunStatusSettingsControl } from '../../workflowsManager/browser/runStatusSettingControl.js';
 import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { SUB_WORKFLOW_TICKET_ICON, getSubWorkflowTicketVisual, isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 import { clashesWithBuiltInTicketType } from '../../customModules/common/templateNameClash.js';
@@ -5283,6 +5284,26 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	/** Ticket page sidebar: the ticket's labels as colored chips and an icon button to add / remove labels (UI-13). */
+	/**
+	 * Freestyle ticket sidebar: the "status after a run" settings (CI-58) of this ticket's own structure, saved in
+	 * `freestyle_schema.json` (templates hold them in the template designer).
+	 */
+	private _buildRunStatusSidebarRow(): HTMLElement {
+		const schema = this._freestyleSchema;
+		return $('div.sidebar-row.run-status-sidebar-row', undefined,
+			$('span.sidebar-label', { title: 'Status this ticket moves to when a whole-ticket run ends (stored in this ticket\'s structure)' }, 'AFTER A RUN'),
+			buildRunStatusSettingsControl({
+				lifecycle: this._workspaceStatuses,
+				templateStatuses: schema?.statuses,
+				success: schema?.statusOnSuccessfulRun,
+				failure: schema?.statusOnFailedRun,
+				onChange: (key, value) => {
+					void this._queueFreestyleStructureEdit(current => ({ next: { ...current, [key]: value } }));
+				}
+			})
+		);
+	}
+
 	private _buildLabelsSidebarRow(data: IParsedTicketData): HTMLElement {
 		const labels = parseTicketLabels(data.metadata?.[TICKET_LABELS_FIELD_KEY]);
 		const defs = this._workspaceStatuses?.labels || [];
@@ -24006,6 +24027,7 @@ ${interpolatedPrompt}`;
 						)
 					),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildLabelsSidebarRow(data)] : []),
+					...(this._isFreestyleStructureEditable() ? [this._buildRunStatusSidebarRow()] : []),
 					...(isAgent ? [
 						$('div.sidebar-row', undefined,
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },

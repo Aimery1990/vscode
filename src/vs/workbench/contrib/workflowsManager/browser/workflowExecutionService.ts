@@ -67,6 +67,7 @@ import {
 } from '../common/workflowExecutionModel.js';
 import { buildInitialRunStates, dropContextVariables, nodesClearedByRun, variablesProducedOnlyByClearedNodes } from '../common/workflowRunStates.js';
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
+import { applyStatusAfterWorkflowRun } from './runCompletionStatus.js';
 
 /** A component step of a node pipeline, plus runtime-only bookkeeping the engine writes onto it. */
 type IWorkflowStepComponent = ICustomField & {
@@ -4202,6 +4203,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 			}
 		} finally {
+			if (!run.isSubWorkflowRun && (run.status === 'completed' || run.status === 'failed')) {
+				// CI-58: the workflow ticket moves to its "on successful / failed run" status (Done / Blocked by default); a stopped run changes nothing
+				this._emitLog(run, 'info', await applyStatusAfterWorkflowRun({ fileService: this.fileService, workspacesExplorerService: this.workspacesExplorerService, customModulesService: this.customModulesService, logService: this.logService }, run.workflowUri, run.workflowName, run.startedAt, run.status === 'completed' ? 'success' : 'failed'));
+			}
 			await this._shutdownPythonKernel(run.runId);
 		}
 	}

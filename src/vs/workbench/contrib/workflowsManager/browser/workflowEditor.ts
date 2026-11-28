@@ -26,6 +26,9 @@ import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { openSubWorkflowLiveView, SubWorkflowCanvasEditorInput } from './subWorkflowLiveView.js';
 import { isOutlineBlankClickTarget, OutlineListOverscroll } from './outlineListOverscroll.js';
 import { URI } from '../../../../base/common/uri.js';
+import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
+import { findTemplateForType } from '../../workspacesExplorer/common/ticketStatusPicker.js';
+import { showRunStatusSettingsPopover } from './runStatusSettingControl.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
@@ -144,6 +147,10 @@ interface IFlowchartData {
 	links: IFlowchartLink[];
 	routingMode?: 'orthogonal' | 'curved';
 	pythonPath?: string;
+	/** Status of the workflow ticket after a successful run (CI-58); unset: the workspace's Done status. */
+	statusOnSuccessfulRun?: string;
+	/** Status of the workflow ticket after a failed run (CI-58); unset: the workspace's Blocked status. */
+	statusOnFailedRun?: string;
 }
 
 /**
@@ -204,6 +211,8 @@ interface IRawFlowchartFile {
 	edges?: unknown;
 	routingMode?: IFlowchartData['routingMode'];
 	pythonPath?: string;
+	statusOnSuccessfulRun?: unknown;
+	statusOnFailedRun?: unknown;
 }
 
 /**
@@ -1035,7 +1044,9 @@ export class WorkflowEditor extends EditorPane {
 					nodes,
 					links,
 					routingMode: parsed?.routingMode || 'orthogonal',
-					pythonPath: parsed?.pythonPath || undefined
+					pythonPath: parsed?.pythonPath || undefined,
+					...(typeof parsed?.statusOnSuccessfulRun === 'string' ? { statusOnSuccessfulRun: parsed.statusOnSuccessfulRun } : {}),
+					...(typeof parsed?.statusOnFailedRun === 'string' ? { statusOnFailedRun: parsed.statusOnFailedRun } : {})
 				};
 
 				if (this._data.routingMode) {
@@ -4453,6 +4464,34 @@ export class WorkflowEditor extends EditorPane {
 		this._notificationService.info(localize('workflowResetInfo', 'All workflow execution data reset to IDLE.'));
 	}
 
+	/** The workflow's "status after a run" settings (CI-58), saved in workflow_flowchart.json. */
+	private async _openRunStatusSettings(anchor: HTMLElement): Promise<void> {
+		const workflowUri = this._workflowUri;
+		let lifecycle;
+		let templateStatuses;
+		if (workflowUri) {
+			try {
+				const explorer = this._instantiationService.invokeFunction(accessor => accessor.get(IWorkspacesExplorerService));
+				lifecycle = await explorer.getWorkspaceStatuses(workflowUri);
+				let wsRoot: URI | undefined;
+				try { wsRoot = await explorer.findWorkspaceRootUri(workflowUri); } catch { wsRoot = undefined; }
+				templateStatuses = findTemplateForType(await this._customModulesService.getCustomModules(wsRoot), 'workflow')?.statuses;
+			} catch {
+				// no lifecycle: the dropdowns list the template statuses only
+			}
+		}
+		showRunStatusSettingsPopover(anchor, 'Status After Run', {
+			lifecycle,
+			templateStatuses,
+			success: this._data.statusOnSuccessfulRun,
+			failure: this._data.statusOnFailedRun,
+			onChange: (key, value) => {
+				this._data[key] = value;
+				this._saveFlowchartData();
+			}
+		});
+	}
+
 	private _renderToolbar(parent: HTMLElement): void {
 		clearNode(parent);
 		// Items that get the instant floating tooltip below (`.workflow-toolbar-item` / `.workflow-format-btn`), in document order.
@@ -4672,6 +4711,24 @@ export class WorkflowEditor extends EditorPane {
 		}
 		resetBtn.onclick = () => {
 			this._handleResetWorkflowExecution(parent);
+		};
+
+		// 7. Status after a run (CI-58): the workflow ticket's status after a successful / failed run
+		const afterRunBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(afterRunBtn);
+		afterRunBtn.setAttribute('data-role', 'workflow-after-run-status-btn');
+		afterRunBtn.setAttribute('role', 'button');
+		afterRunBtn.setAttribute('aria-label', 'Status After Run');
+		afterRunBtn.title = 'Status After Run: the status this workflow ticket moves to when a run succeeds (Done by default) or fails (Blocked by default)';
+		append(afterRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.tasklist)));
+		if (!this._isToolbarCompact) {
+			append(afterRunBtn, $('.item-label')).textContent = 'After Run';
+		}
+		afterRunBtn.onmousedown = (e) => {
+			e.stopPropagation();
+		};
+		afterRunBtn.onclick = () => {
+			void this._openRunStatusSettings(afterRunBtn);
 		};
 
 		if (this._isToolbarCompact) {
