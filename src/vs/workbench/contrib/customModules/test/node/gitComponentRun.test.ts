@@ -66,10 +66,17 @@ suite('git component (real git, temp repository)', function () {
 		assert.ok(commit.ok, commit.stderr);
 		assert.match(commit.commit, /^[0-9a-f]{7,}$/);
 
+		// CI-63: commit never stages, even for an old card with gitAddAll; staging is its own add card (-A)
 		fs.writeFileSync(join(repo, 'b.txt'), 'b\n');
-		const commitAll = await run({ gitCommand: 'commit', gitMessage: 'Second', gitAddAll: true });
+		const commitOld = await run({ gitCommand: 'commit', gitMessage: 'Second', gitAddAll: true });
+		assert.strictEqual(commitOld.ok, false, 'b.txt is not staged, so git commit has nothing to commit');
+		assert.strictEqual(commitOld.command, 'git commit -m Second');
+		const addAll = await run({ gitCommand: 'add', gitAll: true });
+		assert.ok(addAll.ok, addAll.stderr);
+		assert.strictEqual(addAll.command, 'git add -A');
+		const commitAll = await run({ gitCommand: 'commit', gitMessage: 'Second' });
 		assert.ok(commitAll.ok, commitAll.stderr);
-		assert.strictEqual(commitAll.command, `git add -A && git commit -m Second`);
+		assert.strictEqual(commitAll.command, 'git commit -m Second');
 
 		const log = await run({ gitCommand: 'log', gitLogCount: 5 });
 		assert.ok(log.ok, log.stderr);
@@ -96,7 +103,7 @@ suite('git component (real git, temp repository)', function () {
 		assert.notStrictEqual(notRepo.exitCode, 0);
 		assert.match(notRepo.stderr, /not a git repository/i);
 
-		const missing = await runGitPlan({ command: 'status', steps: [['status']], cwd: join(root, 'nope'), repoPath: join(root, 'nope') }, exec);
+		const missing = await runGitPlan({ command: 'status', args: ['status'], cwd: join(root, 'nope'), repoPath: join(root, 'nope') }, exec);
 		assert.strictEqual(missing.ok, false);
 		assert.strictEqual(missing.exitCode, -1);
 		assert.match(missing.error ?? '', /does not exist/);

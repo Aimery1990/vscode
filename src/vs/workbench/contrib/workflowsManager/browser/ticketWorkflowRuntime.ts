@@ -49,7 +49,7 @@ import { env as processEnv } from '../../../../base/common/process.js';
 import { IHumanDecisionContext, IHumanDecisionService, normalizeDecisionButtons, publishButtonGroupOutputs, resolveWaitingPrompt } from '../common/humanDecision.js';
 import { IShellComponentConfig, ShellPlanResult, buildShellPlan, buildShellTicketValue, effectiveShellConfig, getShellConfirmationKey, isShellConfigConfirmed, isShellTicketValue, normalizeShellTicketValue, pickShellConfig, publishShellOutputs, runShellPlan, shellFailureResult, shellMainOutput, shellNeedsConfirmationMessage, shellTicketValueOutputText, SHELL_MAX_OUTPUT_BYTES } from '../../customModules/common/shellComponent.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
-import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
+import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitLegacyAddAllNotice, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
 import { outputVariableNameOf, publishOutputVariableAliases } from '../../customModules/common/outputVariable.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -2586,7 +2586,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const gitRes = await this.executeGitComponent(gitConfig, { contextVariables, baseDir: wsUri.fsPath });
 							customMetadata[fieldLabel] = JSON.stringify(buildGitTicketValue(ticketGit, gitRes));
 							stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes, [outputVariableNameOf(field, fieldLabel)]);
-							stepDetails = { ...gitRes };
+							// CI-63: an older commit card with "add all first" now only commits; the run details say so
+							const gitNotice = gitLegacyAddAllNotice(gitConfig);
+							stepDetails = gitNotice ? { ...gitRes, notice: gitNotice } : { ...gitRes };
 							if (!gitRes.ok) {
 								throw new Error(gitRes.error ? `${gitRes.command || `git ${gitRes.gitCommand}`}: ${gitRes.error}${gitRes.stderr && gitRes.stderr !== gitRes.error ? `\n${gitRes.stderr.slice(0, 2000)}` : ''}` : `git failed with exit code ${gitRes.exitCode}`);
 							}
@@ -4148,8 +4150,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const gitRes = await this.executeGitComponent(gitConfig, { contextVariables, baseDir: workUri.fsPath });
 					field.gitLastResult = buildGitTicketValue(undefined, gitRes).gitLastResult;
 					stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes, [outputVariableNameOf(field, fieldLabel)]);
-					stepDetails = { ...gitRes };
-					field.lastExecutionLog = `>>> ${gitRes.command || `git ${gitRes.gitCommand}`}  (exit ${gitRes.exitCode}, ${gitRes.durationMs}ms${gitRes.branch ? `, branch ${gitRes.branch}` : ''})\n${gitMainOutput(gitRes)}`;
+					// CI-63: an older commit node with "add all first" now only commits; the node log says so
+					const gitNotice = gitLegacyAddAllNotice(gitConfig);
+					stepDetails = gitNotice ? { ...gitRes, notice: gitNotice } : { ...gitRes };
+					field.lastExecutionLog = `${gitNotice ? `Note: ${gitNotice}\n` : ''}>>> ${gitRes.command || `git ${gitRes.gitCommand}`}  (exit ${gitRes.exitCode}, ${gitRes.durationMs}ms${gitRes.branch ? `, branch ${gitRes.branch}` : ''})\n${gitMainOutput(gitRes)}`;
 					field.lastExecutionOutput = stepOutput;
 					field.lastExecutionExitCode = gitRes.exitCode;
 					if (!gitRes.ok) {
@@ -6569,6 +6573,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			homeDir = (await pathService.userHome({ preferLocal: true })).fsPath;
 		} catch {
 			homeDir = processEnv['HOME'] || processEnv['USERPROFILE'] || undefined;
+		}
+		const legacyNotice = gitLegacyAddAllNotice(config);
+		if (legacyNotice) {
+			this.logService.warn(`[TicketWorkflowRuntime] git commit (CI-63): ${legacyNotice} Only git commit runs.`);
 		}
 		const built = buildGitPlan(config, { resolve, baseDir: options.baseDir, homeDir });
 		if (!built.ok) {

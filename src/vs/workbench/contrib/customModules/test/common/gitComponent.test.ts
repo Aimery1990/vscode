@@ -8,19 +8,20 @@ import { IGitRunResult } from '../../../entityPersistence/common/entityPersisten
 import { validateComponentConfig } from '../../common/componentConfigSchema.js';
 import { getComponentSpec } from '../../common/componentRegistry.js';
 import {
-	GIT_COMMANDS, GIT_COMMAND_INFO, GIT_OUTPUT_FIELDS, GIT_STORED_OUTPUT_MAX_BYTES, IGitComponentConfig, IGitStepResult, buildGitPlan, buildGitTicketValue,
-	effectiveGitConfig, formatGitCommandLine, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue,
-	publishGitOutputs, runGitPlan, splitGitArgs, toStoredGitResult
+	GIT_COMMANDS, GIT_COMMAND_INFO, GIT_LEGACY_ADD_ALL_NOTICE, GIT_OUTPUT_FIELDS, GIT_PARAM_INFO, GIT_STORED_OUTPUT_MAX_BYTES, IGitComponentConfig, IGitStepResult, buildGitPlan, buildGitTicketValue,
+	effectiveGitConfig, formatGitCommandLine, gitLegacyAddAllNotice, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue,
+	pickGitConfig, publishGitOutputs, runGitPlan, splitGitArgs, toStoredGitResult
 } from '../../common/gitComponent.js';
 
 const VARS: Record<string, string> = { repo: '/work/my repo', msg: 'Fix "quotes" & $HOME `x`', br: 'feature/x', file: 'a file.txt', evil: '--force' };
 const resolve = (text: string) => text.replace(/\{([^{}]+)\}/g, (m, k) => VARS[k] ?? m);
 const opts = { resolve, baseDir: '/ws', homeDir: '/home/u' };
 
-function steps(config: IGitComponentConfig): readonly (readonly string[])[] {
+/** The ONE git invocation (argv after `git`) a config maps to (CI-63: a plan has no second command). */
+function argv(config: IGitComponentConfig): readonly string[] {
 	const res = buildGitPlan(config, opts);
 	assert.ok(res.ok, res.ok ? '' : res.error);
-	return res.plan.steps;
+	return res.plan.args;
 }
 
 function error(config: IGitComponentConfig): string {
@@ -38,32 +39,31 @@ suite('gitComponent', () => {
 
 	test('argv per command', () => {
 		const repo = { gitRepoPath: '/r' };
-		assert.deepStrictEqual(steps({ ...repo }), [['status']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'status' }), [['status']]);
-		assert.deepStrictEqual(steps({ gitCommand: 'clone', gitRemoteUrl: 'git@github.com:org/repo.git' }), [['clone', '--', 'git@github.com:org/repo.git', '/ws/repo']]);
-		assert.deepStrictEqual(steps({ gitCommand: 'clone', gitRemoteUrl: 'https://h/x.git', gitCloneDir: '~/code/x', gitBranch: 'dev' }), [['clone', '--branch', 'dev', '--', 'https://h/x.git', '/home/u/code/x']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'checkout', gitBranch: 'dev' }), [['checkout', 'dev']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'checkout', gitBranch: 'dev', gitCreateBranch: true }), [['checkout', '-b', 'dev']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'pull' }), [['pull']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'pull', gitBranch: 'main' }), [['pull', 'origin', 'main']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'pull', gitRemote: 'up', gitBranch: 'main' }), [['pull', 'up', 'main']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'fetch' }), [['fetch']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'fetch', gitRemote: 'origin' }), [['fetch', 'origin']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'add' }), [['add', '--', '.']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'add', gitPaths: 'src "my dir/x.ts" {file}' }), [['add', '--', 'src', 'my dir/x.ts', 'a file.txt']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'commit', gitMessage: 'Msg' }), [['commit', '-m', 'Msg']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'commit', gitMessage: 'Msg', gitAddAll: true }), [['add', '-A'], ['commit', '-m', 'Msg']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'push' }), [['push']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'push', gitSetUpstream: true }), [['push', '--set-upstream', 'origin', 'HEAD']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'push', gitBranch: 'dev' }), [['push', 'origin', 'dev']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'log' })[0].slice(0, 3), ['log', '-n', '10']);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'log', gitLogCount: '3' })[0].slice(0, 3), ['log', '-n', '3']);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'diff' }), [['diff']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'diff', gitDiffTarget: 'HEAD~1 --stat' }), [['diff', 'HEAD~1', '--stat']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'branch' }), [['branch', '-a']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'branch', gitBranch: 'topic' }), [['branch', 'topic']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'custom', gitCustomArgs: 'git stash list' }), [['stash', 'list']]);
-		assert.deepStrictEqual(steps({ ...repo, gitCommand: 'custom', gitCustomArgs: 'tag -a v1 -m "Release 1"' }), [['tag', '-a', 'v1', '-m', 'Release 1']]);
+		assert.deepStrictEqual(argv({ ...repo }), ['status']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'status' }), ['status']);
+		assert.deepStrictEqual(argv({ gitCommand: 'clone', gitRemoteUrl: 'git@github.com:org/repo.git' }), ['clone', '--', 'git@github.com:org/repo.git', '/ws/repo']);
+		assert.deepStrictEqual(argv({ gitCommand: 'clone', gitRemoteUrl: 'https://h/x.git', gitCloneDir: '~/code/x', gitBranch: 'dev' }), ['clone', '--branch', 'dev', '--', 'https://h/x.git', '/home/u/code/x']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'checkout', gitBranch: 'dev' }), ['checkout', 'dev']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'checkout', gitBranch: 'dev', gitCreateBranch: true }), ['checkout', '-b', 'dev']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'pull' }), ['pull']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'pull', gitBranch: 'main' }), ['pull', 'origin', 'main']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'pull', gitRemote: 'up', gitBranch: 'main' }), ['pull', 'up', 'main']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'fetch' }), ['fetch']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'fetch', gitRemote: 'origin' }), ['fetch', 'origin']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add' }), ['add', '--', '.']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add', gitPaths: 'src "my dir/x.ts" {file}' }), ['add', '--', 'src', 'my dir/x.ts', 'a file.txt']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'commit', gitMessage: 'Msg' }), ['commit', '-m', 'Msg']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'push' }), ['push']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'push', gitSetUpstream: true }), ['push', '--set-upstream', 'origin', 'HEAD']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'push', gitBranch: 'dev' }), ['push', 'origin', 'dev']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'log' }).slice(0, 3), ['log', '-n', '10']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'log', gitLogCount: '3' }).slice(0, 3), ['log', '-n', '3']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'diff' }), ['diff']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'diff', gitDiffTarget: 'HEAD~1 --stat' }), ['diff', 'HEAD~1', '--stat']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'branch' }), ['branch', '-a']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'branch', gitBranch: 'topic' }), ['branch', 'topic']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'custom', gitCustomArgs: 'git stash list' }), ['stash', 'list']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'custom', gitCustomArgs: 'tag -a v1 -m "Release 1"' }), ['tag', '-a', 'v1', '-m', 'Release 1']);
 		// Every command has an info entry and builds with a minimal config
 		for (const cmd of GIT_COMMANDS) {
 			assert.ok(GIT_COMMAND_INFO[cmd].params.length > 0, cmd);
@@ -74,8 +74,8 @@ suite('gitComponent', () => {
 		const res = buildGitPlan({ gitCommand: 'commit', gitRepoPath: '{repo}', gitMessage: '{msg}' }, opts);
 		assert.ok(res.ok);
 		assert.strictEqual(res.plan.cwd, '/work/my repo');
-		assert.deepStrictEqual(res.plan.steps, [['commit', '-m', 'Fix "quotes" & $HOME `x`']]);
-		assert.deepStrictEqual(steps({ gitRepoPath: '/r', gitCommand: 'custom', gitCustomArgs: 'checkout {br}' }), [['checkout', 'feature/x']]);
+		assert.deepStrictEqual(res.plan.args, ['commit', '-m', 'Fix "quotes" & $HOME `x`']);
+		assert.deepStrictEqual(argv({ gitRepoPath: '/r', gitCommand: 'custom', gitCustomArgs: 'checkout {br}' }), ['checkout', 'feature/x']);
 		// Relative paths resolve against the workspace folder; ~ against home
 		assert.strictEqual((buildGitPlan({ gitRepoPath: 'sub/repo' }, opts) as { plan: { cwd: string } }).plan.cwd, '/ws/sub/repo');
 		assert.strictEqual((buildGitPlan({ gitRepoPath: '~/r' }, opts) as { plan: { cwd: string } }).plan.cwd, '/home/u/r');
@@ -99,11 +99,11 @@ suite('gitComponent', () => {
 	test('tokenizer and display quoting', () => {
 		assert.deepStrictEqual(splitGitArgs(`a  'b c' "d \\"e\\"" f\\ g ''`).args, ['a', 'b c', 'd "e"', 'f g', '']);
 		assert.ok(splitGitArgs(`'x`).error);
-		assert.strictEqual(formatGitCommandLine([['add', '-A'], ['commit', '-m', `it's done`]]), `git add -A && git commit -m 'it'\\''s done'`);
-		assert.strictEqual(formatGitCommandLine([['log', '-n', '10']]), 'git log -n 10');
+		assert.strictEqual(formatGitCommandLine(['commit', '-m', `it's done`]), `git commit -m 'it'\\''s done'`);
+		assert.strictEqual(formatGitCommandLine(['log', '-n', '10']), 'git log -n 10');
 	});
 
-	test('runGitPlan: stops at the first failure and reads branch / commit', async () => {
+	test('runGitPlan: runs the one command, then only reads branch / commit', async () => {
 		const calls: string[] = [];
 		const exec = async (args: readonly string[]): Promise<IGitStepResult> => {
 			calls.push(args.join(' '));
@@ -118,16 +118,94 @@ suite('gitComponent', () => {
 			}
 			return { exitCode: 0, stdout: '', stderr: '', durationMs: 1 };
 		};
+		// An old commit card with gitAddAll: true still runs ONLY git commit (CI-63)
 		const built = buildGitPlan({ gitRepoPath: '/r', gitCommand: 'commit', gitMessage: 'm', gitAddAll: true }, opts);
 		assert.ok(built.ok);
 		const res = await runGitPlan(built.plan, exec);
-		assert.deepStrictEqual(calls, ['add -A', 'commit -m m', 'rev-parse --abbrev-ref HEAD', 'rev-parse --short HEAD']);
+		assert.deepStrictEqual(calls, ['commit -m m', 'rev-parse --abbrev-ref HEAD', 'rev-parse --short HEAD']);
 		assert.strictEqual(res.ok, false);
 		assert.strictEqual(res.exitCode, 1);
 		assert.strictEqual(res.branch, 'main');
 		assert.strictEqual(res.commit, 'abc1234');
-		assert.strictEqual(res.command, 'git add -A && git commit -m m');
+		assert.strictEqual(res.command, 'git commit -m m');
 		assert.strictEqual(gitMainOutput(res), 'nothing to commit');
+	});
+
+	test('CI-63: commit never stages; add is its own command (paths or -A)', () => {
+		const repo = { gitRepoPath: '/r' };
+		// commit: exactly `git commit -m <message>`, with or without the deprecated option
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'commit', gitMessage: 'Msg' }), ['commit', '-m', 'Msg']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'commit', gitMessage: 'Msg', gitAddAll: true }), ['commit', '-m', 'Msg']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'commit', gitMessage: 'Msg', gitAll: true }), ['commit', '-m', 'Msg']);
+		assert.ok(!GIT_COMMAND_INFO.commit.params.some(p => p === 'gitAll' || String(p) === 'gitAddAll'), 'commit offers no add option');
+		assert.ok(!Object.values(GIT_PARAM_INFO).some(info => /add -A/.test(info.label) && !GIT_COMMAND_INFO.add.params.includes(info.key)), 'no add-all option outside add');
+		// add: paths (default .) or all (-A)
+		assert.deepStrictEqual(GIT_COMMAND_INFO.add.params, ['gitRepoPath', 'gitPaths', 'gitAll']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add' }), ['add', '--', '.']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add', gitPaths: 'src docs' }), ['add', '--', 'src', 'docs']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add', gitAll: true }), ['add', '-A']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add', gitAll: 'true' as unknown as boolean, gitPaths: 'src' }), ['add', '-A']);
+		assert.deepStrictEqual(argv({ ...repo, gitCommand: 'add', gitAll: false, gitPaths: 'src' }), ['add', '--', 'src']);
+		// display: one command, never chained
+		const shown = (config: IGitComponentConfig) => formatGitCommandLine(argv(config));
+		assert.strictEqual(shown({ ...repo, gitCommand: 'commit', gitMessage: 'First Git 测试', gitAddAll: true }), `git commit -m 'First Git 测试'`);
+		assert.strictEqual(shown({ ...repo, gitCommand: 'add', gitAll: true }), 'git add -A');
+	});
+
+	test('CI-63 audit: every command maps to exactly one native git invocation of the same name', () => {
+		const repo = { gitRepoPath: '/r' };
+		const maximal: Record<string, IGitComponentConfig> = {
+			status: { ...repo },
+			clone: { gitRemoteUrl: 'https://h/x.git', gitCloneDir: '/c/x', gitBranch: 'dev' },
+			checkout: { ...repo, gitBranch: 'dev', gitCreateBranch: true },
+			pull: { ...repo, gitRemote: 'origin', gitBranch: 'main' },
+			fetch: { ...repo, gitRemote: 'origin' },
+			add: { ...repo, gitAll: true, gitPaths: 'x' },
+			commit: { ...repo, gitMessage: 'm', gitAddAll: true, gitAll: true },
+			push: { ...repo, gitSetUpstream: true, gitBranch: 'dev' },
+			log: { ...repo, gitLogCount: 3 },
+			diff: { ...repo, gitDiffTarget: 'HEAD~1' },
+			branch: { ...repo, gitBranch: 'topic' },
+			custom: { ...repo, gitCustomArgs: 'stash list' }
+		};
+		for (const cmd of GIT_COMMANDS) {
+			const res = buildGitPlan({ gitCommand: cmd, ...maximal[cmd] }, opts);
+			assert.ok(res.ok, cmd);
+			const args = res.plan.args;
+			assert.ok(args.length > 0 && args.every(a => typeof a === 'string'), `${cmd}: a flat argv (one command)`);
+			if (cmd !== 'custom') {
+				assert.strictEqual(args[0], cmd, `${cmd}: runs git ${cmd}`);
+			}
+			assert.ok(!args.includes('&&') && !args.includes(';'), `${cmd}: no chaining`);
+			assert.ok(!formatGitCommandLine(args).includes(' && '), cmd);
+		}
+	});
+
+	test('CI-63 migration: old data with gitAddAll parses, keeps the flag and shows a one-time notice', () => {
+		// The fixture of ANYAG-0118 as stored before CI-63
+		const legacyTemplate = JSON.parse('{"id":"commit_step","label":"Commit Step","type":"git","gitCommand":"commit","gitRepoPath":"/r","gitMessage":"First {Title}","gitAddAll":true}');
+		const template = pickGitConfig(legacyTemplate);
+		assert.strictEqual(template.gitAddAll, true, 'kept (not silently dropped)');
+		assert.strictEqual(gitLegacyAddAllNotice(template), GIT_LEGACY_ADD_ALL_NOTICE);
+		assert.match(GIT_LEGACY_ADD_ALL_NOTICE, /used to run git add -A before commit\. Add an 'add' card before it/);
+		// A stored ticket value (text) with the old option parses without errors
+		const ticketValue = normalizeGitTicketValue('{"gitCommand":"commit","gitAddAll":true,"gitLastResult":{"ok":true,"exitCode":0,"stdout":"","stderr":"","command":"git add -A && git commit -m \'First \'","gitCommand":"commit","repoPath":"/r","branch":"main","commit":"54822f8","durationMs":35}}');
+		assert.ok(ticketValue);
+		assert.strictEqual(ticketValue.gitAddAll, true);
+		assert.strictEqual(ticketValue.gitLastResult?.commit, '54822f8');
+		assert.ok(isGitTicketValue({ gitAddAll: true }));
+		// The notice applies to commit cards only, and only while the option is true
+		assert.strictEqual(gitLegacyAddAllNotice({ gitCommand: 'commit', gitAddAll: 'true' as unknown as boolean }), GIT_LEGACY_ADD_ALL_NOTICE);
+		assert.strictEqual(gitLegacyAddAllNotice({ gitCommand: 'commit' }), undefined);
+		assert.strictEqual(gitLegacyAddAllNotice({ gitCommand: 'add', gitAddAll: true }), undefined);
+		assert.strictEqual(gitLegacyAddAllNotice({ gitCommand: 'commit', gitAddAll: false }), undefined);
+		// Dismissing stores false on the ticket, which wins over the template's true (one-time)
+		assert.strictEqual(gitLegacyAddAllNotice(effectiveGitConfig(template, { gitAddAll: false })), undefined);
+		assert.strictEqual(gitLegacyAddAllNotice(effectiveGitConfig(template, {})), GIT_LEGACY_ADD_ALL_NOTICE);
+		// The schema validator accepts the old property (state: kept, not writable by AI)
+		assert.deepStrictEqual(validateComponentConfig('git', { gitCommand: 'commit', gitRepoPath: '/r', gitMessage: 'm', gitAddAll: true }).map(e => e.code), []);
+		assert.deepStrictEqual(validateComponentConfig('git', { gitAddAll: true, gitCommand: 'commit', gitRepoPath: '/r', gitMessage: 'm' }, { writableRoles: ['config'] }).map(e => `${e.code}:${e.prop}`), ['notWritable:gitAddAll']);
+		assert.deepStrictEqual(validateComponentConfig('git', { gitCommand: 'add', gitRepoPath: '/r', gitAll: true }, { writableRoles: ['config'] }), []);
 	});
 
 	test('outputs: main text and structured fields', () => {

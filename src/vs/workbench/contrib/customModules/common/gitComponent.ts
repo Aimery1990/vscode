@@ -12,6 +12,9 @@ import { IGitRunResult } from '../../entityPersistence/common/entityPersistence.
  *
  * Safety: arguments are argv arrays (never a shell string); options that destroy work (push --force, reset --hard)
  * are not offered; values used as refs / remotes may not start with '-'; paths and URLs follow `--`.
+ *
+ * One card = one native git command (CI-63): every command builds exactly ONE git invocation, never a chain
+ * (no `git add -A && git commit`, no implicit extra steps). To stage and commit, use an `add` card and a `commit` card.
  */
 
 export const GIT_COMMANDS = ['status', 'clone', 'checkout', 'pull', 'fetch', 'add', 'commit', 'push', 'log', 'diff', 'branch', 'custom'] as const;
@@ -37,6 +40,13 @@ export interface IGitComponentConfig {
 	gitCreateBranch?: boolean;
 	gitPaths?: string;
 	gitMessage?: string;
+	/** add: stage all changes (`git add -A`, Paths are not used). */
+	gitAll?: boolean;
+	/**
+	 * Deprecated (CI-63): older commit cards ran `git add -A` before committing when this was true. It is still parsed
+	 * and kept (so old data loads unchanged) but never run; a commit card that has it shows a one-time notice
+	 * (gitLegacyAddAllNotice) until the person dismisses it, which stores false.
+	 */
 	gitAddAll?: boolean;
 	gitLogCount?: number | string;
 	gitDiffTarget?: string;
@@ -48,7 +58,7 @@ export type GitConfigKey = keyof IGitComponentConfig;
 
 export const GIT_CONFIG_KEYS: readonly GitConfigKey[] = [
 	'gitCommand', 'gitRepoPath', 'gitRemoteUrl', 'gitCloneDir', 'gitBranch', 'gitRemote', 'gitCreateBranch', 'gitPaths',
-	'gitMessage', 'gitAddAll', 'gitLogCount', 'gitDiffTarget', 'gitSetUpstream', 'gitCustomArgs'
+	'gitMessage', 'gitAll', 'gitAddAll', 'gitLogCount', 'gitDiffTarget', 'gitSetUpstream', 'gitCustomArgs'
 ];
 
 /** Ticket value of a git component: the ticket's own settings (they win over the template) plus the last result. */
@@ -56,15 +66,18 @@ export interface IGitTicketValue extends IGitComponentConfig {
 	gitLastResult?: IGitRunResult;
 }
 
+/** Settings shown as parameters of a command (the command itself and the deprecated gitAddAll are not). */
+export type GitParamKey = Exclude<GitConfigKey, 'gitCommand' | 'gitAddAll'>;
+
 export interface IGitParamInfo {
-	readonly key: GitConfigKey;
+	readonly key: GitParamKey;
 	readonly label: string;
 	readonly kind: 'text' | 'multiline' | 'boolean' | 'number';
 	readonly placeholder?: string;
 	readonly hint?: string;
 }
 
-export const GIT_PARAM_INFO: Readonly<Record<Exclude<GitConfigKey, 'gitCommand'>, IGitParamInfo>> = {
+export const GIT_PARAM_INFO: Readonly<Record<GitParamKey, IGitParamInfo>> = {
 	gitRepoPath: { key: 'gitRepoPath', label: 'Repository path', kind: 'text', placeholder: '/path/to/repo or {repo_path}', hint: 'Working directory. Absolute, ~/..., or relative to the workspace folder.' },
 	gitRemoteUrl: { key: 'gitRemoteUrl', label: 'Repository URL', kind: 'text', placeholder: 'git@github.com:org/repo.git' },
 	gitCloneDir: { key: 'gitCloneDir', label: 'Target directory', kind: 'text', placeholder: '~/code/repo (default: repo name in the workspace folder)' },
@@ -73,7 +86,7 @@ export const GIT_PARAM_INFO: Readonly<Record<Exclude<GitConfigKey, 'gitCommand'>
 	gitCreateBranch: { key: 'gitCreateBranch', label: 'Create new branch (-b)', kind: 'boolean' },
 	gitPaths: { key: 'gitPaths', label: 'Paths', kind: 'text', placeholder: '. (quote paths with spaces: "my file.txt")' },
 	gitMessage: { key: 'gitMessage', label: 'Commit message', kind: 'multiline', placeholder: 'Describe the change ({variables} allowed)' },
-	gitAddAll: { key: 'gitAddAll', label: 'Add all changes first (git add -A)', kind: 'boolean' },
+	gitAll: { key: 'gitAll', label: 'All changes (-A)', kind: 'boolean', hint: 'Runs git add -A (stages every change, including deletions); Paths are not used.' },
 	gitLogCount: { key: 'gitLogCount', label: 'Number of commits', kind: 'number', placeholder: String(GIT_DEFAULT_LOG_COUNT) },
 	gitDiffTarget: { key: 'gitDiffTarget', label: 'Target / paths (optional)', kind: 'text', placeholder: 'e.g. HEAD~1 or --stat or src/' },
 	gitSetUpstream: { key: 'gitSetUpstream', label: 'Set upstream (-u)', kind: 'boolean' },
@@ -84,7 +97,7 @@ export interface IGitCommandInfo {
 	readonly label: string;
 	readonly description: string;
 	/** Parameters shown for the command, in order. */
-	readonly params: readonly Exclude<GitConfigKey, 'gitCommand'>[];
+	readonly params: readonly GitParamKey[];
 }
 
 export const GIT_COMMAND_INFO: Readonly<Record<GitCommand, IGitCommandInfo>> = {
@@ -93,8 +106,8 @@ export const GIT_COMMAND_INFO: Readonly<Record<GitCommand, IGitCommandInfo>> = {
 	checkout: { label: 'checkout', description: 'Switch to a branch (optionally create it)', params: ['gitRepoPath', 'gitBranch', 'gitCreateBranch'] },
 	pull: { label: 'pull', description: 'Fetch and merge from a remote', params: ['gitRepoPath', 'gitRemote', 'gitBranch'] },
 	fetch: { label: 'fetch', description: 'Download objects and refs from a remote', params: ['gitRepoPath', 'gitRemote'] },
-	add: { label: 'add', description: 'Stage file contents', params: ['gitRepoPath', 'gitPaths'] },
-	commit: { label: 'commit', description: 'Record staged changes', params: ['gitRepoPath', 'gitMessage', 'gitAddAll'] },
+	add: { label: 'add', description: 'Stage file contents', params: ['gitRepoPath', 'gitPaths', 'gitAll'] },
+	commit: { label: 'commit', description: 'Record staged changes', params: ['gitRepoPath', 'gitMessage'] },
 	push: { label: 'push', description: 'Update the remote branch (never forced)', params: ['gitRepoPath', 'gitRemote', 'gitBranch', 'gitSetUpstream'] },
 	log: { label: 'log', description: 'Show recent commits', params: ['gitRepoPath', 'gitLogCount'] },
 	diff: { label: 'diff', description: 'Show changes', params: ['gitRepoPath', 'gitDiffTarget'] },
@@ -142,6 +155,18 @@ export function gitCommandOf(config: IGitComponentConfig): GitCommand {
 
 function isTrue(value: unknown): boolean {
 	return value === true || value === 'true';
+}
+
+/** Text of the one-time notice of a commit card stored with the deprecated "add all first" option (CI-63). */
+export const GIT_LEGACY_ADD_ALL_NOTICE = 'This card used to run git add -A before commit. Add an \'add\' card before it if you still need that.';
+
+/**
+ * The notice to show for a configuration (template settings overlaid with the ticket's, see effectiveGitConfig) that
+ * still has the deprecated gitAddAll = true on a commit card, or undefined. The option is never run; dismissing the
+ * notice stores gitAddAll = false (which also wins over a template's true on a ticket).
+ */
+export function gitLegacyAddAllNotice(config: IGitComponentConfig): string | undefined {
+	return gitCommandOf(config) === 'commit' && isTrue(config.gitAddAll) ? GIT_LEGACY_ADD_ALL_NOTICE : undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -212,9 +237,9 @@ export function quoteGitArg(arg: string): string {
 	return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Display text of the git invocations of a run, e.g. `git add -A && git commit -m 'Fix'`. */
-export function formatGitCommandLine(steps: readonly (readonly string[])[]): string {
-	return steps.map(step => ['git', ...step.map(quoteGitArg)].join(' ')).join(' && ');
+/** Display text of the git invocation of a run, e.g. `git commit -m 'Fix'`. */
+export function formatGitCommandLine(args: readonly string[]): string {
+	return ['git', ...args.map(quoteGitArg)].join(' ');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -223,9 +248,9 @@ export function formatGitCommandLine(steps: readonly (readonly string[])[]): str
 
 export interface IGitPlan {
 	readonly command: GitCommand;
-	/** git argument arrays, run in order (stop at the first failure). */
-	readonly steps: readonly (readonly string[])[];
-	/** Working directory of the steps. */
+	/** Arguments after `git` of the ONE git invocation the command maps to (CI-63: never a chain of commands). */
+	readonly args: readonly string[];
+	/** Working directory of the invocation. */
 	readonly cwd: string;
 	/** Repository the branch / commit are read from afterwards (the clone target for clone). */
 	readonly repoPath: string;
@@ -246,7 +271,7 @@ const UNRESOLVED_VARIABLE = /\{\{?[^{}\s]+\}?\}/;
 
 class GitPlanError extends Error { }
 
-/** Builds the git argv arrays of a configuration (variables resolved, paths made absolute, values checked). */
+/** Builds the git argv of a configuration (variables resolved, paths made absolute, values checked). */
 export function buildGitPlan(config: IGitComponentConfig, options: IGitBuildOptions): GitPlanResult {
 	const command = gitCommandOf(config);
 	try {
@@ -272,7 +297,7 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 		const value = text(key, fallback).trim();
 		const unresolved = UNRESOLVED_VARIABLE.exec(value);
 		if (unresolved) {
-			throw new GitPlanError(`${GIT_PARAM_INFO[key as Exclude<GitConfigKey, 'gitCommand'>]?.label ?? key}: variable ${unresolved[0]} has no value.`);
+			throw new GitPlanError(`${GIT_PARAM_INFO[key as GitParamKey]?.label ?? key}: variable ${unresolved[0]} has no value.`);
 		}
 		return value;
 	};
@@ -302,7 +327,7 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 		const source = raw === undefined || raw === null || String(raw).trim() === '' ? fallback : String(raw);
 		const split = splitGitArgs(source);
 		if (split.error) {
-			throw new GitPlanError(`${GIT_PARAM_INFO[key as Exclude<GitConfigKey, 'gitCommand'>]?.label ?? key}: ${split.error}.`);
+			throw new GitPlanError(`${GIT_PARAM_INFO[key as GitParamKey]?.label ?? key}: ${split.error}.`);
 		}
 		return split.args.map(arg => options.resolve(arg));
 	};
@@ -328,7 +353,7 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 		if (!cwd) {
 			throw new GitPlanError('No working directory for git clone (no workspace folder).');
 		}
-		return { command, steps: [['clone', ...(branch ? ['--branch', branch] : []), '--', url, target]], cwd, repoPath: target };
+		return { command, args: ['clone', ...(branch ? ['--branch', branch] : []), '--', url, target], cwd, repoPath: target };
 	}
 
 	const repoText = strict('gitRepoPath');
@@ -336,38 +361,41 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 		throw new GitPlanError(`Repository path is required for git ${command}.`);
 	}
 	const repoPath = toAbsolute(repoText);
-	const plan = (steps: string[][]): IGitPlan => ({ command, steps, cwd: repoPath, repoPath });
+	const plan = (args: string[]): IGitPlan => ({ command, args, cwd: repoPath, repoPath });
 
 	switch (command) {
 		case 'status':
-			return plan([['status']]);
+			return plan(['status']);
 		case 'checkout': {
 			const branch = ref('gitBranch');
 			if (!branch) {
 				throw new GitPlanError('Branch is required for git checkout.');
 			}
-			return plan([['checkout', ...(isTrue(config.gitCreateBranch) ? ['-b'] : []), branch]]);
+			return plan(['checkout', ...(isTrue(config.gitCreateBranch) ? ['-b'] : []), branch]);
 		}
 		case 'pull': {
 			const branch = ref('gitBranch');
 			const remote = ref('gitRemote') || (branch ? 'origin' : '');
-			return plan([['pull', ...(remote ? [remote] : []), ...(branch ? [branch] : [])]]);
+			return plan(['pull', ...(remote ? [remote] : []), ...(branch ? [branch] : [])]);
 		}
 		case 'fetch': {
 			const remote = ref('gitRemote');
-			return plan([['fetch', ...(remote ? [remote] : [])]]);
+			return plan(['fetch', ...(remote ? [remote] : [])]);
 		}
 		case 'add': {
+			if (isTrue(config.gitAll)) {
+				return plan(['add', '-A']);
+			}
 			const paths = argList('gitPaths', '.');
-			return plan([['add', '--', ...(paths.length ? paths : ['.'])]]);
+			return plan(['add', '--', ...(paths.length ? paths : ['.'])]);
 		}
 		case 'commit': {
 			const message = text('gitMessage');
 			if (!message.trim()) {
 				throw new GitPlanError('Commit message is required for git commit.');
 			}
-			const commit = ['commit', '-m', message];
-			return plan(isTrue(config.gitAddAll) ? [['add', '-A'], commit] : [commit]);
+			// Only `git commit` (CI-63): the deprecated gitAddAll is ignored; stage with a separate add card
+			return plan(['commit', '-m', message]);
 		}
 		case 'push': {
 			const setUpstream = isTrue(config.gitSetUpstream);
@@ -379,7 +407,7 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 			if (setUpstream && !branch) {
 				branch = 'HEAD';
 			}
-			return plan([['push', ...(setUpstream ? ['--set-upstream'] : []), ...(remote ? [remote] : []), ...(branch ? [branch] : [])]]);
+			return plan(['push', ...(setUpstream ? ['--set-upstream'] : []), ...(remote ? [remote] : []), ...(branch ? [branch] : [])]);
 		}
 		case 'log': {
 			const rawCount = text('gitLogCount', String(GIT_DEFAULT_LOG_COUNT)).trim();
@@ -387,13 +415,13 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 			if (!Number.isFinite(count) || count < 1) {
 				throw new GitPlanError(`Number of commits must be a positive number (got '${rawCount}').`);
 			}
-			return plan([['log', '-n', String(Math.min(Math.floor(count), GIT_MAX_LOG_COUNT)), '--date=short', '--pretty=format:%h %ad %an  %s']]);
+			return plan(['log', '-n', String(Math.min(Math.floor(count), GIT_MAX_LOG_COUNT)), '--date=short', '--pretty=format:%h %ad %an  %s']);
 		}
 		case 'diff':
-			return plan([['diff', ...argList('gitDiffTarget')]]);
+			return plan(['diff', ...argList('gitDiffTarget')]);
 		case 'branch': {
 			const name = ref('gitBranch');
-			return plan([name ? ['branch', name] : ['branch', '-a']]);
+			return plan(name ? ['branch', name] : ['branch', '-a']);
 		}
 		case 'custom': {
 			const args = argList('gitCustomArgs');
@@ -403,7 +431,7 @@ function buildPlanOrThrow(command: GitCommand, config: IGitComponentConfig, opti
 			if (args.length === 0 || args.every(a => !a.trim())) {
 				throw new GitPlanError('Custom git command is empty: write the arguments after "git" (e.g. stash list).');
 			}
-			return plan([args]);
+			return plan(args);
 		}
 	}
 }
@@ -430,33 +458,20 @@ export function gitFailureResult(command: string, error: string, repoPath = ''):
 	return { ok: false, exitCode: -1, stdout: '', stderr: error, command: '', gitCommand: command, repoPath, branch: '', commit: '', durationMs: 0, error, executedAt: new Date().toISOString() };
 }
 
-/** Runs the steps of a plan in order (stops at the first failure), then reads the current branch and HEAD commit. */
+/**
+ * Runs the plan's single git invocation, then reads the current branch and HEAD commit for the result fields (read-only
+ * `git rev-parse` queries: they change nothing and are not part of the command shown).
+ */
 export async function runGitPlan(plan: IGitPlan, exec: GitExecutor, timeoutMs = GIT_COMPONENT_TIMEOUT_MS): Promise<IGitRunResult> {
-	const stdout: string[] = [];
-	const stderr: string[] = [];
-	let exitCode = 0;
-	let durationMs = 0;
-	let timedOut = false;
+	const res = await exec(plan.args, plan.cwd, timeoutMs);
+	const exitCode = res.exitCode;
+	const cancelled = !!res.cancelled;
 	let error: string | undefined;
-	let cancelled = false;
-	for (const step of plan.steps) {
-		const res = await exec(step, plan.cwd, timeoutMs);
-		durationMs += res.durationMs;
-		if (res.stdout) {
-			stdout.push(res.stdout);
-		}
-		if (res.stderr) {
-			stderr.push(res.stderr);
-		}
-		exitCode = res.exitCode;
-		timedOut = timedOut || !!res.timedOut;
-		cancelled = cancelled || !!res.cancelled;
-		if (res.exitCode !== 0) {
-			error = res.error || `git ${step[0] ?? ''} exited with code ${res.exitCode}`;
-			if (res.error && !res.stderr) {
-				stderr.push(res.error);
-			}
-			break;
+	let stderr = res.stderr;
+	if (exitCode !== 0) {
+		error = res.error || `git ${plan.args[0] ?? ''} exited with code ${exitCode}`;
+		if (res.error && !res.stderr) {
+			stderr = res.error;
 		}
 	}
 	let branch = '';
@@ -464,8 +479,8 @@ export async function runGitPlan(plan: IGitPlan, exec: GitExecutor, timeoutMs = 
 	if (!cancelled) {
 		const info = async (args: string[]): Promise<string> => {
 			try {
-				const res = await exec(args, plan.repoPath, 10_000);
-				return res.exitCode === 0 ? res.stdout.trim() : '';
+				const r = await exec(args, plan.repoPath, 10_000);
+				return r.exitCode === 0 ? r.stdout.trim() : '';
 			} catch {
 				return '';
 			}
@@ -478,15 +493,15 @@ export async function runGitPlan(plan: IGitPlan, exec: GitExecutor, timeoutMs = 
 	return {
 		ok: exitCode === 0,
 		exitCode,
-		stdout: stdout.join('\n'),
-		stderr: stderr.join('\n'),
-		command: formatGitCommandLine(plan.steps),
+		stdout: res.stdout,
+		stderr,
+		command: formatGitCommandLine(plan.args),
 		gitCommand: plan.command,
 		repoPath: plan.repoPath,
 		branch,
 		commit,
-		durationMs,
-		timedOut: timedOut || undefined,
+		durationMs: res.durationMs,
+		timedOut: res.timedOut || undefined,
 		error,
 		executedAt: new Date().toISOString()
 	};

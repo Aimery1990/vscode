@@ -712,6 +712,9 @@ export interface ICustomField {
 	gitCreateBranch?: boolean;
 	gitPaths?: string;
 	gitMessage?: string;
+	/** add: stage all changes (git add -A). */
+	gitAll?: boolean;
+	/** Deprecated (CI-63): older commit cards ran git add -A first; parsed and kept, never run (the card shows a notice). */
 	gitAddAll?: boolean;
 	gitLogCount?: number | string;
 	gitDiffTarget?: string;

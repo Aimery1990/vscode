@@ -23,6 +23,7 @@ import { EntityDetailEditorInput, IEntityPreviewModule } from './entityDetailEdi
 import { TicketBoardController } from './ticketBoardView.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { ISubWorkflowDefinition } from '../../workflowsManager/common/workflowExecutionModel.js';
+import { ticketRootFieldValue } from '../../workflowsManager/common/ticketRunContext.js';
 import { SUB_WORKFLOW_DEFINITION_REL_PATH, describeSubWorkflowSource, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition } from '../../workflowsManager/common/subWorkflowTicket.js';
 import { URI } from '../../../../base/common/uri.js';
 import { FileAccess } from '../../../../base/common/network.js';
@@ -9860,6 +9861,16 @@ ${rawErr}
 					} else {
 						primitiveVal = f.defaultContent || '';
 					}
+				}
+				// Root Title / Description: the ticket's README title / description, exactly like a whole-ticket run
+				// (CI-56), so a card's own Run button resolves {Title} too (CI-63; before, the empty field overwrote it)
+				const rootValue = ticketRootFieldValue(f.id, this._lastParsedData?.customMetadata ?? {}, {
+					title: this._lastParsedData?.title,
+					description: this._lastParsedData?.description,
+					ticketName: this._lastParsedData?.ticketId
+				}, f.defaultContent);
+				if (rootValue !== undefined) {
+					primitiveVal = rootValue;
 				}
 
 				const currentTicketId = this._lastParsedData?.ticketId || '';

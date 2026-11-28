@@ -35,3 +35,19 @@ export function ticketRunTitle(inputOverrides: Record<string, unknown>, customMe
 export function ticketRunDescription(inputOverrides: Record<string, unknown>, customMetadata: Record<string, unknown>, ticket: ITicketRunIdentity, defaultContent?: string): string {
 	return firstText(inputOverrides['description'], customMetadata['description'], ticket.description, defaultContent);
 }
+
+/**
+ * Value of a root field (`title` / `description`) when {variables} are resolved outside a whole-ticket run, e.g. by a
+ * card's own Run button on the ticket page (CI-63): the same values as a ticket run (ticketRunTitle /
+ * ticketRunDescription, no input overrides), so `{Title}` is the ticket's README title there too. undefined for any
+ * other field.
+ */
+export function ticketRootFieldValue(fieldId: string | undefined, customMetadata: Record<string, unknown>, ticket: ITicketRunIdentity, defaultContent?: string): string | undefined {
+	if (fieldId === 'title') {
+		return ticketRunTitle({}, customMetadata, ticket);
+	}
+	if (fieldId === 'description') {
+		return ticketRunDescription({}, customMetadata, ticket, defaultContent);
+	}
+	return undefined;
+}

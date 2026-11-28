@@ -4,11 +4,12 @@
 
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
 import { IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
-import { GIT_COMMANDS, GIT_COMMAND_INFO, GIT_PARAM_INFO, GitConfigKey, IGitComponentConfig, gitCommandOf, gitMainOutput } from '../common/gitComponent.js';
+import { GIT_COMMANDS, GIT_COMMAND_INFO, GIT_PARAM_INFO, GitConfigKey, IGitComponentConfig, gitCommandOf, gitLegacyAddAllNotice, gitMainOutput } from '../common/gitComponent.js';
 
 /*
  * DOM of the git component (CI-24), shared by the template designer and the ticket card:
- * - a settings form: a command selector and only the parameters of the selected command;
+ * - a settings form: a command selector and only the parameters of the selected command (plus, for an older commit
+ *   card stored with "add all first", a one-time notice: CI-63);
  * - a result area: Done / Failed badge, command line, exit code, duration, branch / commit and the output.
  * UI text uses the workbench font; only command lines and output are monospace.
  */
@@ -48,11 +49,12 @@ export function renderGitConfigForm(parent: HTMLElement, initial: IGitComponentC
 	const renderParams = () => {
 		clearNode(paramsBox);
 		const command = gitCommandOf(config);
+		renderLegacyAddAllNotice();
 		for (const key of GIT_COMMAND_INFO[command].params) {
 			const info = GIT_PARAM_INFO[key];
 			const fallback = options.fallback?.[key];
 			if (info.kind === 'boolean') {
-				const row = append(paramsBox, $('label', { style: 'display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer;' }));
+				const row = append(paramsBox, $('label', { style: 'display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer;', title: info.hint ?? '' }));
 				const box = append(row, $('input', { type: 'checkbox' })) as HTMLInputElement;
 				const current = config[key];
 				box.checked = current === undefined ? (fallback === true || fallback === 'true') : (current === true || current === 'true');
@@ -84,6 +86,39 @@ export function renderGitConfigForm(parent: HTMLElement, initial: IGitComponentC
 			};
 		}
 	};
+
+	/**
+	 * CI-63: commit no longer runs `git add -A` first. A card stored with the old option (on the ticket or inherited
+	 * from the template) says so once; dismissing stores gitAddAll = false, so the notice does not come back.
+	 */
+	function renderLegacyAddAllNotice(): void {
+		const notice = gitLegacyAddAllNotice({ ...options.fallback, ...config });
+		if (!notice) {
+			return;
+		}
+		const bar = append(paramsBox, $('div.git-legacy-add-all-notice', {
+			role: 'status',
+			style: 'display: flex; align-items: flex-start; gap: 6px; padding: 6px 8px; font-size: 11.5px; line-height: 1.4; border-radius: 4px; border: 1px solid rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.1); color: var(--vscode-foreground);'
+		}));
+		append(bar, $('span.codicon.codicon-info', { style: 'font-size: 13px; color: #fbbf24; margin-top: 1px;' }));
+		append(bar, $('span', { style: 'flex: 1;' }, notice));
+		if (options.readOnly) {
+			return;
+		}
+		const dismiss = append(bar, $('button.git-legacy-add-all-dismiss', {
+			type: 'button',
+			title: 'Got it: hide this notice (the old option is cleared on this card)',
+			'aria-label': 'Dismiss notice',
+			style: 'display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; opacity: 0.8;'
+		}, $('span.codicon.codicon-close', { style: 'font-size: 12px;' }))) as HTMLButtonElement;
+		dismiss.onclick = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			config.gitAddAll = false;
+			bar.remove();
+			emit();
+		};
+	}
 
 	select.onchange = () => {
 		config.gitCommand = select.value;
