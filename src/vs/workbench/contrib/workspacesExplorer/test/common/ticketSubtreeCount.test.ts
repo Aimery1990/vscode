@@ -26,20 +26,23 @@ suite('ticketSubtreeCount', () => {
 		assert.deepStrictEqual(countSubtree(summary, none, false), { visible: 100, total: 100, directVisible: 100, directTotal: 100, truncated: false });
 	});
 
-	test('a hidden ticket hides its whole sub-tree; deeper levels are counted', () => {
+	test('UI-35: the filter counts matching tickets at any depth, also below non-matching ancestors', () => {
 		const summary: ITicketSubtreeSummary = {
 			truncated: false,
 			children: [
-				n('Todo', [n('Todo', [n('Done'), n('Todo')]), n('Blocked')]), // 1 + (1 + 2) + 1 = 5
-				n('Done', [n('Todo'), n('Todo', [n('Todo')])]), // 1 + 3 = 4
-				n(undefined) // no status: never hidden
+				n('Todo', [n('Todo', [n('Done'), n('Todo')]), n('Blocked')]), // 5 tickets
+				n('Done', [n('Todo'), n('Todo', [n('Todo')])]), // 4 tickets
+				n(undefined) // no status: always matches
 			]
 		};
 		assert.deepStrictEqual(countSubtree(summary, none, false), { visible: 10, total: 10, directVisible: 3, directTotal: 3, truncated: false });
-		// Done hidden: second branch (4) and the nested Done leaf (1) disappear
-		assert.deepStrictEqual(countSubtree(summary, new Set(['Done']), false), { visible: 5, total: 10, directVisible: 2, directTotal: 3, truncated: false });
-		// Todo hidden: only the status-less ticket and the Done branch root remain visible at top; Done's Todo children hidden
-		assert.deepStrictEqual(countSubtree(summary, new Set(['Todo']), false), { visible: 2, total: 10, directVisible: 2, directTotal: 3, truncated: false });
+		// Done hidden: only the two Done tickets drop out; the Todo tickets under the Done branch root still count
+		assert.deepStrictEqual(countSubtree(summary, new Set(['Done']), false), { visible: 8, total: 10, directVisible: 2, directTotal: 3, truncated: false });
+		// Todo hidden: Blocked, the nested Done leaf, the Done root and the status-less ticket
+		assert.deepStrictEqual(countSubtree(summary, new Set(['Todo']), false), { visible: 4, total: 10, directVisible: 2, directTotal: 3, truncated: false });
+		// only Done selected (everything else hidden): the two Done tickets + the status-less one
+		const allButDone = new Set<CanonicalStatusCategory>(['Todo', 'In Progress', 'Blocked', 'Removed']);
+		assert.deepStrictEqual(countSubtree(summary, allButDone, false), { visible: 3, total: 10, directVisible: 2, directTotal: 3, truncated: false });
 	});
 
 	test('removed tickets follow "show removed items"', () => {

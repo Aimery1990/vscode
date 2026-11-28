@@ -258,6 +258,20 @@ suite('ticketFailure', () => {
 		assert.deepStrictEqual(countFailing(summary, none, true), { all: 1, allHidden: 0, direct: 1, directHidden: 0, allBlocked: 1, directBlocked: 1 });
 	});
 
+	test('UI-35: a failing ticket below a non-matching ancestor is not hidden by the filter', () => {
+		const summary: ITicketSubtreeSummary = {
+			truncated: false,
+			children: [n('T-1 Job', 'Todo', [n('T-2 Story', 'Todo', [n('T-3 Test', 'Done', [], 'Test result: Fail')])])]
+		};
+		const onlyDone = new Set<CanonicalStatusCategory>(['Todo', 'In Progress', 'Blocked', 'Removed']);
+		assert.deepStrictEqual(collectFailingDescendants(summary, onlyDone, false).failing.map(f => [f.label, f.hiddenByFilter]), [['T-3 Test', false]]);
+		// the direct child T-1 fails through T-3 but is itself filtered out (shown only as path context)
+		assert.deepStrictEqual(countFailing(summary, onlyDone, false), { all: 1, allHidden: 0, direct: 1, directHidden: 1, allBlocked: 0, directBlocked: 0 });
+		const counts = countSubtree(summary, onlyDone, false);
+		assert.strictEqual(counts.visible, 1);
+		assert.deepStrictEqual(describeFailingFraction(countFailing(summary, onlyDone, false), 'all', counts)?.denominator, '1');
+	});
+
 	test('UI-32: failing / total fraction in the count pill, same count mode as the pill', () => {
 		const summary: ITicketSubtreeSummary = {
 			truncated: false,

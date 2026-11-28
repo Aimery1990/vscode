@@ -57,9 +57,10 @@ import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlo
 import { createDefaultCategoryMap, readTicketStatus, readTopLevelMetadata, STATUS_CATEGORIES, STATUS_CATEGORY_COLORS } from '../common/workspaceLifecycle.js';
 import { buildPriorityOptions, DEFAULT_TICKET_PRIORITY, findStatusOption, findTemplateForType, groupStatusOptions, resolveEffectiveStatusOptions } from '../common/ticketStatusPicker.js';
 import { describeRestoreDecision } from '../common/ticketRestore.js';
-import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
+import { describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
-import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
+import { applyStatusFilterWithPaths, describeFilterPathRow, IStatusFilterVerdict } from '../common/ticketFilterPath.js';
+import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeNode, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
 import { classifyTestResult, collectFailingDescendants, countFailing, describeFailingFraction, describeProblemsBelow, describeTestResult, describeTicketFailure, dismissTicketRunFailure, formatFailureTime, formatTicketLastRunRecord, IFailingCounts, IFailingSummary, ITicketLastRunRecord, parseTicketLastRunRecord, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
 import { recordTicketChangeEntry } from './ticketChangeRecorder.js';
 import { createCSSRule } from '../../../../base/browser/domStylesheets.js';
@@ -236,6 +237,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 	private _activeSearch?: { readonly result: ITicketSearchResult; readonly tree: IPrunedTicketTree; readonly note: string };
 	/** UI-21: rows the user collapsed while in search results (the normal expansion state is left untouched). */
 	private readonly _searchCollapsed = new Set<string>();
+	/** UI-35: path-context rows of the status filter (auto-expanded) and the ones the user collapsed again. */
+	private readonly _filterPathKeys = new Set<string>();
+	private readonly _filterPathCollapsed = new Set<string>();
 	private _searchTimer: ReturnType<typeof setTimeout> | undefined;
 	private _filterInputEl?: HTMLInputElement;
 	/** Scroll the selected row into view after the next completed render (reveal / Go to Ticket). */
@@ -697,6 +701,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 	private _setHiddenStatusCategories(hidden: ReadonlySet<CanonicalStatusCategory>, filterIcon: HTMLElement): void {
 		this._hiddenStatusCategories = hidden;
+		this._filterPathKeys.clear();
+		this._filterPathCollapsed.clear();
 		this._storageService.store(HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, serializeHiddenCategories(hidden), StorageScope.PROFILE, StorageTarget.USER);
 		this._updateStatusFilterIcon(filterIcon);
 		this.renderContent();
@@ -986,10 +992,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}, 100);
 	}
 
-	/** Whether a workspace / ticket row is expanded; in search results (UI-21) the path to every match is. */
+	/**
+	 * Whether a workspace / ticket row is expanded; in search results (UI-21) the path to every match is, and under the
+	 * status filter (UI-35) every path-context row is until the user collapses it.
+	 */
 	private _isNodeExpanded(canonicalId: string): boolean {
 		if (this._activeSearch) {
 			return this._activeSearch.tree.expanded.has(canonicalId) && !this._searchCollapsed.has(canonicalId);
+		}
+		if (this._filterPathKeys.has(canonicalId)) {
+			return !this._filterPathCollapsed.has(canonicalId);
 		}
 		return this.expandedWorkspaces.has(canonicalId);
 	}
@@ -1001,6 +1013,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this._searchCollapsed.delete(canonicalId);
 			} else {
 				this._searchCollapsed.add(canonicalId);
+			}
+			return this._isNodeExpanded(canonicalId);
+		}
+		if (this._filterPathKeys.has(canonicalId)) {
+			if (this._filterPathCollapsed.has(canonicalId)) {
+				this._filterPathCollapsed.delete(canonicalId);
+			} else {
+				this._filterPathCollapsed.add(canonicalId);
 			}
 			return this._isNodeExpanded(canonicalId);
 		}
@@ -1918,17 +1938,41 @@ export class MainWorkspaceViewPane extends ViewPane {
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
-		// UI-15 / UI-16: hide tickets whose status category is filtered out (with their sub-tree)
+		// UI-15 / UI-16 / UI-35: show the tickets whose status category is selected, at any depth; a non-matching ticket
+		// with matches below stays as dimmed path context, a branch without matches is hidden. The sub-tree summary
+		// (UI-17 scan) tells whether a collapsed / unloaded branch has matches.
 		const isTicketItem = (c: IWorkspaceChildItem) => c.type !== 'folder' && c.type !== 'file';
 		// UI-21: in search results only the matches and their ancestors are shown, even when the status filter hides them
 		const search = this._activeSearch;
-		const { visible: children, hiddenCount } = search
-			? { visible: page.items.filter(c => search.tree.visible.has(this.getCanonicalId(c.id))), hiddenCount: 0 }
-			: applyStatusFilter(page.items, this._hiddenStatusCategories, c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined);
+		const filterSummary = !search && this._hiddenStatusCategories.size > 0
+			? await this.workspacesExplorerService.getTicketSubtreeSummary(folderUri).catch(() => undefined)
+			: undefined;
+		if (this.renderVersion !== currentVersion || !this.containerEl) {
+			return;
+		}
+		const summaryNodes = new Map<string, ITicketSubtreeNode>();
+		for (const node of filterSummary?.children ?? []) {
+			if (node.resource) {
+				summaryNodes.set(this.getCanonicalId(node.resource), node);
+			}
+		}
+		const { visible: children, hiddenCount, verdicts } = search
+			? { visible: page.items.filter(c => search.tree.visible.has(this.getCanonicalId(c.id))), hiddenCount: 0, verdicts: new Map<IWorkspaceChildItem, IStatusFilterVerdict>() }
+			: applyStatusFilterWithPaths(page.items, this._hiddenStatusCategories, this._showRemovedItems,
+				c => isTicketItem(c) && c.status ? wsLifecycle.getCategory(c.status) : undefined,
+				c => summaryNodes.get(this.getCanonicalId(c.uri)));
+		for (const c of page.items) {
+			const key = this.getCanonicalId(c.id);
+			if (verdicts.get(c)?.role === 'path') {
+				this._filterPathKeys.add(key);
+			} else if (!search) {
+				this._filterPathKeys.delete(key);
+			}
+		}
 		const hiddenText = describeHiddenTickets(hiddenCount);
 		const appendHiddenLine = () => {
 			if (hiddenText) {
-				const hiddenEl = append(parentContainer, $('div', { style: `font-size: 10px; opacity: 0.45; font-style: italic; padding: 2px 0 2px ${depth * 12 + 16}px;`, title: `${describeStatusFilter(this._hiddenStatusCategories)}. Use the filter icon in the panel header to show them` }, hiddenText));
+				const hiddenEl = append(parentContainer, $('div', { style: `font-size: 10px; opacity: 0.45; font-style: italic; padding: 2px 0 2px ${depth * 12 + 16}px;`, title: `${describeStatusFilter(this._hiddenStatusCategories)}. Counts every ticket in the hidden branches (no ticket in them matches); use the filter icon in the panel header to show them` }, hiddenText));
 				hiddenEl.setAttribute('data-sync-key', `hidden:${parentCanonicalKey}`);
 				hiddenEl.setAttribute('data-visual-sig', `hidden:${hiddenCount}:${depth}`);
 			}
@@ -1958,6 +2002,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const isDirectory = child.type !== 'file';
 			const isExpanded = isDirectory && this._isNodeExpanded(canonicalChildId);
 			const searchMatch = search?.tree.matchByKey.get(canonicalChildId);
+			const filterVerdict = verdicts.get(child);
+			const isFilterPath = filterVerdict?.role === 'path';
 			const isChildSelected = this.selectedItemIds.has(canonicalChildId) || (this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId);
 			if (isChildSelected && this.selectedItemIds.size === 0) {
 				this.selectedItemIds.add(canonicalChildId);
@@ -1982,6 +2028,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 				childRow.style.opacity = '0.55';
 			} else if (search && !searchMatch) {
 				childRow.style.opacity = '0.8'; // UI-21: ancestor on the path to a match
+			} else if (isFilterPath) {
+				childRow.style.opacity = '0.55'; // UI-35: status filter path context (does not match itself)
+			}
+			if (isFilterPath) {
+				childRow.classList.add('ticket-filter-path');
 			}
 			if (searchMatch) {
 				// UI-21: subtle row highlight; background-image survives the selection / hover background-color changes
@@ -2021,8 +2072,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 					childRow.style.opacity = '0.5';
 				};
+				const restingOpacity = childRow.style.opacity;
 				childRow.ondragend = () => {
-					childRow.style.opacity = '1';
+					childRow.style.opacity = restingOpacity;
 				};
 			}
 
@@ -2374,6 +2426,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childTitleSpan.title = isTicketEntity
 				? `${childDisplayText} [${childTicketId} · ${badgeText}] (${child.uri.fsPath})`
 				: `${childDisplayText} (${child.uri.fsPath})`;
+			const filterPathText = isFilterPath ? describeFilterPathRow(child.status, filterVerdict.matchingBelow) : undefined;
+			if (filterPathText) {
+				childTitleSpan.title = `${filterPathText}\n${childTitleSpan.title}`;
+				childRow.title = filterPathText;
+			}
 
 			// UI-17: visible descendant tickets of this ticket, as a muted pill right after the title
 			let childCountSig = '';
@@ -2460,7 +2517,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			childRow.setAttribute(
 				'data-visual-sig',
-				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}|${childCountSig}|${searchMatch ? `m:${search!.result.query}` : search ? 'a' : ''}${hiddenByFilterHint ? ':h' : ''}`
+				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}|${childLabels.map(l => `${l}:${getLabelColor(wsLifecycle.labels, l)}`).join(',')}|${child.status || ''}:${statusCategory || ''}|${childCountSig}|${searchMatch ? `m:${search!.result.query}` : search ? 'a' : ''}${hiddenByFilterHint ? ':h' : ''}|${filterPathText ?? ''}`
 			);
 
 			// Single Click / Cmd+Click (multi-select) / Shift+Click (range-select)

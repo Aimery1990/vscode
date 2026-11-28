@@ -311,7 +311,7 @@ function describeRunFailure(status: string | undefined, lastRun: ITicketLastRunR
 export interface IFailingDescendant {
 	readonly label: string;
 	readonly reasons: readonly string[];
-	/** The ticket (or one of its ancestors below the summarized folder) is hidden by the status filter. */
+	/** The ticket's own status is filtered out (UI-35: ancestors no longer matter). */
 	readonly hiddenByFilter: boolean;
 }
 
@@ -350,22 +350,23 @@ export function isProblemSubtreeNode(node: ITicketSubtreeNode): boolean {
 export function collectFailingDescendants(summary: ITicketSubtreeSummary, hidden: ReadonlySet<CanonicalStatusCategory>, includeRemoved: boolean): IFailingSummary {
 	const failing: IFailingDescendant[] = [];
 	const blocked: IBlockedDescendant[] = [];
-	const visit = (nodes: readonly ITicketSubtreeNode[], hiddenAbove: boolean) => {
+	const visit = (nodes: readonly ITicketSubtreeNode[]) => {
 		for (const node of nodes) {
 			if (node.removed && !includeRemoved) {
 				continue;
 			}
-			const hiddenHere = hiddenAbove || !isSubtreeNodeVisible(node, hidden, includeRemoved);
+			// UI-35: only the ticket's own status decides; a non-matching ancestor no longer hides it
+			const hiddenHere = !isSubtreeNodeVisible(node, hidden, includeRemoved);
 			if (node.failure) {
 				failing.push({ label: node.label || 'Untitled ticket', reasons: node.failure.reasons, hiddenByFilter: hiddenHere });
 			}
 			if (isBlockedSubtreeNode(node)) {
 				blocked.push({ label: node.label || 'Untitled ticket', status: node.status, hiddenByFilter: hiddenHere });
 			}
-			visit(node.children, hiddenHere);
+			visit(node.children);
 		}
 	};
-	visit(summary.children, false);
+	visit(summary.children);
 	return { failing, blocked };
 }
 
@@ -410,7 +411,7 @@ export function describeProblemsBelow(summary: IFailingSummary, cap = FAILING_TO
 export interface IFailingCounts {
 	/** All levels: problem descendants (each counted once). */
 	readonly all: number;
-	/** Of {@link all}: hidden by the status filter (themselves or through an ancestor). */
+	/** Of {@link all}: their own status is filtered out (UI-35). */
 	readonly allHidden: number;
 	/** Direct children: those with a problem themselves or with a problem descendant. */
 	readonly direct: number;
@@ -437,8 +438,9 @@ export function countFailing(summary: ITicketSubtreeSummary, hidden: ReadonlySet
 	let allHidden = 0;
 	let allBlocked = 0;
 	/** Visits a sub-tree and returns whether anything in it (the node included) fails / is blocked. */
-	const visit = (node: ITicketSubtreeNode, hiddenAbove: boolean): { fails: boolean; blocked: boolean } => {
-		const hiddenHere = hiddenAbove || !isSubtreeNodeVisible(node, hidden, includeRemoved);
+	const visit = (node: ITicketSubtreeNode): { fails: boolean; blocked: boolean } => {
+		// UI-35: only the ticket's own status decides; a non-matching ancestor no longer hides it
+		const hiddenHere = !isSubtreeNodeVisible(node, hidden, includeRemoved);
 		let fails = !!node.failure;
 		let blocked = isBlockedSubtreeNode(node);
 		if (fails || blocked) {
@@ -454,7 +456,7 @@ export function countFailing(summary: ITicketSubtreeSummary, hidden: ReadonlySet
 			if (child.removed && !includeRemoved) {
 				continue;
 			}
-			const below = visit(child, hiddenHere);
+			const below = visit(child);
 			fails = fails || below.fails;
 			blocked = blocked || below.blocked;
 		}
@@ -467,7 +469,7 @@ export function countFailing(summary: ITicketSubtreeSummary, hidden: ReadonlySet
 		if (child.removed && !includeRemoved) {
 			continue;
 		}
-		const below = visit(child, false);
+		const below = visit(child);
 		if (below.fails || below.blocked) {
 			direct++;
 			if (!below.fails) {

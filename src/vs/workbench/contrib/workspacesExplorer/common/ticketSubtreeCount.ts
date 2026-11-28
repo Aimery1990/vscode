@@ -10,8 +10,9 @@ import { CanonicalStatusCategory } from './workspacesExplorer.js';
  *
  * The service scans a ticket folder's sub-tree once into an {@link ITicketSubtreeSummary} (only ticket folders, each
  * with its status category and whether it counts as removed) and caches it. Counting for the current status filter
- * is then a pure in-memory walk, so filter changes need no rescan. A ticket hidden by the filter hides its whole
- * sub-tree, exactly like in the tree itself.
+ * is then a pure in-memory walk, so filter changes need no rescan. Since UI-35 the filter counts the matching tickets
+ * at any depth, like the tree shows them (non-matching ancestors of a match stay visible as path context but are not
+ * counted).
  *
  * The count mode (all levels / direct children / off) is one global choice for the tree, stored as a string under
  * {@link CHILD_COUNT_MODE_STORAGE_KEY} (profile scope, user target); default: all levels.
@@ -43,10 +44,11 @@ export interface ITicketSubtreeSummary {
 }
 
 export interface ITicketSubtreeCounts {
-	/** Descendants (all levels) visible under the status filter. */
+	/** Descendants (all levels) matching the status filter (UI-35: at any depth). */
 	readonly visible: number;
 	/** Descendants (all levels) before the status filter (removed tickets still follow "show removed items"). */
 	readonly total: number;
+	/** Direct children matching the status filter. */
 	readonly directVisible: number;
 	readonly directTotal: number;
 	readonly truncated: boolean;
@@ -75,13 +77,21 @@ export function isSubtreeNodeVisible(node: ITicketSubtreeNode, hidden: ReadonlyS
 	return !(node.category && hidden.has(node.category));
 }
 
-/** visibleCount(node) = sum over visible children c of (1 + visibleCount(c)). Hidden children take their sub-tree with them. */
+/**
+ * Matching descendants at any depth (UI-35): a child counts when its own category passes the filter, and its sub-tree
+ * is always walked (a non-matching ticket no longer hides the matches below it). Removed tickets are skipped with
+ * their sub-tree unless "show removed items" is on, like in the tree's scan.
+ */
 function countVisible(children: readonly ITicketSubtreeNode[], hidden: ReadonlySet<CanonicalStatusCategory>, includeRemoved: boolean): number {
 	let count = 0;
 	for (const child of children) {
-		if (isSubtreeNodeVisible(child, hidden, includeRemoved)) {
-			count += 1 + countVisible(child.children, hidden, includeRemoved);
+		if (child.removed && !includeRemoved) {
+			continue;
 		}
+		if (isSubtreeNodeVisible(child, hidden, includeRemoved)) {
+			count++;
+		}
+		count += countVisible(child.children, hidden, includeRemoved);
 	}
 	return count;
 }
