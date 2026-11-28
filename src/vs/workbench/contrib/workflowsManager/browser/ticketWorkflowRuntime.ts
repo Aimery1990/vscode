@@ -22,6 +22,7 @@ import { getTemplateCreateTypeError } from '../../customModules/common/templateN
 import { ISubWorkflowContract, ISubWorkflowTicketSummary, buildSubWorkflowContract, buildSubWorkflowTicketMetadata, buildSubWorkflowTicketSummary, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition, subWorkflowSummaryFromMetadata } from '../common/subWorkflowTicket.js';
 import { buildPrimitivesCatalog } from '../../customModules/common/componentRegistry.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
+import { defaultTtsModelFor, defaultTtsVoiceFor } from '../../agentsManager/common/qwenTts.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRecorder.js';
@@ -809,6 +810,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							targetModel: f.targetModel || 'gemini-2.5-flash-preview-tts',
 							ttsFormat: f.ttsFormat || 'mp3',
 							ttsVoice: f.ttsVoice || 'Kore',
+							ttsLanguage: f.ttsLanguage || '',
 							ttsAutoPlay: Boolean(f.ttsAutoPlay),
 							audioFileName: '',
 							audioRelativePath: '',
@@ -2088,9 +2090,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let displayText = field.ttsDisplayText || '';
 							let targetCredId = field.targetCredentialId || '';
 							let targetProvider = field.targetProvider || 'gemini';
-							let targetModel = field.targetModel || (targetProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+							let targetModel = field.targetModel || defaultTtsModelFor(targetProvider);
 							let ttsFormat = (field.ttsFormat || 'mp3').toLowerCase();
-							let ttsVoice = field.ttsVoice || (targetProvider === 'openai' ? 'alloy' : 'Kore');
+							let ttsVoice = field.ttsVoice || defaultTtsVoiceFor(targetProvider);
+							let ttsLanguage = field.ttsLanguage || '';
 							let ttsAutoPlay = Boolean(field.ttsAutoPlay);
 							let audioFileName = '';
 							let audioRelativePath = '';
@@ -2112,6 +2115,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 											if (parsed.targetModel) { targetModel = String(parsed.targetModel); }
 											if (parsed.ttsFormat) { ttsFormat = String(parsed.ttsFormat).toLowerCase(); }
 											if (parsed.ttsVoice) { ttsVoice = String(parsed.ttsVoice); }
+											if (parsed.ttsLanguage) { ttsLanguage = String(parsed.ttsLanguage); }
 											if (parsed.ttsAutoPlay !== undefined) { ttsAutoPlay = Boolean(parsed.ttsAutoPlay); }
 											if (parsed.audioFileName) { audioFileName = String(parsed.audioFileName); }
 											if (parsed.audioRelativePath) { audioRelativePath = String(parsed.audioRelativePath); }
@@ -2152,7 +2156,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 										credentialId: targetCredId || undefined,
 										providerId: targetProvider,
 										format: ttsFormat,
-										voice: ttsVoice
+										voice: ttsVoice,
+										language: ttsLanguage || undefined
 									});
 									if (ttsRes.success && ttsRes.audioBuffer) {
 										const attachDir = URI.joinPath(ticketUri, 'attachments');
@@ -2160,7 +2165,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 											await this.fileService.createFolder(attachDir);
 										}
 										const safeKey = this._cleanKey(fieldLabel) || 'tts_audio';
-										audioFileName = `tts_${safeKey}.${ttsFormat}`;
+										audioFileName = `tts_${safeKey}.${ttsRes.format || ttsFormat}`;
 										audioRelativePath = `attachments/${audioFileName}`;
 										const audioUri = URI.joinPath(ticketUri, audioRelativePath);
 										const audioBytes = ttsRes.audioBuffer;
@@ -2187,6 +2192,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								targetModel,
 								ttsFormat,
 								ttsVoice,
+								ttsLanguage,
 								ttsAutoPlay,
 								audioFileName,
 								audioRelativePath,
@@ -3925,15 +3931,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					// Text-to-speech inside a workflow node: synthesize the (interpolated) text and save the audio under
 					// <workflow>/attachments/. Reuses the previous file when the text and voice settings are unchanged.
 					const ttsProvider = field.targetProvider || 'gemini';
-					const ttsModel = field.targetModel || (ttsProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+					const ttsModel = field.targetModel || defaultTtsModelFor(ttsProvider);
 					const ttsFormat = (field.ttsFormat || 'mp3').toLowerCase();
-					const ttsVoice = field.ttsVoice || (ttsProvider === 'openai' ? 'alloy' : 'Kore');
+					const ttsVoice = field.ttsVoice || defaultTtsVoiceFor(ttsProvider);
+					const ttsLanguage = field.ttsLanguage || '';
 					const sourceText = (field.defaultContent || '').trim() ? (field.defaultContent || '') : (field.ttsDisplayText || '');
 					const ttsText = this._interpolateVariables(sourceText, contextVariables).trim();
 					if (!ttsText) {
 						throw new Error(`Text to Speech '${fieldLabel}': the text is empty.`);
 					}
-					const cacheKey = JSON.stringify([ttsText, ttsProvider, ttsModel, ttsVoice, ttsFormat]);
+					const cacheKey = JSON.stringify(ttsLanguage ? [ttsText, ttsProvider, ttsModel, ttsVoice, ttsFormat, ttsLanguage] : [ttsText, ttsProvider, ttsModel, ttsVoice, ttsFormat]);
 					const prevPath: string = field.ttsLastAudioPath || '';
 					let audioPath = '';
 					let cached = false;
@@ -3953,7 +3960,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							credentialId: field.targetCredentialId || undefined,
 							providerId: ttsProvider,
 							format: ttsFormat,
-							voice: ttsVoice
+							voice: ttsVoice,
+							language: ttsLanguage || undefined
 						});
 						if (!ttsRes.success || !ttsRes.audioBuffer) {
 							throw new Error(`Text to Speech '${fieldLabel}' failed: ${ttsRes.error || 'synthesis failed'}`);
@@ -3962,7 +3970,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						if (!(await this.fileService.exists(attachDir))) {
 							await this.fileService.createFolder(attachDir);
 						}
-						const audioUri = URI.joinPath(attachDir, `tts_${this._cleanKey(fieldLabel) || 'audio'}_${Date.now()}.${ttsFormat}`);
+						const audioUri = URI.joinPath(attachDir, `tts_${this._cleanKey(fieldLabel) || 'audio'}_${Date.now()}.${ttsRes.format || ttsFormat}`);
 						await this.fileService.writeFile(audioUri, VSBuffer.wrap(ttsRes.audioBuffer));
 						audioPath = audioUri.fsPath;
 						field.ttsLastAudioPath = audioPath;

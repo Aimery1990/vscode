@@ -134,6 +134,8 @@ export interface IAgentCredentialService {
 		providerId?: string;
 		format?: string;
 		voice?: string;
+		/** language_type for Alibaba Cloud Qwen TTS (Auto, Chinese, English, ...). */
+		language?: string;
 	}): Promise<{
 		success: boolean;
 		audioBuffer?: Uint8Array;

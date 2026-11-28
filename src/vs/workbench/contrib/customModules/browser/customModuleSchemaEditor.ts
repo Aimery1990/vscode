@@ -37,6 +37,8 @@ import { IPathService } from '../../../services/path/common/pathService.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { maskSecrets, resolveBrowserCredentialUrl } from '../common/browserCredentials.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentItem, IAgentCredential, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
+import { defaultTtsModelFor, defaultTtsVoiceFor, pickQwenTtsCredential, QWEN_TTS_LANGUAGES, QWEN_TTS_PROVIDER_LABEL } from '../../agentsManager/common/qwenTts.js';
+import { reconcileTtsSelection, ttsAllowsCustomModelId, ttsFormatsFor, ttsModelsFor, ttsVoicesFor } from '../../agentsManager/common/ttsProviderOptions.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService, findUnresolvedTemplateVariables } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from './pythonSyntaxHighlighter.js';
@@ -6085,10 +6087,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.targetProvider = 'gemini';
 					}
 					if (!field.targetModel) {
-						field.targetModel = field.targetProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts';
+						field.targetModel = defaultTtsModelFor(field.targetProvider);
 					}
 					if (!field.ttsVoice) {
-						field.ttsVoice = field.targetProvider === 'openai' ? 'alloy' : 'Kore';
+						field.ttsVoice = defaultTtsVoiceFor(field.targetProvider);
 					}
 
 					const ttsSchemaBox = append(fieldCard, $('.tts-schema-config', {
@@ -6167,6 +6169,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const selectorBar = append(modelSettingsCard, $('div', {
 						style: 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap; position: relative;'
 					}));
+					// Alibaba Cloud credential of a region without TTS (US (Virginia)): say so right under the selector
+					const regionWarning = append(modelSettingsCard, $('div.tts-region-warning', {
+						style: 'display: none; font-size: 11px; color: #f87171; padding: 4px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);'
+					}));
+					// One line when a stored model / voice / format did not fit the credential and was corrected
+					const fixNotice = append(modelSettingsCard, $('div.tts-fix-notice', {
+						style: 'display: none; font-size: 11px; opacity: 0.8; padding: 2px 8px;'
+					}));
 					append(selectorBar, $('span', {
 						style: 'font-size: 11px; font-weight: 600; color: #f472b6; min-width: 65px;'
 					}, 'AI Model:'));
@@ -6225,17 +6235,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const formatSelect = append(formatGroup, $('select.monaco-select-box', {
 						style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
 					})) as HTMLSelectElement;
-					[
-						{ value: 'mp3', label: 'MP3 (Default)' },
-						{ value: 'wav', label: 'WAV' },
-						{ value: 'opus', label: 'OPUS' },
-						{ value: 'aac', label: 'AAC' }
-					].forEach(fmt => {
-						const opt = append(formatSelect, $('option', { value: fmt.value }, fmt.label)) as HTMLOptionElement;
-						if ((field.ttsFormat || 'mp3') === fmt.value) {
-							opt.selected = true;
-						}
-					});
+					// Only the formats the selected provider returns (filled by populateFormatOptions)
+					const populateFormatOptions = (providerId: string) => {
+						clearNode(formatSelect);
+						ttsFormatsFor(providerId).forEach(fmt => {
+							const opt = append(formatSelect, $('option', { value: fmt.value }, fmt.label)) as HTMLOptionElement;
+							if ((field.ttsFormat || 'mp3') === fmt.value) {
+								opt.selected = true;
+							}
+						});
+					};
+					populateFormatOptions(field.targetProvider || 'gemini');
 					formatSelect.onchange = () => {
 						field.ttsFormat = formatSelect.value || 'mp3';
 						this._syncDraft();
@@ -6247,6 +6257,24 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const voiceSelect = append(voiceGroup, $('select.monaco-select-box', {
 						style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
 					})) as HTMLSelectElement;
+
+					// Language Select (Alibaba Cloud Qwen TTS only: language_type, Auto by default)
+					const languageGroup = append(audioOptionsRow, $('div.tts-language-group', { style: 'display: none; align-items: center; gap: 6px;' }));
+					append(languageGroup, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Language:'));
+					const languageSelect = append(languageGroup, $('select.monaco-select-box.tts-language-select', {
+						title: 'Language of the text (Alibaba Cloud Qwen TTS). Auto detects it.',
+						style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
+					})) as HTMLSelectElement;
+					QWEN_TTS_LANGUAGES.forEach(l => {
+						const opt = append(languageSelect, $('option', { value: l }, l)) as HTMLOptionElement;
+						if ((field.ttsLanguage || 'Auto') === l) {
+							opt.selected = true;
+						}
+					});
+					languageSelect.onchange = () => {
+						field.ttsLanguage = languageSelect.value === 'Auto' ? undefined : languageSelect.value;
+						this._syncDraft();
+					};
 
 					// Auto-Play Checkbox
 					const autoPlayLabel = append(audioOptionsRow, $('label', {
@@ -6264,36 +6292,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						this._syncDraft();
 					};
 
-					const builtInTtsModels: Record<string, Array<{ id: string; badge: string }>> = {
-						gemini: [
-							{ id: 'gemini-2.5-flash-preview-tts', badge: 'TTS Voice' },
-							{ id: 'gemini-2.5-pro-preview-tts', badge: 'TTS HD' },
-							{ id: 'gemini-2.0-flash', badge: 'Audio Output' },
-							{ id: 'gemini-2.5-flash', badge: 'Multimodal' }
-						],
-						openai: [
-							{ id: 'tts-1', badge: 'TTS Standard' },
-							{ id: 'tts-1-hd', badge: 'TTS HD' },
-							{ id: 'gpt-4o-mini-tts', badge: 'GPT-4o TTS' },
-							{ id: 'gpt-4o-audio-preview', badge: 'Audio' }
-						],
-						'custom-openai': [
-							{ id: 'tts-1', badge: 'TTS' },
-							{ id: 'gpt-4o-mini-tts', badge: 'TTS' }
-						]
-					};
-
-					const providerVoices: Record<string, string[]> = {
-						gemini: ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Zephyr', 'Leda', 'Orus'],
-						openai: ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'coral', 'sage', 'ash', 'ballad', 'verse'],
-						'custom-openai': ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'Kore', 'Puck']
-					};
-
 					let loadedCredentials: IAgentCredential[] = [];
 
 					const populateVoiceOptions = (providerId: string) => {
+						languageGroup.style.display = providerId === 'aliyun' ? 'flex' : 'none';
 						clearNode(voiceSelect);
-						const voices = providerVoices[providerId] || providerVoices.gemini;
+						const voices = ttsVoicesFor(providerId);
 						if (!field.ttsVoice || !voices.includes(field.ttsVoice)) {
 							field.ttsVoice = voices[0];
 						}
@@ -6323,22 +6327,18 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const provId = getActiveProviderId();
 						providerBadgeEl.textContent = provId.toUpperCase();
 
+						// Only the TTS models of the selected credential's provider (documented + TTS models in its cached list)
 						const selectedCred = loadedCredentials.find(c => c.id === credSelect.value);
-						const cachedModels: string[] = Array.isArray(selectedCred?.cachedModels) ? selectedCred.cachedModels : [];
-						const recommended = builtInTtsModels[provId] || builtInTtsModels.gemini;
-
-						const combined: Array<{ id: string; badge?: string }> = [...recommended];
-						cachedModels.forEach(cm => {
-							if (!combined.some(item => item.id === cm)) {
-								combined.push({ id: cm, badge: cm.toLowerCase().includes('tts') || cm.toLowerCase().includes('audio') ? 'Voice' : 'Model' });
-							}
-						});
+						const combined: Array<{ id: string; badge?: string }> = ttsModelsFor(provId, selectedCred);
 
 						const q = filterText.trim().toLowerCase();
 						const filtered = q ? combined.filter(m => m.id.toLowerCase().includes(q)) : combined;
 
-						if (q && !filtered.some(m => m.id.toLowerCase() === q)) {
+						if (q && ttsAllowsCustomModelId(provId) && !filtered.some(m => m.id.toLowerCase() === q)) {
 							filtered.unshift({ id: filterText.trim(), badge: 'Custom ID' });
+						}
+						if (filtered.length === 0) {
+							append(modelListContainer, $('div.tts-model-empty', { style: 'padding: 6px 8px; font-size: 11px; opacity: 0.75;' }, combined.length === 0 ? 'This credential has no text-to-speech models.' : 'No matching model.'));
 						}
 
 						filtered.forEach(m => {
@@ -6368,6 +6368,32 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						});
 					};
 
+					/**
+					 * Makes model / voice / format fit the selected credential's provider: what does not fit is reset to the
+					 * provider's first valid option and saved. On load a one-line notice says what was corrected.
+					 */
+					const applyProviderOptions = (reason: 'load' | 'switch') => {
+						const provId = getActiveProviderId();
+						const selCred = loadedCredentials.find(c => c.id === credSelect.value);
+						const r = reconcileTtsSelection(provId, selCred, { model: field.targetModel, voice: field.ttsVoice, format: field.ttsFormat });
+						const before = { model: field.targetModel, voice: field.ttsVoice, format: field.ttsFormat };
+						field.targetModel = r.model;
+						field.ttsVoice = r.voice;
+						field.ttsFormat = r.format;
+						modelBtnLabel.textContent = r.model;
+						populateVoiceOptions(provId);
+						populateFormatOptions(provId);
+						renderModelDropdownItems(modelSearchInput.value);
+						regionWarning.textContent = r.unavailable || '';
+						regionWarning.style.display = r.unavailable ? 'block' : 'none';
+						const fixes = r.changed.map(k => k === 'model' ? `model ${before.model || '(none)'} -> ${r.model}` : k === 'voice' ? `voice ${before.voice || '(none)'} -> ${r.voice}` : `format ${(before.format || '(none)').toUpperCase()} -> ${r.format.toUpperCase()}`);
+						fixNotice.textContent = reason === 'load' && fixes.length ? `Adjusted to fit ${selCred?.name || provId}: ${fixes.join(', ')}.` : '';
+						fixNotice.style.display = fixNotice.textContent ? 'block' : 'none';
+						if (r.changed.length) {
+							this._syncDraft();
+						}
+					};
+
 					const loadTtsCredentials = async () => {
 						clearNode(credSelect);
 						try {
@@ -6381,16 +6407,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						} catch { }
 
 						if (loadedCredentials.length > 0) {
+							// No credential picked yet for Alibaba Cloud: the one whose region has TTS (e.g. Singapore)
+							const preferredId = field.targetCredentialId || (field.targetProvider === 'aliyun' ? pickQwenTtsCredential(loadedCredentials)?.id : undefined);
+							let matched = false;
 							loadedCredentials.forEach(c => {
-								const opt = append(credSelect, $('option', { value: c.id }, `${c.name} (${c.providerId.toUpperCase()})`)) as HTMLOptionElement;
-								if (field.targetCredentialId === c.id || (!field.targetCredentialId && field.targetProvider === c.providerId)) {
+								const opt = append(credSelect, $('option', { value: c.id }, `${c.name} (${c.providerId === 'aliyun' ? QWEN_TTS_PROVIDER_LABEL : c.providerId.toUpperCase()})`)) as HTMLOptionElement;
+								if (!matched && (preferredId === c.id || (!preferredId && field.targetProvider === c.providerId))) {
 									opt.selected = true;
+									matched = true;
 								}
 							});
 						} else {
 							[
 								{ id: 'gemini', label: 'Google Gemini (GEMINI)' },
 								{ id: 'openai', label: 'OpenAI (OPENAI)' },
+								{ id: 'aliyun', label: QWEN_TTS_PROVIDER_LABEL },
 								{ id: 'custom-openai', label: 'Custom OpenAI Endpoint' }
 							].forEach(p => {
 								const opt = append(credSelect, $('option', { value: p.id }, p.label)) as HTMLOptionElement;
@@ -6405,9 +6436,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						} else {
 							field.targetProvider = credSelect.value || 'gemini';
 						}
-
-						populateVoiceOptions(field.targetProvider || 'gemini');
-						renderModelDropdownItems();
+						applyProviderOptions('load');
 					};
 
 					credSelect.onchange = () => {
@@ -6419,11 +6448,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.targetCredentialId = undefined;
 							field.targetProvider = credSelect.value;
 						}
-						const rec = builtInTtsModels[field.targetProvider || 'gemini'] || builtInTtsModels.gemini;
-						field.targetModel = rec[0].id;
-						modelBtnLabel.textContent = field.targetModel;
-						populateVoiceOptions(field.targetProvider || 'gemini');
-						renderModelDropdownItems(modelSearchInput.value);
+						applyProviderOptions('switch');
 						this._syncDraft();
 					};
 
@@ -7067,7 +7092,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								credentialId: field.targetCredentialId,
 								providerId: field.targetProvider,
 								format: field.ttsFormat || 'mp3',
-								voice: field.ttsVoice
+								voice: field.ttsVoice,
+								language: field.ttsLanguage
 							});
 							if (!res.success || !res.audioBuffer) {
 								throw new Error(res.error || 'Failed to synthesize audio.');
@@ -7083,7 +7109,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.ttsAudioDataUrl = dataUrl;
 							await loadAudioBytesIntoPlayer(bytes, res.mimeType || 'audio/mpeg', true);
 							deleteAudioBtn.style.display = 'inline-flex';
-							statusTextEl.textContent = `Audio ready (${(field.ttsFormat || 'mp3').toUpperCase()})`;
+							statusTextEl.textContent = `Audio ready (${(res.format || field.ttsFormat || 'mp3').toUpperCase()})`;
 							this._syncDraft();
 							await this._persistCurrentModule();
 						} catch (err) {

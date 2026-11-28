@@ -754,6 +754,8 @@ export interface ICustomField {
 	externalScripts?: string[];
 	ttsFormat?: 'mp3' | 'wav' | 'opus' | 'aac' | string;
 	ttsVoice?: string;
+	/** language_type of Alibaba Cloud Qwen TTS (Auto, Chinese, English, ...). */
+	ttsLanguage?: string;
 	ttsAutoPlay?: boolean;
 	ttsPlaybackRate?: number;
 	ttsDisplayText?: string;

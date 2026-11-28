@@ -5,6 +5,7 @@
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { CustomFieldType, ICustomField } from '../../entityPersistence/common/entityPersistence.js';
+import { QWEN_TTS_LANGUAGES } from '../../agentsManager/common/qwenTts.js';
 
 /*
  * Component registry (CI-30 / CI-32): the ONLY place where component types are described.
@@ -295,7 +296,7 @@ export const COMPONENT_SPECS = {
 			{ name: 'defaultUserPrompts', kind: 'stringArray', ticketValue: true, description: 'Several user prompts, sent in order.' },
 			{ name: 'targetProvider', kind: 'string', description: 'Model provider id (e.g. gemini, openai, anthropic). Default: provider of the global default model.' },
 			{ name: 'targetModel', kind: 'string', description: 'Model id. Default: the global default model.' },
-			{ name: 'targetCredentialId', kind: 'string', description: 'Credential to use. Default: matched automatically.' },
+			{ name: 'targetCredentialId', kind: 'string', description: 'Credential to use. Default: matched automatically (aliyun: the first Alibaba Cloud credential whose region has text-to-speech, e.g. Singapore).' },
 			{ name: 'targetMode', kind: 'string', role: 'editor', enum: ['model', 'agent'], default: 'model', description: 'model or agent. Agent mode is not implemented yet (CI-28): the model is called directly.' },
 			{ name: 'targetAgentId', kind: 'string', role: 'editor', description: 'Agent id when targetMode is agent (not used at run time yet).' },
 			{ name: 'targetAgentName', kind: 'string', role: 'editor', description: 'Agent display name when targetMode is agent.' },
@@ -352,15 +353,16 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Turns text into an audio file (default MP3) with an AI voice model.',
-		description: 'Multilingual text-to-speech audio generator using Agent Central AI models (targetProvider gemini (default) or openai). Synthesizes defaultContent into MP3 (default) or WAV/OPUS/AAC and saves the audio file persistently inside the ticket (in a workflow: the workflow attachments folder); unchanged text and settings reuse the saved file.',
+		description: 'Multilingual text-to-speech audio generator using Agent Central AI models (targetProvider gemini (default), openai, or aliyun = Alibaba Cloud Model Studio Qwen TTS, which always produces WAV). Synthesizes defaultContent into MP3 (default) or WAV/OPUS/AAC and saves the audio file persistently inside the ticket (in a workflow: the workflow attachments folder); unchanged text and settings reuse the saved file.',
 		runtime: 'Reuses the saved audio when text and settings are unchanged; otherwise interpolates {variables}, synthesizes speech with the selected model and voice, saves the file under attachments/ and publishes its path. A failed synthesis fails the step.',
 		props: [
 			{ name: 'defaultContent', kind: 'string', required: true, ticketValue: true, description: 'Text sent to the TTS model. Supports {var}.' },
-			{ name: 'ttsVoice', kind: 'string', description: 'Voice. Default: Kore (gemini) / alloy (openai).' },
-			{ name: 'ttsFormat', kind: 'string', enum: ['mp3', 'wav', 'opus', 'aac'], default: 'mp3', description: 'Audio format.' },
-			{ name: 'targetProvider', kind: 'string', default: 'gemini', description: 'gemini or openai.' },
-			{ name: 'targetModel', kind: 'string', description: 'Default: gemini-2.5-flash-preview-tts (gemini) / tts-1 (openai).' },
-			{ name: 'targetCredentialId', kind: 'string', description: 'Credential to use. Default: matched automatically.' },
+			{ name: 'ttsVoice', kind: 'string', description: 'Voice of the selected provider (a voice of another provider is reset to the first one). Default: Kore (gemini) / alloy (openai) / Cherry (aliyun).' },
+			{ name: 'ttsLanguage', kind: 'string', enum: QWEN_TTS_LANGUAGES, default: 'Auto', description: 'Language of the text (aliyun only): Auto (detects it), Chinese, English, French, German, Italian, Japanese, Korean, Portuguese, Russian or Spanish.' },
+			{ name: 'ttsFormat', kind: 'string', enum: ['mp3', 'wav', 'opus', 'aac'], default: 'mp3', description: 'Audio format. openai: mp3, wav, opus or aac; gemini and aliyun return wav only (the card switches to wav).' },
+			{ name: 'targetProvider', kind: 'string', default: 'gemini', description: 'gemini, openai or aliyun (Alibaba Cloud Model Studio, Singapore (International) region only).' },
+			{ name: 'targetModel', kind: 'string', description: 'Default: gemini-2.5-flash-preview-tts (gemini) / tts-1 (openai) / qwen3-tts-flash (aliyun).' },
+			{ name: 'targetCredentialId', kind: 'string', description: 'Credential to use. Default: matched automatically (aliyun: the first Alibaba Cloud credential whose region has text-to-speech, e.g. Singapore).' },
 			{ name: 'ttsAutoPlay', kind: 'boolean', default: false, description: 'Play the saved audio automatically when the ticket opens.' },
 			{ name: 'ttsPlaybackRate', kind: 'number', default: 1, description: 'Playback speed (0.25 - 2).' },
 			{ name: 'ttsDisplayText', kind: 'string', role: 'editor', description: 'Text shown to people on the ticket (e.g. with vocabulary notes) instead of the synthesized text.' },
@@ -383,13 +385,13 @@ export const COMPONENT_SPECS = {
 			ttsVoice: 'Kore',
 			ttsAutoPlay: false
 		},
-		notes: ['Only Gemini and OpenAI TTS models are supported (CI-29).'],
+		notes: ['Supported: Gemini, OpenAI (and OpenAI-compatible) and Alibaba Cloud Model Studio Qwen TTS (CI-29). Alibaba Cloud TTS needs a Singapore (International) credential: the US (Virginia) region has no text-to-speech. Text longer than 600 characters is split at sentence ends and the audio joined.'],
 		help: {
 			badge: 'AI Voice & Audio Synthesis',
-			summary: 'Converts multilingual text (English, Chinese, French, etc.) into an audio file (default MP3) using AI models from Agent Central (Google Gemini, OpenAI, Custom OpenAI) and saves the audio file directly inside the ticket folder for persistent playback without repeating LLM calls.',
+			summary: 'Converts multilingual text (English, Chinese, French, etc.) into an audio file (default MP3) using AI models from Agent Central (Google Gemini, OpenAI, Custom OpenAI, Alibaba Cloud Model Studio Qwen) and saves the audio file directly inside the ticket folder for persistent playback without repeating LLM calls.',
 			designerConfig: [
 				{ name: 'Provider & Model Selection', desc: 'Select configured AI Provider/Credential and TTS/Voice Model (same selector as Agent Central).' },
-				{ name: 'Audio Format & Voice', desc: 'Choose output format (default MP3, or WAV, OPUS, AAC) and voice profile (e.g. Alloy, Nova, Kore, Puck).' },
+				{ name: 'Audio Format & Voice', desc: 'Choose output format and voice profile. The models, voices and formats listed follow the selected credential: OpenAI MP3/WAV/OPUS/AAC with Alloy, Nova, ...; Gemini WAV with Kore, Puck, ...; Alibaba Cloud Qwen WAV with Cherry, Ethan, ...' },
 				{ name: 'Auto-Play Toggle', desc: 'Configure whether saved audio automatically plays when viewing the module or plays manually on click.' },
 				{ name: '1. Speech Synthesis Text (AI Model)', desc: 'Pure multilingual text sent to the TTS model API to synthesize speech (hidden in the Ticket page).' },
 				{ name: '2. Display Text (Human View)', desc: 'Annotated text with native-language vocabulary notes or phonetic hints shown to the user in the Ticket page.' }
@@ -405,7 +407,8 @@ export const COMPONENT_SPECS = {
 			syntaxExamples: ['{Title}', '{AI Prompt 1}', '{TTS Audio 1}'],
 			tips: [
 				'Once generated, the MP3 file is saved locally inside the ticket folder so reopening the ticket never re-calls the LLM API unless you clear the audio file or change the text.',
-				'Enable Auto-Play if you want the audio to play automatically when opening the ticket.'
+				'Enable Auto-Play if you want the audio to play automatically when opening the ticket.',
+				'Alibaba Cloud Model Studio (Qwen): pick a Singapore (International) credential in the AI Model selector. A US (Virginia) credential shows a warning, since that region has no text-to-speech. Qwen audio is always WAV.'
 			]
 		},
 		templatePalette: { defaultName: 'TTS Audio' },

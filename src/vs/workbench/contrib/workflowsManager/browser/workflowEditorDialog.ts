@@ -944,6 +944,7 @@ export async function createWorkflowDialog(
 								targetModel: field.targetModel || 'gemini-2.5-flash-preview-tts',
 								ttsFormat: field.ttsFormat || 'mp3',
 								ttsVoice: field.ttsVoice || 'Kore',
+								ttsLanguage: field.ttsLanguage || '',
 								ttsAutoPlay: Boolean(field.ttsAutoPlay),
 								audioFileName: '',
 								audioRelativePath: '',

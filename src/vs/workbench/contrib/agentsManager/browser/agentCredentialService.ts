@@ -12,6 +12,7 @@ import { AuthenticationSession, IAuthenticationService } from '../../../services
 import { ALIYUN_PROVIDER_ID, getDefaultBaseUrl, IAgentCredential, IAgentCredentialService, IAgentModelReference, setGlobalDefaultModel } from '../common/agentsManager.js';
 import { IRequestService, asJson, asText } from '../../../../platform/request/common/request.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { aliyunCredentialBaseUrl, pickQwenTtsCredential, QwenTtsHttp, qwenTtsCredentialError, synthesizeQwenSpeech, wrapPcmInWav } from '../common/qwenTts.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 
@@ -74,6 +75,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 	private _credentials: IAgentCredential[] = [];
 	private _defaultModel: IAgentModelReference | undefined;
 	private activeUserEmail: string = '';
+	private _userResolved = false;
 	private readonly initializationPromise: Promise<void>;
 	private readonly requestService: IRequestService;
 
@@ -142,7 +144,9 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
 
-			if (newUserIdentifier !== this.activeUserEmail) {
+			// The first time always loads: signed out, '' equals the initial value and the stored credentials were never read
+			if (newUserIdentifier !== this.activeUserEmail || !this._userResolved) {
+				this._userResolved = true;
 				this.activeUserEmail = newUserIdentifier;
 				this._loadCredentials();
 				this._loadDefaultModel();
@@ -1009,6 +1013,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		providerId?: string;
 		format?: string;
 		voice?: string;
+		/** language_type for Alibaba Cloud Qwen TTS (Auto, Chinese, English, ...). */
+		language?: string;
 	}): Promise<{
 		success: boolean;
 		audioBuffer?: Uint8Array;
@@ -1031,6 +1037,10 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		if (options.credentialId) {
 			cred = this._credentials.find(c => c.id === options.credentialId);
 		}
+		if (!cred && (options.providerId === ALIYUN_PROVIDER_ID || (!options.providerId && /^qwen.*tts/i.test(sanitizedModel)))) {
+			// No credential picked: the Alibaba Cloud credential whose region has TTS (e.g. Singapore), not the first one (often US)
+			cred = pickQwenTtsCredential(this._credentials);
+		}
 		if (!cred && options.providerId) {
 			cred = this._credentials.find(c => (c.id === options.providerId || c.providerId === options.providerId || c.name.toLowerCase() === options.providerId!.toLowerCase()) && c.isEnabled !== false);
 		}
@@ -1038,6 +1048,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			let inferredProvider = 'openai';
 			if (sanitizedModel.toLowerCase().includes('gemini')) {
 				inferredProvider = 'gemini';
+			} else if (/^qwen.*tts/i.test(sanitizedModel)) {
+				inferredProvider = ALIYUN_PROVIDER_ID;
 			} else if (sanitizedModel.toLowerCase().startsWith('tts-') || sanitizedModel.toLowerCase().includes('gpt')) {
 				inferredProvider = 'openai';
 			}
@@ -1052,6 +1064,12 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				success: false,
 				error: 'No configured AI credential found. Please configure an API Key in Agent Central / Models.'
 			};
+		}
+
+		// Alibaba Cloud: the region decides whether TTS exists at all (none in US (Virginia)), before any key is needed
+		const regionError = qwenTtsCredentialError(cred);
+		if (regionError) {
+			return { success: false, error: regionError };
 		}
 
 		const apiKey = await this.getApiKey(cred.id);
@@ -1070,7 +1088,36 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		};
 
 		try {
-			if (cred.providerId === 'gemini') {
+			if (cred.providerId === ALIYUN_PROVIDER_ID) {
+				const http: QwenTtsHttp = async req => {
+					const response = await this.requestService.request({
+						type: req.method,
+						url: req.url,
+						headers: req.headers,
+						data: req.body,
+						timeout: 60000,
+						callSite: 'agentCredentialService.synthesizeSpeech.aliyun'
+					}, CancellationToken.None);
+					return {
+						status: response.res.statusCode ?? 0,
+						text: async () => (await asText(response)) || '',
+						bytes: async () => (await streamToBuffer(response.stream)).buffer
+					};
+				};
+				const qwen = await synthesizeQwenSpeech({
+					text: inputText,
+					apiKey,
+					regionUrl: aliyunCredentialBaseUrl(cred),
+					model: sanitizedModel,
+					voice,
+					language: options.language,
+					http
+				});
+				if (!qwen.success) {
+					return { success: false, error: qwen.error };
+				}
+				return { success: true, audioBuffer: qwen.audio, mimeType: qwen.mimeType, format: qwen.format };
+			} else if (cred.providerId === 'gemini') {
 				const geminiVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr', 'Leda', 'Orus'];
 				const selectedGeminiVoice = geminiVoices.find(v => v.toLowerCase() === voice.toLowerCase()) || 'Kore';
 
@@ -1132,7 +1179,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 									success: true,
 									audioBuffer: wavBytes,
 									mimeType: 'audio/wav',
-									format: requestedFormat
+									format: 'wav'
 								};
 							}
 							return {
@@ -1227,7 +1274,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			} else {
 				return {
 					success: false,
-					error: `Provider '${cred.providerId}' does not natively support TTS audio synthesis. Please select an OpenAI, Google Gemini, or Custom OpenAI credential.`
+					error: `Provider '${cred.providerId}' does not natively support TTS audio synthesis. Please select an OpenAI, Google Gemini, Alibaba Cloud Model Studio, or Custom OpenAI credential.`
 				};
 			}
 		} catch (err) {
@@ -1239,34 +1286,6 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 	}
 
 	private _wrapPcmInWavHeader(pcmBytes: Uint8Array, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Uint8Array {
-		const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
-		const blockAlign = numChannels * (bitsPerSample / 8);
-		const dataSize = pcmBytes.byteLength;
-		const buffer = new ArrayBuffer(44 + dataSize);
-		const view = new DataView(buffer);
-
-		const writeString = (offset: number, str: string) => {
-			for (let i = 0; i < str.length; i++) {
-				view.setUint8(offset + i, str.charCodeAt(i));
-			}
-		};
-
-		writeString(0, 'RIFF');
-		view.setUint32(4, 36 + dataSize, true);
-		writeString(8, 'WAVE');
-		writeString(12, 'fmt ');
-		view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
-		view.setUint16(20, 1, true);  // AudioFormat (1 = PCM)
-		view.setUint16(22, numChannels, true);
-		view.setUint32(24, sampleRate, true);
-		view.setUint32(28, byteRate, true);
-		view.setUint16(32, blockAlign, true);
-		view.setUint16(34, bitsPerSample, true);
-		writeString(36, 'data');
-		view.setUint32(40, dataSize, true);
-
-		const wavBytes = new Uint8Array(buffer);
-		wavBytes.set(pcmBytes, 44);
-		return wavBytes;
+		return wrapPcmInWav(pcmBytes, sampleRate, numChannels, bitsPerSample);
 	}
 }

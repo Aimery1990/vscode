@@ -34,6 +34,8 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { resolveTicketPageLink } from '../common/ticketPageLinks.js';
 import { dirname, basename } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
+import { defaultTtsModelFor, defaultTtsVoiceFor, pickQwenTtsCredential, QWEN_TTS_LANGUAGES, QWEN_TTS_PROVIDER_LABEL } from '../../agentsManager/common/qwenTts.js';
+import { reconcileTtsSelection, ttsAllowsCustomModelId, ttsFormatsFor, ttsModelsFor, ttsVoicesFor } from '../../agentsManager/common/ttsProviderOptions.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
@@ -289,6 +291,10 @@ interface IEditorParts {
 	ttsEditTextBtn?: HTMLButtonElement;
 	ttsFormatSelect?: HTMLSelectElement;
 	ttsHeaderModelBadge?: HTMLElement;
+	ttsLanguageGroup?: HTMLElement;
+	ttsLanguageSelect?: HTMLSelectElement;
+	ttsRegionWarning?: HTMLElement;
+	ttsFixNotice?: HTMLElement;
 	ttsLlmTextInput?: HTMLTextAreaElement;
 	ttsModelDropdown?: HTMLElement;
 	ttsModelList?: HTMLElement;
@@ -2444,6 +2450,7 @@ export class EntityDetailEditor extends EditorPane {
 					targetCredentialId: f.targetCredentialId || '',
 					ttsFormat: f.ttsFormat || 'mp3',
 					ttsVoice: f.ttsVoice || 'Kore',
+					ttsLanguage: f.ttsLanguage || '',
 					ttsAutoPlay: !!f.ttsAutoPlay
 				});
 			} else if (fType === 'media_player') {
@@ -12287,30 +12294,7 @@ ${rawErr}
 			}
 		} catch { }
 
-		const builtInTtsModels: Record<string, Array<{ id: string; badge: string }>> = {
-			gemini: [
-				{ id: 'gemini-2.5-flash-preview-tts', badge: 'TTS Voice' },
-				{ id: 'gemini-2.5-pro-preview-tts', badge: 'TTS HD' },
-				{ id: 'gemini-2.0-flash', badge: 'Audio Output' },
-				{ id: 'gemini-2.5-flash', badge: 'Multimodal' }
-			],
-			openai: [
-				{ id: 'tts-1', badge: 'TTS Standard' },
-				{ id: 'tts-1-hd', badge: 'TTS HD' },
-				{ id: 'gpt-4o-mini-tts', badge: 'GPT-4o TTS' },
-				{ id: 'gpt-4o-audio-preview', badge: 'Audio' }
-			],
-			'custom-openai': [
-				{ id: 'tts-1', badge: 'TTS' },
-				{ id: 'gpt-4o-mini-tts', badge: 'TTS' }
-			]
-		};
-
-		const providerVoices: Record<string, string[]> = {
-			gemini: ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Zephyr', 'Leda', 'Orus'],
-			openai: ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'coral', 'sage', 'ash', 'ballad', 'verse'],
-			'custom-openai': ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'Kore', 'Puck']
-		};
+		const providerLabel = (providerId: string) => providerId === 'aliyun' ? QWEN_TTS_PROVIDER_LABEL : providerId.toUpperCase();
 
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
@@ -12323,6 +12307,8 @@ ${rawErr}
 			const modelListEl = partsOf(card).ttsModelList as HTMLElement | null;
 			const formatSelect = partsOf(card).ttsFormatSelect as HTMLSelectElement | null;
 			const voiceSelect = partsOf(card).ttsVoiceSelect as HTMLSelectElement | null;
+			const languageSelect = partsOf(card).ttsLanguageSelect as HTMLSelectElement | null;
+			const languageGroup = partsOf(card).ttsLanguageGroup as HTMLElement | null;
 			const autoPlayCheckbox = partsOf(card).ttsAutoplayCheckbox as HTMLInputElement | null;
 			const headerModelBadge = partsOf(card).ttsHeaderModelBadge as HTMLElement | null;
 			const llmTextInput = partsOf(card).ttsLlmTextInput as HTMLTextAreaElement | null;
@@ -12340,9 +12326,26 @@ ${rawErr}
 
 			let activeCredId = card.getAttribute('data-cred-id') || '';
 			let activeProvider = card.getAttribute('data-provider') || 'gemini';
-			let activeModel = card.getAttribute('data-model') || (activeProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+			let activeModel = card.getAttribute('data-model') || defaultTtsModelFor(activeProvider);
 			let activeFormat = card.getAttribute('data-format') || 'mp3';
-			let activeVoice = card.getAttribute('data-voice') || (activeProvider === 'openai' ? 'alloy' : 'Kore');
+			let activeVoice = card.getAttribute('data-voice') || defaultTtsVoiceFor(activeProvider);
+
+			// Language (Alibaba Cloud Qwen TTS only): language_type, Auto by default
+			const populateLanguages = (provId: string) => {
+				if (languageGroup) {
+					languageGroup.style.display = provId === 'aliyun' ? 'flex' : 'none';
+				}
+				if (!languageSelect) { return; }
+				clearNode(languageSelect);
+				const current = card.getAttribute('data-language') || 'Auto';
+				QWEN_TTS_LANGUAGES.forEach(l => {
+					const opt = document.createElement('option');
+					opt.value = l;
+					opt.textContent = l;
+					if (l === current) { opt.selected = true; }
+					languageSelect.appendChild(opt);
+				});
+			};
 
 			const updateHeaderBadge = () => {
 				if (headerModelBadge) {
@@ -12353,7 +12356,7 @@ ${rawErr}
 			const populateVoices = (provId: string) => {
 				if (!voiceSelect) { return; }
 				clearNode(voiceSelect);
-				const voices = providerVoices[provId] || providerVoices.gemini;
+				const voices = ttsVoicesFor(provId);
 				if (!activeVoice || !voices.includes(activeVoice)) {
 					activeVoice = voices[0];
 					card.setAttribute('data-voice', activeVoice);
@@ -12376,19 +12379,20 @@ ${rawErr}
 					dropdownProviderBadge.textContent = provId.toUpperCase();
 				}
 
-				const cachedModels: string[] = Array.isArray(selCred?.cachedModels) ? selCred.cachedModels : [];
-				const recommended = builtInTtsModels[provId] || builtInTtsModels.gemini;
-				const combined: Array<{ id: string; badge?: string }> = [...recommended];
-				cachedModels.forEach(cm => {
-					if (!combined.some(item => item.id === cm)) {
-						combined.push({ id: cm, badge: cm.toLowerCase().includes('tts') || cm.toLowerCase().includes('audio') ? 'Voice' : 'Model' });
-					}
-				});
+				// Only the TTS models of the selected credential's provider (documented + TTS models in its cached list)
+				const combined: Array<{ id: string; badge?: string }> = ttsModelsFor(provId, selCred);
 
 				const q = filterQuery.trim().toLowerCase();
 				const filtered = q ? combined.filter(m => m.id.toLowerCase().includes(q)) : combined;
-				if (q && !filtered.some(m => m.id.toLowerCase() === q)) {
+				if (q && ttsAllowsCustomModelId(provId) && !filtered.some(m => m.id.toLowerCase() === q)) {
 					filtered.unshift({ id: filterQuery.trim(), badge: 'Custom ID' });
+				}
+				if (filtered.length === 0) {
+					const empty = document.createElement('div');
+					empty.className = 'tts-model-empty';
+					empty.style.cssText = 'padding: 6px 8px; font-size: 11px; opacity: 0.75;';
+					empty.textContent = combined.length === 0 ? 'This credential has no text-to-speech models.' : 'No matching model.';
+					modelListEl.appendChild(empty);
 				}
 
 				filtered.forEach(m => {
@@ -12423,14 +12427,64 @@ ${rawErr}
 				});
 			};
 
+			// Alibaba Cloud credential of a region without TTS (US (Virginia)): say so right under the selector row
+			const regionWarning = partsOf(card).ttsRegionWarning as HTMLElement | null;
+			const fixNotice = partsOf(card).ttsFixNotice as HTMLElement | null;
+			const populateFormats = (provId: string) => {
+				if (!formatSelect) { return; }
+				clearNode(formatSelect);
+				ttsFormatsFor(provId).forEach(f => {
+					const opt = document.createElement('option');
+					opt.value = f.value;
+					opt.textContent = f.label;
+					if (f.value === activeFormat) { opt.selected = true; }
+					formatSelect.appendChild(opt);
+				});
+			};
+			/**
+			 * Makes model / voice / format fit the selected credential's provider: what does not fit is reset to the
+			 * provider's first valid option and saved. On load a one-line notice says what was corrected.
+			 */
+			const applyProviderOptions = (reason: 'load' | 'switch') => {
+				const selCred = loadedCredentials.find(c => c.id === activeCredId);
+				const r = reconcileTtsSelection(activeProvider, selCred, { model: activeModel, voice: activeVoice, format: activeFormat });
+				const before = { model: activeModel, voice: activeVoice, format: activeFormat };
+				activeModel = r.model;
+				activeVoice = r.voice;
+				activeFormat = r.format;
+				card.setAttribute('data-model', activeModel);
+				card.setAttribute('data-voice', activeVoice);
+				card.setAttribute('data-format', activeFormat);
+				if (selectedModelText) { selectedModelText.textContent = activeModel; }
+				populateVoices(activeProvider);
+				populateFormats(activeProvider);
+				populateLanguages(activeProvider);
+				renderModelOptions(modelSearchInput?.value || '');
+				updateHeaderBadge();
+				if (regionWarning) {
+					regionWarning.textContent = r.unavailable || '';
+					regionWarning.style.display = r.unavailable ? 'block' : 'none';
+				}
+				if (fixNotice) {
+					const fixes = r.changed.map(k => k === 'model' ? `model ${before.model || '(none)'} -> ${r.model}` : k === 'voice' ? `voice ${before.voice || '(none)'} -> ${r.voice}` : `format ${(before.format || '(none)').toUpperCase()} -> ${r.format.toUpperCase()}`);
+					fixNotice.textContent = reason === 'load' && fixes.length ? `Adjusted to fit ${selCred?.name || activeProvider}: ${fixes.join(', ')}.` : '';
+					fixNotice.style.display = fixNotice.textContent ? 'block' : 'none';
+				}
+				return r.changed.length > 0;
+			};
+
 			// Populate Credential / Provider Dropdown (Agent Central style)
 			if (credSelect) {
 				clearNode(credSelect);
 				if (loadedCredentials.length > 0) {
+					if (!activeCredId && activeProvider === 'aliyun') {
+						// No credential picked yet for Alibaba Cloud: the one whose region has TTS (e.g. Singapore)
+						activeCredId = pickQwenTtsCredential(loadedCredentials)?.id || '';
+					}
 					loadedCredentials.forEach(c => {
 						const opt = document.createElement('option');
 						opt.value = c.id;
-						opt.textContent = `${c.name} (${c.providerId.toUpperCase()})`;
+						opt.textContent = `${c.name} (${providerLabel(c.providerId)})`;
 						if (c.id === activeCredId || (!activeCredId && c.providerId === activeProvider)) {
 							opt.selected = true;
 							activeCredId = c.id;
@@ -12449,6 +12503,7 @@ ${rawErr}
 					[
 						{ id: 'gemini', label: 'Google Gemini (GEMINI)' },
 						{ id: 'openai', label: 'OpenAI (OPENAI)' },
+						{ id: 'aliyun', label: QWEN_TTS_PROVIDER_LABEL },
 						{ id: 'custom-openai', label: 'Custom OpenAI Endpoint' }
 					].forEach(p => {
 						const opt = document.createElement('option');
@@ -12470,19 +12525,15 @@ ${rawErr}
 					}
 					card.setAttribute('data-cred-id', activeCredId);
 					card.setAttribute('data-provider', activeProvider);
-					const rec = builtInTtsModels[activeProvider] || builtInTtsModels.gemini;
-					activeModel = rec[0].id;
-					card.setAttribute('data-model', activeModel);
-					if (selectedModelText) { selectedModelText.textContent = activeModel; }
-					populateVoices(activeProvider);
-					renderModelOptions(modelSearchInput?.value || '');
-					updateHeaderBadge();
+					applyProviderOptions('switch');
 					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
-			populateVoices(activeProvider);
-			renderModelOptions('');
+			// A stored combination that does not fit the credential (e.g. Alibaba Cloud + a Gemini model + Kore) is corrected and saved
+			if (applyProviderOptions('load')) {
+				this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
+			}
 
 			if (modelPickerBtn && modelDropdown) {
 				modelPickerBtn.onclick = (ev) => {
@@ -12522,6 +12573,13 @@ ${rawErr}
 				voiceSelect.onchange = () => {
 					activeVoice = voiceSelect.value;
 					card.setAttribute('data-voice', activeVoice);
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
+				};
+			}
+
+			if (languageSelect) {
+				languageSelect.onchange = () => {
+					card.setAttribute('data-language', languageSelect.value || 'Auto');
 					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
@@ -13069,6 +13127,7 @@ ${rawErr}
 			targetModel: card.getAttribute('data-model') || 'gemini-2.5-flash-preview-tts',
 			ttsFormat: formatSelect?.value || card.getAttribute('data-format') || 'mp3',
 			ttsVoice: voiceSelect?.value || card.getAttribute('data-voice') || 'Kore',
+			ttsLanguage: card.getAttribute('data-language') || '',
 			ttsAutoPlay: autoPlayCheckbox ? autoPlayCheckbox.checked : (card.getAttribute('data-autoplay') === 'true'),
 			ttsPlaybackRate: parseFloat(card.getAttribute('data-playback-rate') || '1') || 1.0,
 			audioFileName: overrides?.audioFileName !== undefined ? overrides.audioFileName : (card.getAttribute('data-audio-file') || ''),
@@ -13948,7 +14007,7 @@ ${rawErr}
 		const interpolatedText = this._interpolateParameters(rawText);
 		const credId = card.getAttribute('data-cred-id') || '';
 		const providerId = card.getAttribute('data-provider') || 'gemini';
-		const modelId = card.getAttribute('data-model') || (providerId === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+		const modelId = card.getAttribute('data-model') || defaultTtsModelFor(providerId);
 		const formatSelect = partsOf(card).ttsFormatSelect as HTMLSelectElement | null;
 		const voiceSelect = partsOf(card).ttsVoiceSelect as HTMLSelectElement | null;
 		const format = (formatSelect?.value || card.getAttribute('data-format') || 'mp3').toLowerCase();
@@ -13984,7 +14043,8 @@ ${rawErr}
 				credentialId: credId || undefined,
 				providerId,
 				format,
-				voice
+				voice,
+				language: card.getAttribute('data-language') || undefined
 			});
 
 			if (!res.success || !res.audioBuffer) {
@@ -14002,7 +14062,7 @@ ${rawErr}
 			}
 
 			const safeKey = fieldKey.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'tts_audio';
-			const audioFileName = `tts_${safeKey}.${format}`;
+			const audioFileName = `tts_${safeKey}.${res.format || format}`;
 			const audioRelativePath = `attachments/${audioFileName}`;
 			const audioFileUri = URI.joinPath(this._entityUri, audioRelativePath);
 
@@ -14050,7 +14110,9 @@ ${rawErr}
 		} catch (err) {
 			const errMsg = (err as Error | undefined)?.message || String(err);
 			if (statusText) {
-				statusText.textContent = `Error: ${errMsg.slice(0, 60)}`;
+				// The whole message: provider errors (e.g. "no text-to-speech in this region") must stay readable
+				statusText.textContent = `Error: ${errMsg.length > 300 ? errMsg.slice(0, 300) + '...' : errMsg}`;
+				statusText.title = errMsg;
 				statusText.style.color = '#ef4444';
 			}
 			this._notificationService.error(`TTS Synthesis Failed: ${errMsg}`);
@@ -21063,6 +21125,7 @@ ${interpolatedPrompt}`;
 			targetAgentName?: string;
 			ttsFormat?: string;
 			ttsVoice?: string;
+			ttsLanguage?: string;
 			ttsAutoPlay?: boolean;
 			ttsDisplayText?: string;
 			ttsShowSpeechTextInTicket?: boolean;
@@ -21234,6 +21297,7 @@ ${interpolatedPrompt}`;
 					targetAgentName: f.targetAgentName,
 					ttsFormat: f.ttsFormat,
 					ttsVoice: f.ttsVoice,
+					ttsLanguage: f.ttsLanguage,
 					ttsAutoPlay: f.ttsAutoPlay,
 					ttsDisplayText: f.ttsDisplayText,
 					ttsShowSpeechTextInTicket: f.ttsShowSpeechTextInTicket,
@@ -22775,9 +22839,10 @@ ${interpolatedPrompt}`;
 					let ttsShowSpeechTextInTicket = Boolean(fieldItem.ttsShowSpeechTextInTicket);
 					let ttsCredentialId = fieldItem.targetCredentialId || '';
 					let ttsProvider = fieldItem.targetProvider || 'gemini';
-					let ttsModel = fieldItem.targetModel || (ttsProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+					let ttsModel = fieldItem.targetModel || defaultTtsModelFor(ttsProvider);
 					let ttsFormat = fieldItem.ttsFormat || 'mp3';
-					let ttsVoice = fieldItem.ttsVoice || (ttsProvider === 'openai' ? 'alloy' : 'Kore');
+					let ttsVoice = fieldItem.ttsVoice || defaultTtsVoiceFor(ttsProvider);
+					let ttsLanguage = fieldItem.ttsLanguage || '';
 					let ttsAutoPlay = Boolean(fieldItem.ttsAutoPlay);
 					let ttsPlaybackRate = (typeof fieldItem.ttsPlaybackRate === 'number' && fieldItem.ttsPlaybackRate >= 0.25 && fieldItem.ttsPlaybackRate <= 2.5) ? fieldItem.ttsPlaybackRate : 1.0;
 					let audioFileName = '';
@@ -22807,6 +22872,7 @@ ${interpolatedPrompt}`;
 									if (tObj.targetModel) { ttsModel = String(tObj.targetModel); }
 									if (tObj.ttsFormat) { ttsFormat = String(tObj.ttsFormat); }
 									if (tObj.ttsVoice) { ttsVoice = String(tObj.ttsVoice); }
+									if (tObj.ttsLanguage) { ttsLanguage = String(tObj.ttsLanguage); }
 									if (tObj.ttsAutoPlay !== undefined) { ttsAutoPlay = Boolean(tObj.ttsAutoPlay); }
 									if (tObj.ttsPlaybackRate !== undefined && Number.isFinite(Number(tObj.ttsPlaybackRate))) {
 										ttsPlaybackRate = Math.min(2.5, Math.max(0.25, Number(tObj.ttsPlaybackRate)));
@@ -22841,6 +22907,7 @@ ${interpolatedPrompt}`;
 							if (tObj.targetModel) { ttsModel = String(tObj.targetModel); }
 							if (tObj.ttsFormat) { ttsFormat = String(tObj.ttsFormat); }
 							if (tObj.ttsVoice) { ttsVoice = String(tObj.ttsVoice); }
+							if (tObj.ttsLanguage) { ttsLanguage = String(tObj.ttsLanguage); }
 							if (tObj.ttsAutoPlay !== undefined) { ttsAutoPlay = Boolean(tObj.ttsAutoPlay); }
 							if (tObj.ttsPlaybackRate !== undefined && Number.isFinite(Number(tObj.ttsPlaybackRate))) {
 								ttsPlaybackRate = Math.min(2.5, Math.max(0.25, Number(tObj.ttsPlaybackRate)));
@@ -22859,7 +22926,7 @@ ${interpolatedPrompt}`;
 					const interpolatedSpeechText = this._interpolateParameters(ttsText);
 					const interpolatedDisplayText = this._interpolateParameters(ttsDisplayText);
 
-					customFieldsContent.push(part(['sectionCards', 'ttsPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card tts-primitive-card${stepCardClass}`, 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text'), 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
+					customFieldsContent.push(part(['sectionCards', 'ttsPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card tts-primitive-card${stepCardClass}`, 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': textOf(fType || 'text'), 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-language': textOf(ttsLanguage), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
@@ -22929,6 +22996,8 @@ ${interpolatedPrompt}`;
 												))
 											)
 										),
+										part('ttsRegionWarning', $('div.tts-region-warning', { style: 'display: none; font-size: 11px; color: #f87171; padding: 4px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);' })),
+										part('ttsFixNotice', $('div.tts-fix-notice', { style: 'display: none; font-size: 11px; opacity: 0.8; padding: 2px 8px;' })),
 										$('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.05);' },
 											$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 												$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.8;' }, 'Format:'),
@@ -22945,6 +23014,12 @@ ${interpolatedPrompt}`;
 													$<HTMLOptionElement>('option', { value: textOf(ttsVoice) }, textOf(ttsVoice))
 												))
 											),
+											part('ttsLanguageGroup', $('div.tts-language-group', { style: `display: ${ttsProvider === 'aliyun' ? 'flex' : 'none'}; align-items: center; gap: 6px;` },
+												$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.8;' }, 'Language:'),
+												part('ttsLanguageSelect', $<HTMLSelectElement>('select.tts-language-select.monaco-select', { 'data-field-key': textOf(rawKey), title: 'Language of the text (Alibaba Cloud Qwen TTS). Auto detects it.', style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
+													$<HTMLOptionElement>('option', { value: textOf(ttsLanguage || 'Auto') }, textOf(ttsLanguage || 'Auto'))
+												))
+											)),
 											$('label', { style: 'display: inline-flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; user-select: none; margin-left: auto; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);', title: 'Automatically play this MP3 audio when viewing this module' },
 												part('ttsAutoplayCheckbox', $<HTMLInputElement>('input.tts-autoplay-checkbox', { type: 'checkbox', 'data-field-key': textOf(rawKey), checked: ttsAutoPlay ? '' : undefined, style: 'cursor: pointer; margin: 0;' })),
 												$('span', undefined, 'Auto-Play Audio')

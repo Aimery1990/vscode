@@ -5695,6 +5695,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 							targetModel: field.targetModel || 'gemini-2.5-flash-preview-tts',
 							ttsFormat: field.ttsFormat || 'mp3',
 							ttsVoice: field.ttsVoice || 'Kore',
+							ttsLanguage: field.ttsLanguage || '',
 							ttsAutoPlay: Boolean(field.ttsAutoPlay),
 							audioFileName: '',
 							audioRelativePath: '',
@@ -5947,6 +5948,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								targetCredentialId: f.targetCredentialId || '',
 								ttsFormat: f.ttsFormat || 'mp3',
 								ttsVoice: f.ttsVoice || 'Kore',
+								ttsLanguage: f.ttsLanguage || '',
 								ttsAutoPlay: !!f.ttsAutoPlay
 							});
 						} else if (f.type === 'media_player') {
