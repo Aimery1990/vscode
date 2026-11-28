@@ -6,7 +6,7 @@ import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { CanonicalStatusCategory } from '../../common/workspacesExplorer.js';
 import { IWorkspaceLifecycleLike } from '../../common/ticketStatusPicker.js';
-import { buildTicketBoard, classifyBoardTestResult, groupLifecycleStatuses, ITicketBoard, OTHER_BOARD_GROUP, parseBoardModeKeys, updateBoardModeKeys } from '../../common/ticketBoardModel.js';
+import { buildTicketBoard, classifyBoardTestResult, cleanAgentName, collectBoardLabels, countSubtasks, describeBoardCardMeta, describeBoardPriority, filterBoardCards, groupLifecycleStatuses, isBoardFilterActive, ITicketBoard, OTHER_BOARD_GROUP, parseBoardModeKeys, pluralize, updateBoardModeKeys } from '../../common/ticketBoardModel.js';
 
 function lifecycle(mapping: { [status: string]: CanonicalStatusCategory }): IWorkspaceLifecycleLike {
 	return {
@@ -98,5 +98,57 @@ suite('ticketBoardModel', () => {
 		assert.deepStrictEqual(updateBoardModeKeys(['a', 'b'], 'a', 'board'), ['b', 'a']);
 		assert.deepStrictEqual(updateBoardModeKeys(['a', 'b'], 'a', 'details'), ['b']);
 		assert.deepStrictEqual(updateBoardModeKeys(['a', 'b', 'c'], 'd', 'board', 3), ['b', 'c', 'd']);
+	});
+
+	test('Show empty statuses off drops empty columns and empty categories', () => {
+		const board = buildTicketBoard([{ id: 'a', status: 'To be verified' }, { id: 'b', status: 'Todo' }], ws, { showRemoved: false, showEmptyStatuses: false });
+		assert.deepStrictEqual(shape(board), ['Todo[1,flat]: Todo(b)', 'In Progress[1]: To be verified(a)']);
+	});
+
+	test('filter by title / ID and by labels', () => {
+		const cards = [
+			{ ticketId: 'ANYAG-0004', title: 'CI-29 tts', labels: ['Decision'] },
+			{ ticketId: 'ANYAG-0130', title: 'Auto test all', labels: ['Dev', 'Verify'] },
+			{ ticketId: 'ANYAG-0002', title: 'git component', labels: [] }
+		];
+		assert.deepStrictEqual(filterBoardCards(cards, {}).length, 3);
+		assert.deepStrictEqual(filterBoardCards(cards, { query: '  0130 ' }).map(c => c.ticketId), ['ANYAG-0130']);
+		assert.deepStrictEqual(filterBoardCards(cards, { query: 'GIT' }).map(c => c.ticketId), ['ANYAG-0002']);
+		assert.deepStrictEqual(filterBoardCards(cards, { labels: ['verify', 'decision'] }).map(c => c.ticketId), ['ANYAG-0004', 'ANYAG-0130']);
+		assert.deepStrictEqual(filterBoardCards(cards, { query: 'ci-29', labels: ['Dev'] }), []);
+		assert.strictEqual(isBoardFilterActive({ query: ' ', labels: [] }), false);
+		assert.strictEqual(isBoardFilterActive({ labels: ['Dev'] }), true);
+		assert.deepStrictEqual(collectBoardLabels(cards, ['dev', 'Bug']), ['Decision', 'Dev', 'Verify', 'Bug']);
+	});
+
+	test('subtask counts skip removed children', () => {
+		assert.deepStrictEqual(countSubtasks([]), { done: 0, total: 0 });
+		assert.deepStrictEqual(countSubtasks([
+			{ category: 'Done', removed: false },
+			{ category: 'Todo', removed: false },
+			{ category: 'In Progress', removed: false },
+			{ category: 'Done', removed: false },
+			{ category: 'Removed', removed: true },
+			{ category: undefined, removed: false }
+		]), { done: 2, total: 5 });
+	});
+
+	test('priority and card footer text', () => {
+		assert.deepStrictEqual(describeBoardPriority('High'), { text: 'High priority', tone: 'high' });
+		assert.deepStrictEqual(describeBoardPriority('Very High'), { text: 'Very High priority', tone: 'high' });
+		assert.deepStrictEqual(describeBoardPriority(undefined), { text: 'Medium priority', tone: 'muted' });
+		assert.deepStrictEqual(describeBoardPriority('Low'), { text: 'Low priority', tone: 'muted' });
+		const none = { done: 0, total: 0 };
+		assert.deepStrictEqual(describeBoardCardMeta({ failure: { reasons: ['x'] }, subtasks: { done: 1, total: 2 } }), { kind: 'runFailed', text: 'Run failed' });
+		assert.deepStrictEqual(describeBoardCardMeta({ failure: { reasons: ['x'] }, testResult: 'failed', subtasks: none }), { kind: 'testFailed', text: 'Test failed' });
+		assert.deepStrictEqual(describeBoardCardMeta({ testResult: 'passed', subtasks: none }), { kind: 'testPassed', text: 'Test passed' });
+		assert.deepStrictEqual(describeBoardCardMeta({ testResult: 'notRun', subtasks: none }), { kind: 'testNotRun', text: 'Not run' });
+		assert.deepStrictEqual(describeBoardCardMeta({ subtasks: { done: 2, total: 4 } }), { kind: 'subtasks', text: '2 / 4 subtasks' });
+		assert.deepStrictEqual(describeBoardCardMeta({ subtasks: { done: 0, total: 1 } }), { kind: 'subtasks', text: '0 / 1 subtask' });
+		assert.deepStrictEqual(describeBoardCardMeta({ subtasks: none }), { kind: 'none', text: '' });
+		assert.strictEqual(pluralize(1, 'status', 'statuses'), '1 status');
+		assert.strictEqual(pluralize(3, 'status', 'statuses'), '3 statuses');
+		assert.strictEqual(cleanAgentName(' None '), undefined);
+		assert.strictEqual(cleanAgentName('`Coder`'), 'Coder');
 	});
 });
