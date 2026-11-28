@@ -36,6 +36,7 @@ import { RequestChannelClient } from '../../../../platform/request/common/reques
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { ISubWorkflowDefinition, hasWorkflowProperty, isWorkflowRecord } from '../common/workflowExecutionModel.js';
 import { buildDynamicListContextValue } from '../common/dynamicListValue.js';
+import { ticketRunDescription, ticketRunTitle } from '../common/ticketRunContext.js';
 import { ISubWorkflowCallChain, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain } from '../common/subWorkflowCallGraph.js';
 import { ISubWorkflowInvocationResult, IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 import { mainWindow } from '../../../../base/browser/window.js';
@@ -1599,7 +1600,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 				// Record root fields title and description as explicit step results for complete visibility
 				if (field.id === 'title') {
-					const titleVal = inputOverrides['title'] || customMetadata['title'] || ticketResult.ticketName || '';
+					// {Title} is the ticket's title (README.md); the ticket ID stays available as {ticketName} / {ticketId} (CI-56)
+					const titleVal = ticketRunTitle(inputOverrides, customMetadata, ticketResult);
 					const titleStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: field.label || 'Title',
@@ -1621,7 +1623,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					continue;
 				}
 				if (field.id === 'description') {
-					const descVal = inputOverrides['description'] || customMetadata['description'] || field.defaultContent || '';
+					const descVal = ticketRunDescription(inputOverrides, customMetadata, ticketResult, field.defaultContent);
 					const descStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: field.label || 'Description',
