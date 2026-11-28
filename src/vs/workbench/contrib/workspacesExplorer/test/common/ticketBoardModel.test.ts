@@ -6,7 +6,7 @@ import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { CanonicalStatusCategory } from '../../common/workspacesExplorer.js';
 import { IWorkspaceLifecycleLike } from '../../common/ticketStatusPicker.js';
-import { buildTicketBoard, classifyBoardTestResult, cleanAgentName, collectBoardLabels, countSubtasks, describeBoardCardMeta, describeBoardPriority, filterBoardCards, groupLifecycleStatuses, isBoardFilterActive, ITicketBoard, OTHER_BOARD_GROUP, parseBoardModeKeys, pluralize, updateBoardModeKeys } from '../../common/ticketBoardModel.js';
+import { boardCategoryOffersCreate, buildTicketBoard, classifyBoardTestResult, cleanAgentName, collectBoardLabels, countSubtasks, describeBoardCardMeta, describeBoardPriority, filterBoardCards, groupLifecycleStatuses, isBoardFilterActive, ITicketBoard, OTHER_BOARD_GROUP, parseBoardModeKeys, pluralize, updateBoardModeKeys } from '../../common/ticketBoardModel.js';
 
 function lifecycle(mapping: { [status: string]: CanonicalStatusCategory }): IWorkspaceLifecycleLike {
 	return {
@@ -71,6 +71,20 @@ suite('ticketBoardModel', () => {
 		assert.strictEqual(last.columns[0].droppable, false);
 		assert.ok(board.groups.slice(0, -1).every(g => g.columns.every(c => c.droppable)));
 		assert.strictEqual(board.total, 3);
+	});
+
+	test('only Todo columns offer create (UI-25)', () => {
+		const multi = lifecycle({ 'Backlog': 'Todo', 'Todo': 'Todo', 'In Progress': 'In Progress', 'Done': 'Done', 'Blocked': 'Blocked', 'Removed': 'Removed' });
+		const board = buildTicketBoard([{ id: 'a', status: 'Weird' }, { id: 'b', status: 'Removed' }], multi, { showRemoved: true });
+		const offers = board.groups.flatMap(g => g.columns.filter(c => c.canCreate).map(c => c.status));
+		assert.deepStrictEqual(offers, ['Backlog', 'Todo']);
+		assert.ok(board.groups.filter(g => g.kind !== 'Todo').every(g => g.columns.every(c => !c.canCreate)));
+
+		// hiding empty statuses keeps the flag on the remaining Todo column
+		const compact = buildTicketBoard([{ id: 'a', status: 'Todo' }, { id: 'c', status: 'Done' }], multi, { showRemoved: false, showEmptyStatuses: false });
+		assert.deepStrictEqual(compact.groups.map(g => `${g.kind}:${g.columns.map(c => `${c.status}=${c.canCreate}`).join(',')}`), ['Todo:Todo=true', 'Done:Done=false']);
+
+		assert.deepStrictEqual(['Todo', 'In Progress', 'Done', 'Blocked', 'Removed', OTHER_BOARD_GROUP].map(k => boardCategoryOffersCreate(k as Parameters<typeof boardCategoryOffersCreate>[0])), [true, false, false, false, false, false]);
 	});
 
 	test('no Other group when every status is known', () => {

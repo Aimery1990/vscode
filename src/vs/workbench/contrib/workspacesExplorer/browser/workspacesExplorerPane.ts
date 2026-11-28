@@ -3418,9 +3418,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 	}
 
 	/**
-	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder
+	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder.
+	 * `requestedStatus` (the board's Todo columns, UI-25): the new item starts in that status when it is one of the
+	 * chosen type's statuses (template statuses, else the workspace lifecycle); otherwise in the default initial status.
 	 */
-	public showCreateResourceModal(target?: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void, initialType?: string): void {
+	public showCreateResourceModal(target?: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void, initialType?: string, requestedStatus?: string): void {
 		// No target location: use the current workspace (tickets always live inside a workspace); without one, refuse (CI-26)
 		if (!target) {
 			this.workspacesExplorerService.getWorkspaces().then(workspaces => {
@@ -3429,7 +3431,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					this.notificationService.warn('There is no workspace to create this in. Create or open a workspace first (choose its folder with the folder picker), then create the item inside it.');
 					return;
 				}
-				this.showCreateResourceModal(current, parentName, onSuccess, initialType);
+				this.showCreateResourceModal(current, parentName, onSuccess, initialType, requestedStatus);
 			}, err => this.notificationService.error(`Failed to load workspaces: ${(err as Error | undefined)?.message || err}`));
 			return;
 		}
@@ -5785,7 +5787,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 
 				const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(targetUri);
-				const initialStatus = initialStatusOverride || ((selectedType === 'agent') ? 'idle' : (wsStatuses.statuses[0] || 'Todo'));
+				let requestedInitialStatus = '';
+				if (requestedStatus && selectedType !== 'agent') {
+					const effective = resolveEffectiveStatusOptions(findTemplateForType(customModules, selectedType)?.statuses, wsStatuses);
+					requestedInitialStatus = findStatusOption(effective.options, requestedStatus)?.status ?? '';
+					if (!requestedInitialStatus) {
+						this.notificationService.warn(`'${requestedStatus}' is not a status of ${selectedType}; the new item starts in its initial status.`);
+					}
+				}
+				const initialStatus = initialStatusOverride || requestedInitialStatus || ((selectedType === 'agent') ? 'idle' : (wsStatuses.statuses[0] || 'Todo'));
 
 				const wsRootUri = await this.workspacesExplorerService.findWorkspaceRootUri(targetUri);
 				const isSubEntity = wsRootUri.path !== targetUri.path;

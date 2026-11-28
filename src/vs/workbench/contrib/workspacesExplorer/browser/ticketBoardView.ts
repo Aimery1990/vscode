@@ -76,7 +76,7 @@ const REFRESH_DEBOUNCE_MS = 300;
 
 /** The Workspaces tree view (structural: avoids importing the pane). */
 interface ICreateResourceHost {
-	showCreateResourceModal?(target: URI, parentName?: string, onSuccess?: (type: string, name: string) => void): void;
+	showCreateResourceModal?(target: URI, parentName?: string, onSuccess?: (type: string, name: string) => void, initialType?: string, initialStatus?: string): void;
 }
 
 export class TicketBoardController extends Disposable {
@@ -421,7 +421,10 @@ export class TicketBoardController extends Disposable {
 		this._scheduleRefresh();
 	}
 
-	/** Opens the tree's create dialog for a direct child; with `status`, the new child then gets that status. */
+	/**
+	 * Opens the tree's create dialog for a direct child. With `status` (a Todo column), the dialog creates the child
+	 * in that status (matched against the chosen type's statuses), so nothing has to be set afterwards.
+	 */
 	private async _createChild(status?: string): Promise<void> {
 		const parentUri = this._ticketUri;
 		if (!parentUri) {
@@ -435,33 +438,7 @@ export class TicketBoardController extends Disposable {
 			this._notificationService.warn('Open the Workspaces view to create a ticket.');
 			return;
 		}
-		const before = new Set((this._cards ?? []).map(c => c.uri.toString()));
-		view.showCreateResourceModal(parentUri, this._parent?.ticketId ?? basename(parentUri), () => {
-			if (status) {
-				this._applyStatusToNewChild(parentUri, before, status);
-			} else {
-				this._scheduleRefresh();
-			}
-		});
-	}
-
-	private async _applyStatusToNewChild(parentUri: URI, before: ReadonlySet<string>, status: string): Promise<void> {
-		for (let attempt = 0; attempt < 10; attempt++) {
-			const summary = await this._workspacesExplorerService.getTicketSubtreeSummary(parentUri);
-			const created = summary.children.find(n => n.resource && !before.has(n.resource.toString()));
-			if (created?.resource) {
-				const match = await this._matchStatus(created.type, status);
-				if (!match) {
-					this._notificationService.warn(`'${status}' is not a status of ${created.ticketId ?? basename(created.resource)}; it keeps its initial status.`);
-				} else if ((created.status ?? '').trim().toLowerCase() !== match.toLowerCase()) {
-					await this._workspacesExplorerService.setEntityStatus(created.resource, match, 'User');
-				}
-				this._scheduleRefresh();
-				return;
-			}
-			await new Promise(resolve => setTimeout(resolve, 400));
-		}
-		this._scheduleRefresh();
+		view.showCreateResourceModal(parentUri, this._parent?.ticketId ?? basename(parentUri), () => this._scheduleRefresh(), undefined, status);
 	}
 
 	private async _openStatusMapping(anchor: HTMLElement): Promise<void> {
@@ -532,7 +509,7 @@ export class TicketBoardController extends Disposable {
 			onStatusMapping: anchor => this._openStatusMapping(anchor),
 			onCreate: status => this._createChild(status),
 			onColumnMenu: (anchor, column) => this._showMenu(anchor, [
-				...(column.droppable ? [toAction({ id: 'board.column.create', label: 'Create ticket here', run: () => this._createChild(column.status) })] : []),
+				...(column.canCreate ? [toAction({ id: 'board.column.create', label: 'Create ticket here', run: () => this._createChild(column.status) })] : []),
 				toAction({
 					id: 'board.column.collapse',
 					label: this._collapsed.has(column.status) ? 'Expand column' : 'Collapse column',
@@ -855,7 +832,7 @@ function renderColumn(columnsEl: HTMLElement, group: IBoardGroup<ITicketBoardCar
 		for (const card of column.cards) {
 			append(list, renderCard(card, group.kind === 'Done', opts));
 		}
-		if (column.droppable) {
+		if (column.canCreate) {
 			append(colEl, button('ticket-board-add', 'Create ticket', Codicon.add, `Create a child ticket with status ${column.status}`, () => opts.onCreate(column.status)));
 		}
 	}

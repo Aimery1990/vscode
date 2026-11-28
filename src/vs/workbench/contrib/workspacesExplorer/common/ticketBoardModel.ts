@@ -16,6 +16,8 @@ import { IWorkspaceLifecycleLike } from './ticketStatusPicker.js';
  * - A group's width weight is its number of status columns (at least 1).
  * - A child whose status is missing or not part of the lifecycle goes to a trailing "Other" group.
  * - Removed children (`removed`, or status in the Removed category) are left out unless `showRemoved`.
+ * - Only the columns of the Todo category offer "Create ticket" (a new ticket starts in Todo; with several Todo
+ *   statuses, in the status of the column it was created from).
  * Cards keep their input order inside a column.
  */
 
@@ -35,6 +37,8 @@ export interface IBoardStatusColumn<T> {
 	readonly cards: readonly T[];
 	/** False when the column is a drop target only by status (Other: not a drop target). */
 	readonly droppable: boolean;
+	/** Whether the column offers "Create ticket" (a new ticket in this column's status): Todo columns only. */
+	readonly canCreate: boolean;
 }
 
 export interface IBoardGroup<T> {
@@ -72,6 +76,11 @@ export function groupLifecycleStatuses(lifecycle: IWorkspaceLifecycleLike): { [c
 		map[lifecycle.getCategory(status)].push(status);
 	}
 	return map;
+}
+
+/** Whether the columns of a board group offer "Create ticket": a new ticket starts in Todo, so only Todo columns. */
+export function boardCategoryOffersCreate(kind: BoardGroupKind): boolean {
+	return kind === 'Todo';
 }
 
 export interface IBuildTicketBoardOptions {
@@ -120,7 +129,8 @@ export function buildTicketBoard<T extends IBoardItemLike>(items: readonly T[], 
 			continue;
 		}
 		const statuses = byCategory[cat];
-		const allColumns: IBoardStatusColumn<T>[] = statuses.map(status => ({ status, cards: buckets.get(status.toLowerCase()) ?? [], droppable: true }));
+		const canCreate = boardCategoryOffersCreate(cat);
+		const allColumns: IBoardStatusColumn<T>[] = statuses.map(status => ({ status, cards: buckets.get(status.toLowerCase()) ?? [], droppable: true, canCreate }));
 		const columns = options.showEmptyStatuses === false ? allColumns.filter(c => c.cards.length > 0) : allColumns;
 		if (columns.length === 0 && options.showEmptyStatuses === false) {
 			continue;
@@ -136,7 +146,7 @@ export function buildTicketBoard<T extends IBoardItemLike>(items: readonly T[], 
 	if (other.length > 0) {
 		groups.push({
 			kind: OTHER_BOARD_GROUP,
-			columns: [{ status: OTHER_BOARD_GROUP, cards: other, droppable: false }],
+			columns: [{ status: OTHER_BOARD_GROUP, cards: other, droppable: false, canCreate: false }],
 			showStatusHeaders: false,
 			count: other.length,
 			weight: 1
