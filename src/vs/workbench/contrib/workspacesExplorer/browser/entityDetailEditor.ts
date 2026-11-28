@@ -20,6 +20,7 @@ import { ITelemetryService } from '../../../../platform/telemetry/common/telemet
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { EntityDetailEditorInput, IEntityPreviewModule } from './entityDetailEditorInput.js';
+import { TicketBoardController } from './ticketBoardView.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { ISubWorkflowDefinition } from '../../workflowsManager/common/workflowExecutionModel.js';
 import { SUB_WORKFLOW_DEFINITION_REL_PATH, describeSubWorkflowSource, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition } from '../../workflowsManager/common/subWorkflowTicket.js';
@@ -977,6 +978,8 @@ export class EntityDetailEditor extends EditorPane {
 	private _activeSaveCount: number = 0;
 	private _saveChain: Promise<void> = Promise.resolve();
 	private _isEmbeddedInWorkflow: boolean = false;
+	/** Details / Board mode of the page (UI-25). */
+	private readonly _ticketBoard: TicketBoardController;
 	private _onSwitchToFlowchart?: () => void;
 	private _isPreviewMode: boolean = false;
 	private _previewModule?: ITicketTemplateModule;
@@ -1046,6 +1049,7 @@ export class EntityDetailEditor extends EditorPane {
 		@IHumanDecisionService private readonly _humanDecisionService: IHumanDecisionService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
+		this._ticketBoard = this._register(this._instantiationService.createInstance(TicketBoardController));
 
 		// Button Group gates waiting for a decision (CI-25) are highlighted on their card
 		this._register(this._humanDecisionService.onDidChange(() => this._syncButtonGroupDecisionState()));
@@ -1288,6 +1292,7 @@ export class EntityDetailEditor extends EditorPane {
 			clearNode(this._container);
 		}
 		this._pageParts = {};
+		this._ticketBoard.clear();
 		this._entityUri = undefined;
 		this._isPreviewMode = false;
 		this._previewModule = undefined;
@@ -2705,6 +2710,7 @@ export class EntityDetailEditor extends EditorPane {
 			this._disposeMediaCleanupFns();
 			this._pageParts = parts;
 			reset(this._container, ...content);
+			this._ticketBoard.mount(this._pageParts.layoutContainer, this._entityUri, !this._isEmbeddedInWorkflow && (parsed.ticketType || '').toLowerCase() !== 'agent');
 			this._syncComponentToolbox();
 			this._applySavedScrollPosition(scrollKey);
 			this._hydratePythonPrimitiveCards();
@@ -23474,6 +23480,8 @@ ${interpolatedPrompt}`;
 					$<HTMLButtonElement>('button#entity-detail-refresh-btn.btn-secondary', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: rgba(255, 255, 255, 0.06); border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.1)); color: var(--vscode-foreground);`, title: 'Refresh ticket (reload from disk)', 'aria-label': 'Refresh ticket (reload from disk)' },
 						$(`span${ThemeIcon.asCSSSelector(Codicon.refresh)}`, { style: 'font-size: 14px;' })
 					),
+					' ',
+					this._ticketBoard.createToggleButton(),
 					' ',
 					part('entityDetailToggleAttributesBtn', $<HTMLButtonElement>('button#entity-detail-toggle-attributes-btn.btn-secondary.toggle-attributes-panel-btn', { type: 'button', style: `${ENTITY_DETAIL_ICON_BTN_STYLE} background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};`, title: (this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel') },
 						$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'display:inline-block;' },
