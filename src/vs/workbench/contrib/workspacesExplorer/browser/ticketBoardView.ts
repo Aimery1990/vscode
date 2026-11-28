@@ -29,6 +29,7 @@ import { findStatusOption, findTemplateForType, resolveEffectiveStatusOptions } 
 import { readTicketLabels, readTicketStatus, readTopLevelMetadata } from '../common/workspaceLifecycle.js';
 import { CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspacesExplorerService, WORKSPACE_PANE_VIEW_ID } from '../common/workspacesExplorer.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { NO_TICKET_MENTIONS_ATTRIBUTE } from './ticketMentionChips.js';
 import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
 
 /**
@@ -887,7 +888,7 @@ function renderCard(card: ITicketBoardCard, inDone: boolean, opts: ITicketBoardR
 	const el = $('div.ticket-board-card', { draggable: 'true', tabindex: '0', role: 'button', 'data-ticket-id': card.ticketId, title: `${card.ticketId}${card.title ? ` ${card.title}` : ''}\nStatus: ${card.status || 'None'}\nClick to open, drag to change status` });
 
 	const top = append(el, $('div.line'));
-	append(top, $('span.id', undefined, card.ticketId));
+	append(top, $('span.id', { [NO_TICKET_MENTIONS_ATTRIBUTE]: '' }, card.ticketId));
 	append(top, $('span.grow'));
 	if (inDone) {
 		append(top, $('span.prio.done', undefined, card.status || 'Done'));

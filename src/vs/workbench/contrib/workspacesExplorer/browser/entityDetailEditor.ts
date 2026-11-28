@@ -42,6 +42,7 @@ import { writeTicketFile } from './ticketChangeRecorder.js';
 import { checkTicketAttachments, readTicketAttachmentManifest, withTicketAttachmentChange } from './ticketAttachmentIntegrity.js';
 import { attachmentTamperTooltip, IAttachmentManifest } from '../common/ticketAttachmentIntegrity.js';
 import { clampFocusSelection, findFocusRestoreIndex, focusKindOf, focusOrdinalOf, IEditableFocusKey, IFocusTargetInfo, isStrayKeyboardClick, TICKET_PAGE_DESTRUCTIVE_BUTTON_SELECTOR, wasFocusedByTab } from '../common/ticketPageFocus.js';
+import { TicketMentionController } from './ticketMentionChips.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
@@ -1199,6 +1200,8 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._bindContainerEvents();
 		this._installStrayClickGuard(this._rootEl);
+		// UI-31: known ticket IDs in the page's text become chips; text boxes get a "Mentions" row and Cmd/Ctrl+click
+		this._register(this._instantiationService.createInstance(TicketMentionController, this._rootEl, { selfId: () => this._lastParsedData?.ticketId }));
 
 		if (this._entityUri) {
 			this._resolvePathsAndLoadData();

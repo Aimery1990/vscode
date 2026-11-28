@@ -30,6 +30,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { describeTicketLocation, GO_TO_TICKET_COMMAND_ID, ITicketSearchEntry, ITicketSearchIndex, searchTickets, TICKET_SEARCH_MAX_RESULTS } from '../common/ticketSearch.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
+import { ITicketMentionService, TicketMentionService } from './ticketMentionChips.js';
 import { openSubWorkflowTicketCanvas } from '../../workflowsManager/browser/subWorkflowLiveView.js';
 import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 
@@ -50,6 +51,7 @@ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../
 
 // 1. Register Singleton Service
 registerSingleton(IWorkspacesExplorerService, WorkspacesExplorerService, InstantiationType.Delayed);
+registerSingleton(ITicketMentionService, TicketMentionService, InstantiationType.Delayed);
 
 // 2. Register Icon
 const workspacesExplorerIcon = registerIcon(
