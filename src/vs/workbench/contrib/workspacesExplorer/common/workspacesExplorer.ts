@@ -193,6 +193,11 @@ export interface IWorkspacesExplorerService {
 	readonly onDidCreateSubWorkflowTicket: Event<URI>;
 
 	getActiveUserEmail(): string;
+	/**
+	 * UI-30: drops the cached tree data (child lists, child counts, ticket metadata, failure / result signals) of the
+	 * folder `uri` and everything below it, or of every workspace when omitted, so the next render re-reads the disk.
+	 */
+	refreshCaches(uri?: URI): void;
 	getWorkspaces(): Promise<IWorkspaceItem[]>;
 	addWorkspace(uri: URI, name?: string): Promise<void>;
 	removeWorkspace(uri: URI): Promise<void>;

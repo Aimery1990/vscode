@@ -1553,6 +1553,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 							this._toggleWorkspacePin(canonicalWsId);
 						}),
 						new Action('refresh_workspace', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
+							this.workspacesExplorerService.refreshCaches(ws.uri);
 							this.renderContent();
 							const activeEditor = this.editorService.activeEditorPane;
 							if (activeEditor && isRefreshablePane(activeEditor)) {
@@ -2044,6 +2045,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				childActions.push(
 					new Action('refresh_child', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
+						this.workspacesExplorerService.refreshCaches(child.uri);
 						this.renderContent();
 						const activeEditor = this.editorService.activeEditorPane;
 						if (activeEditor && isRefreshablePane(activeEditor)) {

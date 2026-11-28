@@ -3,7 +3,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableMap } from '../../../../base/common/lifecycle.js';
 import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo, IWorkspaceLifecycleUpdate } from '../common/workspacesExplorer.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../common/ticketSubtreeCount.js';
 import { canonicalTreeKey, flattenTicketSubtree, ITicketSearchEntry, ITicketSearchIndex } from '../common/ticketSearch.js';
@@ -13,7 +13,8 @@ import { migrateStatus, readTicketLabels, readTicketStatus, REMOVED_STATUS_KEY, 
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IFileService } from '../../../../platform/files/common/files.js';
+import { FileOperation, IFileService } from '../../../../platform/files/common/files.js';
+import { computeExternalWatchRoots, MANAGED_WORKSPACE_WATCH_EXCLUDES } from '../common/workspaceWatchRoots.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
@@ -159,6 +160,119 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 	}
 
+	private _fileChangeTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/** UI-30: recursive watchers of the managed workspaces outside the opened folders, by normalized root URI. */
+	private readonly _externalWatchers = this._register(new DisposableMap<string>());
+
+	/**
+	 * Invalidates the tree caches for changed files and folders (watcher events, UI-30 also the app's own file
+	 * operations) and re-renders the tree when the change matters to it.
+	 */
+	private _applyFileChanges(added: readonly URI[], updated: readonly URI[], deleted: readonly URI[]): void {
+		const isRelevantMetaFile = (u: URI) => u.path.endsWith('/ticket.md') || u.path.endsWith('/README.md') || u.path.endsWith('/workspace.md');
+		// UI-20: run outcomes read by the sub-tree scan (failing tickets)
+		const isFailureSignalFile = (u: URI) => u.path.endsWith(`/.agents/${TICKET_LAST_RUN_FILE_NAME}`) || u.path.endsWith('/.agents/workflow_runs.json');
+		const deletedSet = new Set(deleted);
+		let failureSignalChanged = false;
+		for (const u of [...added, ...updated, ...deleted]) {
+			if (isFailureSignalFile(u)) {
+				this._invalidateSubtreeCaches(u);
+				failureSignalChanged = true;
+			} else if (isRelevantMetaFile(u)) {
+				this._invalidateCacheForUri(u);
+				if (u.path.endsWith('/ticket.md') || u.path.endsWith('/workspace.md')) {
+					this._workspaceStatusesCache.clear();
+					this._markAllSubtreeSummariesStale();
+				}
+			} else if (deletedSet.has(u)) {
+				this._invalidateCacheForUri(u);
+			}
+		}
+		// UI-17: a folder created / moved in changes the child lists of its ancestors
+		// (files inside a ticket's .agents folder never change child lists; ticket.md is handled above)
+		for (const u of added) {
+			if (!u.path.includes('/.agents/')) {
+				this._invalidateSubtreeCaches(u);
+			}
+		}
+		if (added.some(isRelevantMetaFile) || deleted.length > 0) {
+			if (this._fileChangeTimer) {
+				clearTimeout(this._fileChangeTimer);
+				this._fileChangeTimer = undefined;
+			}
+			this._onDidChangeWorkspaces.fire();
+		} else if (updated.some(isRelevantMetaFile) || failureSignalChanged) {
+			if (this._fileChangeTimer) {
+				clearTimeout(this._fileChangeTimer);
+			}
+			this._fileChangeTimer = setTimeout(() => {
+				this._fileChangeTimer = undefined;
+				this._onDidChangeWorkspaces.fire();
+			}, failureSignalChanged ? 400 : 150);
+		}
+	}
+
+	/**
+	 * UI-30: keeps one recursive watcher per managed workspace root outside the opened folders (those are watched by
+	 * the workbench already) and disposes the watchers of workspaces no longer listed.
+	 */
+	private _syncExternalWatchers(workspaces: readonly IWorkspaceItem[]): void {
+		const roots = workspaces.map(w => w.uri.path.endsWith('.code-workspace') ? dirname(w.uri) : w.uri);
+		const opened = this.workspaceContextService.getWorkspace().folders.map(f => f.uri);
+		const wanted = new Map(computeExternalWatchRoots(roots, opened).map(root => [this.normalizeUriString(root), root]));
+		for (const key of Array.from(this._externalWatchers.keys())) {
+			if (!wanted.has(key)) {
+				this._externalWatchers.deleteAndDispose(key);
+			}
+		}
+		for (const [key, root] of wanted) {
+			if (!this._externalWatchers.has(key)) {
+				try {
+					this._externalWatchers.set(key, this.fileService.watch(root, { recursive: true, excludes: [...MANAGED_WORKSPACE_WATCH_EXCLUDES] }));
+				} catch (err) {
+					console.error(`Failed to watch managed workspace ${root.toString()}:`, err);
+				}
+			}
+		}
+	}
+
+	refreshCaches(uri?: URI): void {
+		if (!uri) {
+			this._workspaceStatusesCache.clear();
+			this._childEntityMetaCache.clear();
+			this._subtreeLevelCache.clear();
+			this._subtreeLevelInFlight.clear();
+			this._subtreeSummaryCache.clear();
+			this._subtreeSummaryInFlight.clear();
+			this._ticketFailures.clear();
+			this._ticketTestResults.clear();
+			for (const computation of this._subtreeComputations) {
+				computation.dirty = true;
+			}
+		} else {
+			const base = uri.path.endsWith('.code-workspace') ? dirname(uri) : uri;
+			const key = this.normalizeUriString(base);
+			const under = (k: string) => k === key || k.startsWith(key + '/');
+			this._invalidateCacheForUri(base);
+			// the summaries of the folder and its descendants are recomputed (not served stale) so the pills re-read disk
+			for (const k of Array.from(this._subtreeSummaryCache.keys())) {
+				if (under(k)) {
+					this._subtreeSummaryCache.delete(k);
+				}
+			}
+			for (const map of [this._childEntityMetaCache, this._ticketFailures, this._ticketTestResults]) {
+				for (const k of Array.from(map.keys())) {
+					if (under(k)) {
+						map.delete(k);
+					}
+				}
+			}
+			this._workspaceStatusesCache.clear();
+		}
+		this._onDidChangeWorkspaces.fire();
+	}
+
 	constructor(
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IWorkspacesService private readonly workspacesService: IWorkspacesService,
@@ -181,57 +295,35 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
 			this._onDidChangeWorkspaces.fire();
 		}));
-		let fileChangeTimer: ReturnType<typeof setTimeout> | undefined;
 		this._register({
 			dispose: () => {
-				if (fileChangeTimer) {
-					clearTimeout(fileChangeTimer);
-					fileChangeTimer = undefined;
+				if (this._fileChangeTimer) {
+					clearTimeout(this._fileChangeTimer);
+					this._fileChangeTimer = undefined;
 				}
 			}
 		});
-		this._register(this.fileService.onDidFilesChange(e => {
-			const isRelevantMetaFile = (u: URI) => u.path.endsWith('/ticket.md') || u.path.endsWith('/README.md') || u.path.endsWith('/workspace.md');
-			// UI-20: run outcomes read by the sub-tree scan (failing tickets)
-			const isFailureSignalFile = (u: URI) => u.path.endsWith(`/.agents/${TICKET_LAST_RUN_FILE_NAME}`) || u.path.endsWith('/.agents/workflow_runs.json');
-			let failureSignalChanged = false;
-			for (const u of [...e.rawAdded, ...e.rawUpdated, ...e.rawDeleted]) {
-				if (isFailureSignalFile(u)) {
-					this._invalidateSubtreeCaches(u);
-					failureSignalChanged = true;
-				} else if (isRelevantMetaFile(u)) {
-					this._invalidateCacheForUri(u);
-					if (u.path.endsWith('/ticket.md') || u.path.endsWith('/workspace.md')) {
-						this._workspaceStatusesCache.clear();
-						this._markAllSubtreeSummariesStale();
-					}
-				} else if (e.rawDeleted.includes(u)) {
-					this._invalidateCacheForUri(u);
-				}
-			}
-			// UI-17: a folder created / moved in changes the child lists of its ancestors
-			// (files inside a ticket's .agents folder never change child lists; ticket.md is handled above)
-			for (const u of e.rawAdded) {
-				if (!u.path.includes('/.agents/')) {
-					this._invalidateSubtreeCaches(u);
-				}
-			}
-			if (e.rawAdded.some(isRelevantMetaFile) || e.rawDeleted.some(isRelevantMetaFile) || e.rawDeleted.length > 0) {
-				if (fileChangeTimer) {
-					clearTimeout(fileChangeTimer);
-					fileChangeTimer = undefined;
-				}
-				this._onDidChangeWorkspaces.fire();
-			} else if (e.rawUpdated.some(isRelevantMetaFile) || failureSignalChanged) {
-				if (fileChangeTimer) {
-					clearTimeout(fileChangeTimer);
-				}
-				fileChangeTimer = setTimeout(() => {
-					fileChangeTimer = undefined;
-					this._onDidChangeWorkspaces.fire();
-				}, failureSignalChanged ? 400 : 150);
+		this._register(this.fileService.onDidFilesChange(e => this._applyFileChanges(e.rawAdded, e.rawUpdated, e.rawDeleted)));
+		// UI-30: the app's own creates / deletes / moves / writes refresh the tree right away, also in workspaces the
+		// watchers report late or not at all (an event a watcher reports again only re-invalidates the same entries)
+		this._register(this.fileService.onDidRunOperation(e => {
+			switch (e.operation) {
+				case FileOperation.CREATE:
+				case FileOperation.COPY:
+					this._applyFileChanges([e.target?.resource ?? e.resource], [], []);
+					break;
+				case FileOperation.DELETE:
+					this._applyFileChanges([], [], [e.resource]);
+					break;
+				case FileOperation.MOVE:
+					this._applyFileChanges(e.target ? [e.target.resource] : [], [], [e.resource]);
+					break;
+				case FileOperation.WRITE:
+					this._applyFileChanges([], [e.resource], []);
+					break;
 			}
 		}));
+		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this._onDidChangeWorkspaces.fire()));
 
 		this._register(this.authenticationService.onDidChangeSessions(async () => {
 			await this.updateActiveUser();
@@ -573,6 +665,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return !isSubOfAnother;
 		});
 
+		this._syncExternalWatchers(finalItems);
 		return finalItems;
 	}
 
