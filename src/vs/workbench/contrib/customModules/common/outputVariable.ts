@@ -66,9 +66,9 @@ export interface IOutputVariableHoverEntry {
 }
 
 /**
- * What the component publishes, from its registry outputs, with the placeholders filled in: `{var}` -> the variable,
- * `{Label…}` -> the label, `{label_key}` -> the cleaned label. Sub-fields such as git / shell `.stdout` are published
- * under the label (and its key), so they are shown that way.
+ * What the component publishes, from its registry outputs, with the placeholders filled in: `{var…}` -> the variable,
+ * `{Label…}` -> the label, `{label_key}` -> the cleaned label. Sub-fields (`{var.stdout}`, `{var}_result`, ...) are
+ * published under the variable as well as under the label, so the variable form is the one shown.
  */
 export function getOutputVariableHoverEntries(field: ICustomField, varName: string): IOutputVariableHoverEntry[] {
 	const spec = getComponentSpec(field.type);
@@ -81,7 +81,7 @@ export function getOutputVariableHoverEntries(field: ICustomField, varName: stri
 		.filter(o => o.name.includes('{'))
 		.map(o => ({
 			reference: o.name
-				.replace(/\{var\}/g, `{${varName}}`)
+				.replace(/\{var(?=[.}\s])/g, `{${varName}`)
 				.replace(/\{label_key\}/g, key)
 				.replace(/\{Label(?=[.}\s])/g, `{${label}`)
 				// `{name}_status` / `{name}.rows` / `key_output` are written `{name_status}` / `{name.rows}` / `{key_output}`
@@ -92,21 +92,55 @@ export function getOutputVariableHoverEntries(field: ICustomField, varName: stri
 		}));
 }
 
-/** Names of the dotted sub-fields a component publishes (e.g. git: `ok`, `exitCode`, `stdout`, ...). */
-export function getOutputSubFields(type: string): string[] {
+/**
+ * Suffixes of the outputs a component publishes next to its main value, from its registry outputs: `.ok`, `.stdout`
+ * (dotted sub-fields) and `_result`, `_status` (suffixed names). Names like `{var}_rows / _output` list several.
+ */
+export function getOutputSuffixes(type: string): string[] {
 	const spec = getComponentSpec(type);
-	if (!spec) {
-		return [];
-	}
-	const names: string[] = [];
-	for (const o of spec.outputs) {
-		const m = /^\{Label(?:\.([A-Za-z0-9_]+)\}|\}\.([A-Za-z0-9_]+))$/.exec(o.name);
-		const name = m ? (m[1] ?? m[2]) : undefined;
-		if (name && !names.includes(name)) {
-			names.push(name);
+	const suffixes: string[] = [];
+	for (const o of spec?.outputs ?? []) {
+		for (const part of o.name.split('/').map(p => p.trim())) {
+			const m = /^\{(?:var|Label|label_key)(?:\}([._][A-Za-z0-9_]+)|([._][A-Za-z0-9_]+)\})$/.exec(part) ?? /^()(_[A-Za-z0-9_]+)$/.exec(part);
+			const suffix = m ? (m[1] || m[2]) : undefined;
+			if (suffix && !suffixes.includes(suffix)) {
+				suffixes.push(suffix);
+			}
 		}
 	}
-	return names;
+	return suffixes;
+}
+
+/** Names of the dotted sub-fields a component publishes (e.g. git: `ok`, `exitCode`, `stdout`, ...). */
+export function getOutputSubFields(type: string): string[] {
+	return getOutputSuffixes(type).filter(s => s.startsWith('.')).map(s => s.slice(1));
+}
+
+/** Output variable a run publishes a component under: `outputVariableName`, or the name generated from `label`. */
+export function outputVariableNameOf(field: Pick<ICustomField, 'outputVariableName' | 'type'>, label: string): string {
+	return (field.outputVariableName || '').trim() || generateSmartPythonVarName(label, field.type);
+}
+
+/**
+ * Publishes the sub-fields and suffixed outputs of a component (published by its runner under the label and its
+ * cleaned key, e.g. `Git 1.stdout`, `git_1_result`) under its output variable too: `repo_status.stdout`,
+ * `repo_status_result` (UI-27). The label-based names stay. Mutates `context`.
+ */
+export function publishOutputVariableAliases(context: Record<string, unknown>, type: string, label: string, varName: string): void {
+	const name = (varName || '').trim();
+	if (!name) {
+		return;
+	}
+	const sources = [label, outputLabelKey(label)].filter(n => n && n !== name);
+	for (const suffix of getOutputSuffixes(type)) {
+		for (const source of sources) {
+			const value = context[`${source}${suffix}`];
+			if (value !== undefined) {
+				context[`${name}${suffix}`] = value;
+				break;
+			}
+		}
+	}
 }
 
 /**

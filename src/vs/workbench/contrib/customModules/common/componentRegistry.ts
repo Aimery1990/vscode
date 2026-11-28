@@ -156,7 +156,7 @@ export const COMMON_COMPONENT_PROPS = [
 	{ name: 'defaultValue', kind: 'string', role: 'state', description: 'Seed value written when the component is created (e.g. the Python template); read only as a fallback.' }
 ] as const satisfies readonly IComponentConfigProp[];
 
-const VAR_NOTE = 'Every value component also publishes its result under {var} (outputVariableName or the generated name), under its label and under its id.';
+const VAR_NOTE = 'Every value component also publishes its result under {var} (outputVariableName or the generated name), under its label and under its id. Sub-fields and suffixed outputs ({var.ok}, {var}_result, ...) are published under {var} and also under the label and its cleaned key ({Label.ok}, {label_key}_result).';
 
 const DATE_PROPS = [
 	{ name: 'defaultContent', kind: 'string', ticketValue: true, description: 'Initial value in the stored format.' }
@@ -545,8 +545,8 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'extracted readable page text' },
 			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
-			{ name: '{label_key}_url', type: 'string', when: 'both', description: 'URL with credential values shown as ***', example: '"https://site/api?key=***"' },
-			{ name: '{label_key}_resolved_url', type: 'string', when: 'both', description: 'same masked URL (older name)' },
+			{ name: '{var}_url', type: 'string', when: 'both', description: 'URL with credential values shown as ***', example: '"https://site/api?key=***"' },
+			{ name: '{var}_resolved_url', type: 'string', when: 'both', description: 'same masked URL (older name)' },
 			{ name: '{Label}_url', type: 'string', when: 'node', description: 'masked URL under the raw label (node runs only)' }
 		],
 		example: {
@@ -623,15 +623,15 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'main text: stdout, or stderr when the command failed', example: '"On branch main\\nnothing to commit"' },
 			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
-			{ name: '{Label.ok}', type: 'boolean', when: 'both', description: 'true when every git step exited with 0', example: 'true' },
-			{ name: '{Label.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when git could not start)', example: '0' },
-			{ name: '{Label.stdout}', type: 'string', when: 'both', description: 'standard output' },
-			{ name: '{Label.stderr}', type: 'string', when: 'both', description: 'standard error' },
-			{ name: '{Label.command}', type: 'string', when: 'both', description: 'command line that ran', example: '"git commit -m \'Fix\'"' },
-			{ name: '{Label.repoPath}', type: 'string', when: 'both', description: 'working directory (clone: the new folder)' },
-			{ name: '{Label.branch}', type: 'string', when: 'both', description: 'current branch after the command', example: '"main"' },
-			{ name: '{Label.commit}', type: 'string', when: 'both', description: 'short HEAD commit after the command', example: '"3f2a9c1"' },
-			{ name: '{Label}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["git_1_result"]["exitCode"]); also under {label_key}_result' }
+			{ name: '{var.ok}', type: 'boolean', when: 'both', description: 'true when every git step exited with 0', example: 'true' },
+			{ name: '{var.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when git could not start)', example: '0' },
+			{ name: '{var.stdout}', type: 'string', when: 'both', description: 'standard output' },
+			{ name: '{var.stderr}', type: 'string', when: 'both', description: 'standard error' },
+			{ name: '{var.command}', type: 'string', when: 'both', description: 'command line that ran', example: '"git commit -m \'Fix\'"' },
+			{ name: '{var.repoPath}', type: 'string', when: 'both', description: 'working directory (clone: the new folder)' },
+			{ name: '{var.branch}', type: 'string', when: 'both', description: 'current branch after the command', example: '"main"' },
+			{ name: '{var.commit}', type: 'string', when: 'both', description: 'short HEAD commit after the command', example: '"3f2a9c1"' },
+			{ name: '{var}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["git_1_result"]["exitCode"]); also under {label_key}_result' }
 		],
 		example: {
 			id: 'git_commit',
@@ -660,9 +660,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Resolve', detail: 'Ticket settings win over the template. {variables} are resolved in every value; each variable stays one argument.' },
 				{ step: '2. Run', detail: 'git runs with the argument list (no shell) in the repository path, non-interactively, timeout 120 s. Commit with "add all" runs git add -A first.' },
 				{ step: '3. Inspect', detail: 'Reads the current branch and short HEAD commit after the command.' },
-				{ step: '4. Publish', detail: '{Label} = stdout (stderr on failure); {Label.ok}, .exitCode, .stdout, .stderr, .command, .repoPath, .branch, .commit. A non-zero exit fails the step.' }
+				{ step: '4. Publish', detail: '{var} / {Label} = stdout (stderr on failure); {var.ok}, .exitCode, .stdout, .stderr, .command, .repoPath, .branch, .commit (also under the label: {Label.ok}, ...). A non-zero exit fails the step.' }
 			],
-			variableResolution: '{Field Label} for the output text, {Field Label.exitCode} / {Field Label.branch} ... for the fields.',
+			variableResolution: '{output_var} or {Field Label} for the output text, {output_var.exitCode} / {Field Label.branch} ... for the fields.',
 			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text) and TICKET_CONTEXT["field_label_result"] (dict).',
 			syntaxExamples: ['{Git Status}', '{Git Status.branch}', '{Commit Changes.commit}', 'TICKET_CONTEXT["commit_changes_result"]["exitCode"]'],
 			tips: [
@@ -696,14 +696,14 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'main text: stdout, or stderr when the script failed', example: '"build ok\\n"' },
 			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
-			{ name: '{Label.ok}', type: 'boolean', when: 'both', description: 'true when the script exited with 0', example: 'true' },
-			{ name: '{Label.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when it could not start, 124 on timeout)', example: '0' },
-			{ name: '{Label.stdout}', type: 'string', when: 'both', description: 'standard output' },
-			{ name: '{Label.stderr}', type: 'string', when: 'both', description: 'standard error' },
-			{ name: '{Label.command}', type: 'string', when: 'both', description: 'script as executed ({variables} shown as "${ANYAGENT_VAR_...}")', example: '"ls -la \\"${ANYAGENT_VAR_folder}\\""' },
-			{ name: '{Label.cwd}', type: 'string', when: 'both', description: 'working directory', example: '"/Users/me/project"' },
-			{ name: '{Label.durationMs}', type: 'number', when: 'both', description: 'duration in milliseconds', example: '42' },
-			{ name: '{Label}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["shell_1_result"]["exitCode"]); also under {label_key}_result' }
+			{ name: '{var.ok}', type: 'boolean', when: 'both', description: 'true when the script exited with 0', example: 'true' },
+			{ name: '{var.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when it could not start, 124 on timeout)', example: '0' },
+			{ name: '{var.stdout}', type: 'string', when: 'both', description: 'standard output' },
+			{ name: '{var.stderr}', type: 'string', when: 'both', description: 'standard error' },
+			{ name: '{var.command}', type: 'string', when: 'both', description: 'script as executed ({variables} shown as "${ANYAGENT_VAR_...}")', example: '"ls -la \\"${ANYAGENT_VAR_folder}\\""' },
+			{ name: '{var.cwd}', type: 'string', when: 'both', description: 'working directory', example: '"/Users/me/project"' },
+			{ name: '{var.durationMs}', type: 'number', when: 'both', description: 'duration in milliseconds', example: '42' },
+			{ name: '{var}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["shell_1_result"]["exitCode"]); also under {label_key}_result' }
 		],
 		example: {
 			id: 'shell_build',
@@ -735,9 +735,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Confirm', detail: 'A script written or changed by AI needs a person\'s confirmation (the card shows the full script, folder and shell). Unconfirmed scripts fail with "Shell script needs confirmation".' },
 				{ step: '2. Resolve', detail: 'Ticket settings win over the template. Each {variable} in the script becomes "${ANYAGENT_VAR_name}" and its value is passed in the environment, so values can never become shell code.' },
 				{ step: '3. Run', detail: '<shell> -c <script> runs in the working directory without input or terminal; after the timeout (or Stop) the whole process group is killed.' },
-				{ step: '4. Publish', detail: '{Label} = stdout (stderr on failure); {Label.ok}, .exitCode, .stdout, .stderr, .command, .cwd, .durationMs. A non-zero exit fails the step; it is never retried automatically.' }
+				{ step: '4. Publish', detail: '{var} / {Label} = stdout (stderr on failure); {var.ok}, .exitCode, .stdout, .stderr, .command, .cwd, .durationMs (also under the label: {Label.ok}, ...). A non-zero exit fails the step; it is never retried automatically.' }
 			],
-			variableResolution: '{Field Label} for the output text, {Field Label.exitCode} / {Field Label.stderr} ... for the fields.',
+			variableResolution: '{output_var} or {Field Label} for the output text, {output_var.exitCode} / {Field Label.stderr} ... for the fields.',
 			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text) and TICKET_CONTEXT["field_label_result"] (dict).',
 			syntaxExamples: ['ls -la {folder}', 'echo "Hello {name}" > out.txt', '{Build Project.exitCode}', 'TICKET_CONTEXT["build_project_result"]["stdout"]'],
 			tips: [
@@ -771,10 +771,10 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'any', when: 'both', description: 'return value (OUTPUT / set_output / RESULT): dict, list, number, boolean or text', example: '{"status": "success"}' },
 			{ name: '{Label}', type: 'any', when: 'both', description: 'same value under the label' },
-			{ name: '{label_key}_output', type: 'any', when: 'ticket', description: 'return value' },
-			{ name: '{label_key}_result', type: 'any', when: 'ticket', description: 'raw result captured from the script' },
-			{ name: '{label_key}_logs', type: 'string', when: 'ticket', description: 'console output (stdout / stderr)' },
-			{ name: '{label_key}_code', type: 'string', when: 'ticket', description: 'the script that ran' }
+			{ name: '{var}_output', type: 'any', when: 'ticket', description: 'return value' },
+			{ name: '{var}_result', type: 'any', when: 'ticket', description: 'raw result captured from the script' },
+			{ name: '{var}_logs', type: 'string', when: 'ticket', description: 'console output (stdout / stderr)' },
+			{ name: '{var}_code', type: 'string', when: 'ticket', description: 'the script that ran' }
 		],
 		example: {
 			id: 'python_1',
@@ -856,11 +856,11 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'object | string', when: 'both', description: 'parsed response data (JSON) or response text; never the transport envelope', example: '{"id": 7, "name": "x"}' },
 			{ name: '{Label}', type: 'object | string', when: 'both', description: 'same value under the label' },
-			{ name: '{Label}_status', type: 'number', when: 'both', description: 'HTTP status code', example: '200' },
-			{ name: '{Label}_ok', type: 'boolean', when: 'both', description: 'true for a 2xx status', example: 'true' },
-			{ name: '{Label}_data', type: 'object | string', when: 'both', description: 'parsed response data (only when not null)' },
-			{ name: '{Label}_body', type: 'string', when: 'both', description: 'response body' },
-			{ name: '{Label}_raw', type: 'string', when: 'both', description: 'raw response text' }
+			{ name: '{var}_status', type: 'number', when: 'both', description: 'HTTP status code', example: '200' },
+			{ name: '{var}_ok', type: 'boolean', when: 'both', description: 'true for a 2xx status', example: 'true' },
+			{ name: '{var}_data', type: 'object | string', when: 'both', description: 'parsed response data (only when not null)' },
+			{ name: '{var}_body', type: 'string', when: 'both', description: 'response body' },
+			{ name: '{var}_raw', type: 'string', when: 'both', description: 'raw response text' }
 		],
 		example: {
 			id: 'api_request_1',
@@ -937,16 +937,16 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'object[] | string', when: 'both', description: 'rows (array of objects keyed by column name); the SQL output text when there are no rows', example: '[{"job_id": 1, "title": "Engineer"}]' },
 			{ name: '{Label}', type: 'object', when: 'both', description: 'table payload {columns, rows, dbPath, tableName, sqlOutput, output, ...}' },
-			{ name: '{Label}.rows', type: 'object[]', when: 'both', description: 'rows' },
-			{ name: '{Label}.json', type: 'string', when: 'both', description: 'rows as JSON text' },
-			{ name: '{Label}.output', type: 'string | object[]', when: 'both', description: 'SQL output text, else the rows' },
-			{ name: '{Label}.sqlOutput', type: 'string', when: 'both', description: 'SQL output text' },
-			{ name: '{Label}.table', type: 'string', when: 'ticket', description: 'rows as a Markdown table' },
-			{ name: '{Label}.columns', type: 'object[]', when: 'ticket', description: 'column definitions' },
-			{ name: '{Label}.dbPath', type: 'string', when: 'ticket', description: 'bound SQLite file' },
-			{ name: '{Label}.tableName', type: 'string', when: 'ticket', description: 'bound SQLite table' },
-			{ name: '{label_key}_rows / _output / _payload', type: 'object[] / string / object', when: 'both', description: 'rows / SQL output text / payload under the cleaned label' },
-			{ name: '{label_key}_columns / _db_path / _table_name', type: 'object[] / string / string', when: 'ticket', description: 'columns / SQLite file / table under the cleaned label' }
+			{ name: '{var.rows}', type: 'object[]', when: 'both', description: 'rows' },
+			{ name: '{var.json}', type: 'string', when: 'both', description: 'rows as JSON text' },
+			{ name: '{var.output}', type: 'string | object[]', when: 'both', description: 'SQL output text, else the rows' },
+			{ name: '{var.sqlOutput}', type: 'string', when: 'both', description: 'SQL output text' },
+			{ name: '{var.table}', type: 'string', when: 'ticket', description: 'rows as a Markdown table' },
+			{ name: '{var.columns}', type: 'object[]', when: 'ticket', description: 'column definitions' },
+			{ name: '{var.dbPath}', type: 'string', when: 'ticket', description: 'bound SQLite file' },
+			{ name: '{var.tableName}', type: 'string', when: 'ticket', description: 'bound SQLite table' },
+			{ name: '{var}_rows / _output / _payload', type: 'object[] / string / object', when: 'both', description: 'rows / SQL output text / payload under the cleaned label' },
+			{ name: '{var}_columns / _db_path / _table_name', type: 'object[] / string / string', when: 'ticket', description: 'columns / SQLite file / table under the cleaned label' }
 		],
 		example: {
 			id: 'job_listings_table',
@@ -1673,11 +1673,11 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'label of the clicked button', example: '"Approve"' },
 			{ name: '{Label}', type: 'string', when: 'both', description: 'same label under the component label and its label_key (link conditions: @review == \'Approve\'); a ticket run inside a workflow node also publishes it unprefixed in the workflow' },
-			{ name: '{Label.id}', type: 'string', when: 'both', description: 'id of the clicked button', example: '"btn_approve"' },
-			{ name: '{Label.label}', type: 'string', when: 'both', description: 'label of the clicked button' },
-			{ name: '{Label.at}', type: 'string', when: 'both', description: 'ISO time of the click', example: '"2026-11-27T15:04:05.000Z"' },
-			{ name: '{Label.by}', type: 'string', when: 'both', description: 'who decided ("User" for a click in the app)' },
-			{ name: '{Label}_result', type: 'object', when: 'both', description: '{id, label, at, by} as one dict (Python: TICKET_CONTEXT["review_result"]["label"]); also under {label_key}_result' }
+			{ name: '{var.id}', type: 'string', when: 'both', description: 'id of the clicked button', example: '"btn_approve"' },
+			{ name: '{var.label}', type: 'string', when: 'both', description: 'label of the clicked button' },
+			{ name: '{var.at}', type: 'string', when: 'both', description: 'ISO time of the click', example: '"2026-11-27T15:04:05.000Z"' },
+			{ name: '{var.by}', type: 'string', when: 'both', description: 'who decided ("User" for a click in the app)' },
+			{ name: '{var}_result', type: 'object', when: 'both', description: '{id, label, at, by} as one dict (Python: TICKET_CONTEXT["review_result"]["label"]); also under {label_key}_result' }
 		],
 		example: {
 			id: 'review_actions',
@@ -1746,7 +1746,7 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'object', when: 'both', description: '{"command": ["last N lines", ...]} per command', example: '{"df -h": ["Filesystem Size Used"]}' },
 			{ name: '{Label}', type: 'object', when: 'both', description: 'same object under the label' },
-			{ name: '{label_key}_output', type: 'object', when: 'ticket', description: 'same object' }
+			{ name: '{var}_output', type: 'object', when: 'ticket', description: 'same object' }
 		],
 		example: {
 			id: 'ssh_1',

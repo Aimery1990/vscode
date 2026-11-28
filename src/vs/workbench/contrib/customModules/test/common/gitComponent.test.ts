@@ -145,8 +145,17 @@ suite('gitComponent', () => {
 		// Every structured field is documented in the registry outputs
 		const outputs = getComponentSpec('git')!.outputs.map(o => o.name);
 		for (const field of GIT_OUTPUT_FIELDS) {
-			assert.ok(outputs.includes(`{Label.${field}}`), field);
+			assert.ok(outputs.includes(`{var.${field}}`), field);
 		}
+		// Also under the output variable (UI-27), the label-based names stay
+		const aliased: Record<string, unknown> = {};
+		publishGitOutputs(aliased, 'Git Status', result({ stdout: 'clean' }), ['repo_status', undefined]);
+		assert.strictEqual(aliased['repo_status'], 'clean');
+		assert.strictEqual(aliased['repo_status.stdout'], 'clean');
+		assert.strictEqual(aliased['repo_status.ok'], true);
+		assert.deepStrictEqual(Object.keys(aliased['repo_status_result'] as object), [...GIT_OUTPUT_FIELDS]);
+		assert.strictEqual(aliased['Git Status.stdout'], 'clean');
+		assert.strictEqual(aliased['git_status.ok'], true);
 	});
 
 	test('ticket value: ticket settings win, results are truncated when stored', () => {

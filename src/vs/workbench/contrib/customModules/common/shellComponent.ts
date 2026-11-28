@@ -650,12 +650,13 @@ function cleanKey(key: string): string {
 /**
  * Publishes a shell result into run context variables: `{Label}` / label_key = main text, `{Label.field}` and
  * `{label_key.field}` per structured field, and `{Label}_result` / `{label_key}_result` = all fields as a dict
- * (TICKET_CONTEXT["shell_1_result"]["exitCode"] in Python). `{var}` / id are published by the caller.
+ * (TICKET_CONTEXT["shell_1_result"]["exitCode"] in Python). The same names are published under each of `aliases` (the
+ * output variable, UI-27). The id is published by the caller.
  */
-export function publishShellOutputs(context: Record<string, unknown>, label: string, result: IShellRunResult): string {
+export function publishShellOutputs(context: Record<string, unknown>, label: string, result: IShellRunResult, aliases: readonly (string | undefined)[] = []): string {
 	const main = shellMainOutput(result);
 	const fields = shellOutputFields(result);
-	for (const name of new Set([label, cleanKey(label)])) {
+	for (const name of new Set([label, cleanKey(label), ...aliases.filter((a): a is string => !!a)])) {
 		context[name] = main;
 		context[`${name}_result`] = fields;
 		for (const [field, value] of Object.entries(fields)) {

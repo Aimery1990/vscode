@@ -51,9 +51,13 @@ suite('humanDecision (CI-25)', () => {
 		assert.deepStrictEqual(ctx['review_step_result'], { id: 'btn_ok', label: 'Approve', at: '2026-11-27T10:00:00.000Z', by: 'User' });
 		const outputs = getComponentSpec('button_group')!.outputs.map(o => o.name);
 		for (const field of BUTTON_GROUP_OUTPUT_FIELDS) {
-			assert.ok(outputs.includes(`{Label.${field}}`), field);
+			assert.ok(outputs.includes(`{var.${field}}`), field);
 		}
 		assert.ok(outputs.includes('{var}'));
+		const aliased: Record<string, unknown> = {};
+		publishButtonGroupOutputs(aliased, 'Review Step', decision, ['review']);
+		assert.strictEqual(aliased['review.id'], 'btn_ok');
+		assert.deepStrictEqual(aliased['review_result'], aliased['review_step_result']);
 	});
 
 	test('ticket run inside a workflow node: decisions published unprefixed and with a ticket alias', () => {

@@ -122,9 +122,9 @@ suite('shell component (CI-55)', () => {
 			const spec = getComponentSpec('shell')!;
 			assert.ok(spec);
 			for (const field of SHELL_OUTPUT_FIELDS) {
-				assert.ok(spec.outputs.some(o => o.name === `{Label.${field}}`), field);
+				assert.ok(spec.outputs.some(o => o.name === `{var.${field}}`), field);
 			}
-			assert.ok(spec.outputs.some(o => o.name === '{Label}_result'));
+			assert.ok(spec.outputs.some(o => o.name === '{var}_result'));
 			assert.strictEqual(spec.icon.id, 'terminal');
 		});
 	});
@@ -140,6 +140,17 @@ suite('shell component (CI-55)', () => {
 			assert.strictEqual(ctx['build_step.cwd'], '/ws');
 			assert.deepStrictEqual(Object.keys(ctx['build_step_result'] as object), [...SHELL_OUTPUT_FIELDS]);
 			assert.strictEqual(shellMainOutput(result({ ok: false, exitCode: 3, stdout: 'o', stderr: 'bad' })), 'bad');
+			// Also under the output variable (UI-27)
+			const aliased: Record<string, unknown> = {};
+			publishShellOutputs(aliased, 'Build Step', result({ stdout: 'built\n' }), ['build_out']);
+			assert.strictEqual(aliased['build_out.exitCode'], 0);
+			assert.strictEqual(aliased['build_out.stdout'], 'built\n');
+			assert.deepStrictEqual(Object.keys(aliased['build_out_result'] as object), [...SHELL_OUTPUT_FIELDS]);
+			assert.strictEqual(aliased['Build Step.exitCode'], 0);
+			const outputs = getComponentSpec('shell')!.outputs.map(o => o.name);
+			for (const field of SHELL_OUTPUT_FIELDS) {
+				assert.ok(outputs.includes(`{var.${field}}`), field);
+			}
 		});
 
 		test('runShellPlan maps a non-zero exit to a failure', async () => {

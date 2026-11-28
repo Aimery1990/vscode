@@ -176,11 +176,12 @@ function cleanKey(key: string): string {
 
 /**
  * Publishes a decision into run context variables: `{Label}` / label_key = the clicked button's label, `{Label.id}`,
- * `{Label.label}`, `{Label.at}`, `{Label.by}` and `{Label}_result` / `{label_key}_result` (dict). Returns the label.
+ * `{Label.label}`, `{Label.at}`, `{Label.by}` and `{Label}_result` / `{label_key}_result` (dict), also under each of
+ * `aliases` (the output variable, UI-27). Returns the label.
  */
-export function publishButtonGroupOutputs(context: Record<string, unknown>, label: string, decision: IHumanDecision): string {
+export function publishButtonGroupOutputs(context: Record<string, unknown>, label: string, decision: IHumanDecision, aliases: readonly (string | undefined)[] = []): string {
 	const fields = buttonGroupOutputFields(decision);
-	for (const name of new Set([label, cleanKey(label)])) {
+	for (const name of new Set([label, cleanKey(label), ...aliases.filter((a): a is string => !!a)])) {
 		context[name] = decision.label;
 		context[`${name}_result`] = fields;
 		for (const [field, value] of Object.entries(fields)) {

@@ -529,13 +529,15 @@ function cleanKey(key: string): string {
 /**
  * Publishes a git result into run context variables: `{Label}` / label_key = main text, `{Label.field}` and
  * `{label_key.field}` for each structured field, and `{Label}_result` / `{label_key}_result` = all fields as a dict
- * (TICKET_CONTEXT["git_1_result"]["exitCode"] in Python). `{var}` / id are published by the caller.
+ * (TICKET_CONTEXT["git_1_result"]["exitCode"] in Python). The same names are published under each of `aliases` (the
+ * output variable, UI-27), so `{repo_status.stdout}` works after the variable was renamed. The id is published by the
+ * caller.
  */
-export function publishGitOutputs(context: Record<string, unknown>, label: string, result: IGitRunResult): string {
+export function publishGitOutputs(context: Record<string, unknown>, label: string, result: IGitRunResult, aliases: readonly (string | undefined)[] = []): string {
 	const main = gitMainOutput(result);
 	const fields = gitOutputFields(result);
 	const key = cleanKey(label);
-	for (const name of new Set([label, key])) {
+	for (const name of new Set([label, key, ...aliases.filter((a): a is string => !!a)])) {
 		context[name] = main;
 		context[`${name}_result`] = fields;
 		for (const [field, value] of Object.entries(fields)) {

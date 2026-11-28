@@ -48,6 +48,7 @@ import { IHumanDecisionContext, IHumanDecisionService, normalizeDecisionButtons,
 import { IShellComponentConfig, ShellPlanResult, buildShellPlan, buildShellTicketValue, effectiveShellConfig, getShellConfirmationKey, isShellConfigConfirmed, isShellTicketValue, normalizeShellTicketValue, pickShellConfig, publishShellOutputs, runShellPlan, shellFailureResult, shellMainOutput, shellNeedsConfirmationMessage, shellTicketValueOutputText, SHELL_MAX_OUTPUT_BYTES } from '../../customModules/common/shellComponent.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { GIT_COMPONENT_TIMEOUT_MS, IGitComponentConfig, buildGitPlan, buildGitTicketValue, effectiveGitConfig, gitCommandOf, gitFailureResult, gitMainOutput, gitTicketValueOutputText, isGitReferenceOnly, isGitTicketValue, normalizeGitTicketValue, pickGitConfig, publishGitOutputs, runGitPlan } from '../../customModules/common/gitComponent.js';
+import { outputVariableNameOf, publishOutputVariableAliases } from '../../customModules/common/outputVariable.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
 
@@ -2559,7 +2560,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							if (decision.targetStatus) {
 								decidedStatus = decision.targetStatus;
 							}
-							stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision);
+							stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision, [outputVariableNameOf(field, fieldLabel)]);
 							stepDetails = { ...decision, buttons: buttons.map(b => b.label) };
 							break;
 						}
@@ -2579,7 +2580,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 							const gitRes = await this.executeGitComponent(gitConfig, { contextVariables, baseDir: wsUri.fsPath });
 							customMetadata[fieldLabel] = JSON.stringify(buildGitTicketValue(ticketGit, gitRes));
-							stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes);
+							stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes, [outputVariableNameOf(field, fieldLabel)]);
 							stepDetails = { ...gitRes };
 							if (!gitRes.ok) {
 								throw new Error(gitRes.error ? `${gitRes.command || `git ${gitRes.gitCommand}`}: ${gitRes.error}${gitRes.stderr && gitRes.stderr !== gitRes.error ? `\n${gitRes.stderr.slice(0, 2000)}` : ''}` : `git failed with exit code ${gitRes.exitCode}`);
@@ -2599,7 +2600,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								confirmWhere: `ticket '${ticketResult.title || ticketResult.ticketId}'`
 							});
 							customMetadata[fieldLabel] = JSON.stringify(buildShellTicketValue(ticketShell, shellRes));
-							stepOutput = publishShellOutputs(contextVariables, fieldLabel, shellRes);
+							stepOutput = publishShellOutputs(contextVariables, fieldLabel, shellRes, [outputVariableNameOf(field, fieldLabel)]);
 							stepDetails = { ...shellRes };
 							if (!shellRes.ok) {
 								throw new Error(shellRes.needsConfirmation ? (shellRes.error ?? 'Shell script needs confirmation') : `${shellRes.shell} script '${fieldLabel}': ${shellRes.error || `exit code ${shellRes.exitCode}`}${shellRes.stderr && shellRes.stderr !== shellRes.error ? `\n${shellRes.stderr.slice(0, 2000)}` : ''}`);
@@ -3301,6 +3302,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'display') {
 							contextVariables[outVarName] = sanitizedStepOut;
 							contextVariables[this._cleanKey(outVarName)] = sanitizedStepOut;
+							// Sub-fields / suffixed outputs published under the label also go under the variable (UI-27)
+							publishOutputVariableAliases(contextVariables, fieldType, fieldLabel, outVarName);
 						}
 						if (field.id) {
 							contextVariables[field.id] = sanitizedStepOut;
@@ -4101,7 +4104,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (!decision) {
 						throw new Error(`Stopped: the run was stopped while '${fieldLabel}' was waiting for a decision.`);
 					}
-					stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision);
+					stepOutput = publishButtonGroupOutputs(contextVariables, fieldLabel, decision, [outputVariableNameOf(field, fieldLabel)]);
 					stepDetails = { ...decision };
 					field.lastExecutionLog = `>>> ${fieldLabel}: '${decision.label}' chosen by ${decision.by} at ${decision.at}`;
 					field.lastExecutionOutput = decision;
@@ -4121,7 +4124,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 					const gitRes = await this.executeGitComponent(gitConfig, { contextVariables, baseDir: workUri.fsPath });
 					field.gitLastResult = buildGitTicketValue(undefined, gitRes).gitLastResult;
-					stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes);
+					stepOutput = publishGitOutputs(contextVariables, fieldLabel, gitRes, [outputVariableNameOf(field, fieldLabel)]);
 					stepDetails = { ...gitRes };
 					field.lastExecutionLog = `>>> ${gitRes.command || `git ${gitRes.gitCommand}`}  (exit ${gitRes.exitCode}, ${gitRes.durationMs}ms${gitRes.branch ? `, branch ${gitRes.branch}` : ''})\n${gitMainOutput(gitRes)}`;
 					field.lastExecutionOutput = stepOutput;
@@ -4142,7 +4145,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						confirmWhere: nodeName ? `the workflow node '${nodeName}' (component '${fieldLabel}')` : `the workflow node with the component '${fieldLabel}'`
 					});
 					field.shellLastResult = buildShellTicketValue(undefined, shellRes).shellLastResult;
-					stepOutput = publishShellOutputs(contextVariables, fieldLabel, shellRes);
+					stepOutput = publishShellOutputs(contextVariables, fieldLabel, shellRes, [outputVariableNameOf(field, fieldLabel)]);
 					stepDetails = { ...shellRes };
 					field.lastExecutionLog = `>>> ${shellRes.shell} -c (cwd ${shellRes.cwd || '?'}; exit ${shellRes.exitCode}, ${shellRes.durationMs}ms)\n${shellMainOutput(shellRes)}`;
 					field.lastExecutionOutput = stepOutput;
@@ -4406,6 +4409,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'display') {
 					contextVariables[outVarName] = sanitizedStepOut;
 					contextVariables[this._cleanKey(outVarName)] = sanitizedStepOut;
+					// Sub-fields / suffixed outputs published under the label also go under the variable (UI-27)
+					publishOutputVariableAliases(contextVariables, fieldType, fieldLabel, outVarName);
 				}
 				if (field.id) {
 					contextVariables[field.id] = sanitizedStepOut;

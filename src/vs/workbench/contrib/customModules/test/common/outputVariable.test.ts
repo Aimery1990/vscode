@@ -5,7 +5,7 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { ICustomField } from '../../../entityPersistence/common/entityPersistence.js';
-import { applyOutputVariableName, countOutputVariableReferences, defaultOutputVariableName, findOutputVariableReferences, formatOutputVariableReference, getOutputSubFields, getOutputVariableHoverEntries, getOutputVariableInfo, hasOutputVariable, replaceOutputVariableInText, replaceOutputVariableReferences, validateOutputVariableName } from '../../common/outputVariable.js';
+import { applyOutputVariableName, countOutputVariableReferences, defaultOutputVariableName, findOutputVariableReferences, formatOutputVariableReference, getOutputSubFields, getOutputSuffixes, outputVariableNameOf, publishOutputVariableAliases, getOutputVariableHoverEntries, getOutputVariableInfo, hasOutputVariable, replaceOutputVariableInText, replaceOutputVariableReferences, validateOutputVariableName } from '../../common/outputVariable.js';
 
 function components(): ICustomField[] {
 	return [
@@ -54,14 +54,44 @@ suite('Output variable chip (UI-27)', () => {
 		const [, , git2, py] = components();
 		const gitRefs = getOutputVariableHoverEntries(git2, 'repo_log').map(e => e.reference);
 		assert.ok(gitRefs.includes('{repo_log}'));
-		assert.ok(gitRefs.includes('{Git 2.stdout}'));
-		assert.ok(gitRefs.includes('{Git 2_result}'));
+		assert.ok(gitRefs.includes('{repo_log.stdout}'));
+		assert.ok(gitRefs.includes('{repo_log_result}'));
+		assert.ok(gitRefs.includes('{Git 2}'));
 		const pyEntries = getOutputVariableHoverEntries(py, 'python_1');
 		assert.ok(pyEntries.some(e => e.reference === '{python_1}' && e.description.includes('OUTPUT')));
 		assert.ok(pyEntries.some(e => e.reference === '{python_1_logs}'));
 		const httpRefs = getOutputVariableHoverEntries({ id: 'h', label: 'Api', type: 'http_request' }, 'api').map(e => e.reference);
-		assert.ok(httpRefs.includes('{Api_status}'));
-		assert.ok(getOutputVariableHoverEntries({ id: 't', label: 'Jobs', type: 'table' }, 'jobs').some(e => e.reference === '{Jobs.rows}'));
+		assert.ok(httpRefs.includes('{api_status}'));
+		assert.ok(getOutputVariableHoverEntries({ id: 't', label: 'Jobs', type: 'table' }, 'job_rows').some(e => e.reference === '{job_rows.rows}'));
+	});
+
+	test('output suffixes from the registry', () => {
+		assert.deepStrictEqual(getOutputSuffixes('git'), ['.ok', '.exitCode', '.stdout', '.stderr', '.command', '.repoPath', '.branch', '.commit', '_result']);
+		assert.deepStrictEqual(getOutputSuffixes('http_request'), ['_status', '_ok', '_data', '_body', '_raw']);
+		assert.ok(['_rows', '_output', '_payload', '_db_path', '.rows', '.json'].every(x => getOutputSuffixes('table').includes(x)));
+		assert.deepStrictEqual(getOutputSuffixes('python'), ['_output', '_result', '_logs', '_code']);
+		assert.deepStrictEqual(getOutputSuffixes('text'), []);
+	});
+
+	test('runs publish sub-fields under the output variable too', () => {
+		// As a runner leaves them: label and cleaned key
+		const ctx: Record<string, unknown> = { 'Api Call': { id: 1 }, 'Api Call_status': 200, 'api_call_status': 200, 'api_call_ok': true, 'api_call_body': '{"id":1}', 'Other_status': 500 };
+		publishOutputVariableAliases(ctx, 'http_request', 'Api Call', 'user_api');
+		assert.strictEqual(ctx['user_api_status'], 200);
+		assert.strictEqual(ctx['user_api_ok'], true);
+		assert.strictEqual(ctx['user_api_body'], '{"id":1}');
+		assert.strictEqual(ctx['user_api_data'], undefined, 'nothing published, nothing aliased');
+		assert.strictEqual(ctx['Api Call_status'], 200, 'label names stay');
+		const py: Record<string, unknown> = { 'clean_rows_output': [1], 'clean_rows_logs': 'ok' };
+		publishOutputVariableAliases(py, 'python', 'Clean Rows', 'rows');
+		assert.deepStrictEqual(py['rows_output'], [1]);
+		assert.strictEqual(py['rows_logs'], 'ok');
+		// A variable equal to the label key changes nothing
+		const same: Record<string, unknown> = { 'git_1.ok': true };
+		publishOutputVariableAliases(same, 'git', 'Git 1', 'git_1');
+		assert.deepStrictEqual(same, { 'git_1.ok': true });
+		assert.strictEqual(outputVariableNameOf({ type: 'git', outputVariableName: ' repo ' }, 'Git 1'), 'repo');
+		assert.strictEqual(outputVariableNameOf({ type: 'git' }, 'Git 1'), 'git_1');
 	});
 
 	test('name validation and uniqueness', () => {
