@@ -12,10 +12,14 @@ import { isSubtreeNodeVisible, ITicketSubtreeNode, ITicketSubtreeSummary } from 
  * Failing tickets in the Workspaces tree (UI-20).
  *
  * A ticket is "failing" when at least one of these holds (data read during the UI-17 sub-tree scan):
- * 1. Last ticket run failed: every ticket run writes `.agents/last_run.json` ({@link ITicketLastRunRecord}) with its
- *    outcome, the time and the failed component; `Failed` there means the most recent run failed and the next
- *    successful run clears it. Since CI-58 a run no longer writes its result into the Status (status and result are
- *    different things), so the record is the signal; a legacy Status `Failed` (runs before CI-58) still counts.
+ * 1. Last ticket run failed. Every ticket run writes `.agents/last_run.json` ({@link ITicketLastRunRecord}: outcome,
+ *    time, failed component); since CI-58 a run no longer writes its result into the Status, so the record is the
+ *    signal. The red mark follows the latest run outcome (UI-20 rework, ANYAG-0110): a record saying `Failed` keeps the
+ *    ticket failing whatever its Status is (a manual change to Done or anything else does not clear it); only a later
+ *    successful run (a `Completed` record) or "Clear Failure Mark" ({@link dismissTicketRunFailure}: `dismissedAt` /
+ *    `dismissedBy` in the record) clears it, and the next failed run writes a fresh record that shows red again.
+ *    A run stopped by the user (`Stopped`) is not a failure. A legacy Status `Failed` (runs before CI-58) still counts
+ *    unless a newer record says the last run completed or the failure was dismissed.
  * 2. Test result: a custom field whose label is one of {@link TEST_RESULT_FIELD_LABELS} (the Test Case template's
  *    "Result" select) has one of the {@link FAILING_RESULT_VALUES} (case-insensitive).
  * 3. Workflow tickets: the latest run in `.agents/workflow_runs.json` (newest first) has status `failed`.
@@ -37,12 +41,17 @@ export const FAILING_TOOLTIP_CAP = 5;
 
 /** `.agents/last_run.json`: the outcome of the ticket's most recent run. */
 export interface ITicketLastRunRecord {
-	readonly status: 'Completed' | 'Failed';
+	/** `Stopped`: a person stopped the run (CI-25 "Stop this run" at a gate); neither a failure nor a success. */
+	readonly status: 'Completed' | 'Failed' | 'Stopped';
 	/** ISO time the run finished. */
 	readonly at: string;
 	/** Label of the first failed component. */
 	readonly failedStep?: string;
 	readonly error?: string;
+	/** ISO time the failure mark was cleared by hand ("Clear Failure Mark"); a later run writes a record without it. */
+	readonly dismissedAt?: string;
+	/** Who cleared it (`User`). */
+	readonly dismissedBy?: string;
 }
 
 /** The latest workflow run, read from the head of workflow_runs.json. */
@@ -66,6 +75,8 @@ export interface ITicketFailureInput {
 /** Why a ticket fails; `reasons` are short human readable sentences. */
 export interface ITicketFailure {
 	readonly reasons: readonly string[];
+	/** The failure comes from the ticket's last run, so "Clear Failure Mark" applies (UI-20 rework). */
+	readonly runFailure?: boolean;
 }
 
 function escapeRegExp(text: string): string {
@@ -104,15 +115,28 @@ export function parseTicketLastRunRecord(text: string | undefined): ITicketLastR
 	}
 	try {
 		const raw = JSON.parse(text) as Record<string, unknown>;
-		if (!raw || typeof raw !== 'object' || (raw.status !== 'Completed' && raw.status !== 'Failed') || typeof raw.at !== 'string') {
+		if (!raw || typeof raw !== 'object' || (raw.status !== 'Completed' && raw.status !== 'Failed' && raw.status !== 'Stopped') || typeof raw.at !== 'string') {
 			return undefined;
 		}
-		return {
-			status: raw.status,
-			at: raw.at,
-			failedStep: typeof raw.failedStep === 'string' && raw.failedStep ? raw.failedStep : undefined,
-			error: typeof raw.error === 'string' && raw.error ? raw.error : undefined
-		};
+		const str = (key: string) => typeof raw[key] === 'string' && raw[key] ? raw[key] as string : undefined;
+		const record: { -readonly [K in keyof ITicketLastRunRecord]: ITicketLastRunRecord[K] } = { status: raw.status, at: raw.at };
+		const failedStep = str('failedStep');
+		const error = str('error');
+		const dismissedAt = str('dismissedAt');
+		const dismissedBy = str('dismissedBy');
+		if (failedStep) {
+			record.failedStep = failedStep;
+		}
+		if (error) {
+			record.error = error;
+		}
+		if (dismissedAt) {
+			record.dismissedAt = dismissedAt;
+		}
+		if (dismissedBy) {
+			record.dismissedBy = dismissedBy;
+		}
+		return record;
 	} catch {
 		return undefined;
 	}
@@ -125,12 +149,44 @@ export function formatTicketLastRunRecord(record: ITicketLastRunRecord): string 
 /**
  * The record of a finished ticket run from its step results (first failed step names the failure). Written by the
  * ticket runtime BEFORE ticket.md, so the tree's rescan triggered by the ticket.md change already sees it.
+ * `stoppedByUser`: a person stopped the run at a gate; the step it stopped at "failed", but the run is `Stopped`
+ * (not red, not a failure for dependents).
  */
-export function ticketLastRunRecordFromSteps(steps: readonly { readonly status: string; readonly fieldLabel?: string; readonly error?: string }[] | undefined, at: Date): ITicketLastRunRecord {
+export function ticketLastRunRecordFromSteps(steps: readonly { readonly status: string; readonly fieldLabel?: string; readonly error?: string }[] | undefined, at: Date, stoppedByUser = false): ITicketLastRunRecord {
+	if (stoppedByUser) {
+		return { status: 'Stopped', at: at.toISOString() };
+	}
 	const failed = (steps || []).find(s => s.status === 'failed');
 	return failed
 		? { status: 'Failed', at: at.toISOString(), failedStep: failed.fieldLabel || undefined, error: failed.error ? truncate(failed.error, 500) : undefined }
 		: { status: 'Completed', at: at.toISOString() };
+}
+
+/**
+ * The run outcome of a record for dependents (CI-59): `Completed` → success, `Failed` → failed (a dismissed mark only
+ * hides the red in the tree), `Stopped` (a person stopped the run) → no outcome.
+ */
+export function lastRunOutcome(record: ITicketLastRunRecord | undefined): 'success' | 'failed' | undefined {
+	switch (record?.status) {
+		case 'Completed': return 'success';
+		case 'Failed': return 'failed';
+		default: return undefined;
+	}
+}
+
+/**
+ * The record after "Clear Failure Mark": the failed record with `dismissedAt` / `dismissedBy`. Without a record (a
+ * Status `Failed` from a run before UI-20) a failed record is created at `now`, so the dismissal has something to
+ * cover. A later run overwrites the whole record, so a new failure shows red again.
+ */
+export function dismissTicketRunFailure(record: ITicketLastRunRecord | undefined, now: Date, by = 'User'): ITicketLastRunRecord {
+	const base: ITicketLastRunRecord = record?.status === 'Failed' ? record : { status: 'Failed', at: now.toISOString() };
+	return { ...base, dismissedAt: now.toISOString(), dismissedBy: by };
+}
+
+/** Whether `record` is a failed run whose mark was cleared by hand. */
+export function isDismissedRunFailure(record: ITicketLastRunRecord | undefined): boolean {
+	return record?.status === 'Failed' && !!record.dismissedAt;
 }
 
 /** Writes `<ticket>/.agents/last_run.json`; never throws (the record only explains a failure). */
@@ -196,19 +252,9 @@ export function detectTicketFailure(input: ITicketFailureInput): ITicketFailure 
 		return undefined;
 	}
 	const reasons: string[] = [];
-	const lastRunFailed = input.lastRun?.status === 'Failed';
-	// A legacy Status `Failed` counts unless a newer record says the last run succeeded
-	if (lastRunFailed || (isFailedRunStatus(input.status) && input.lastRun?.status !== 'Completed')) {
-		const run = lastRunFailed ? input.lastRun : undefined;
-		const when = formatFailureTime(run?.at);
-		let reason = when ? `Last run failed ${when}` : 'Last run failed (Status: Failed)';
-		if (run?.failedStep) {
-			reason += ` — component '${run.failedStep}' failed`;
-		}
-		if (run?.error) {
-			reason += `: ${truncate(run.error, 120)}`;
-		}
-		reasons.push(reason);
+	const run = describeRunFailure(input.status, input.lastRun);
+	if (run) {
+		reasons.push(run.reason);
 	}
 	if (input.workflowRun && input.workflowRun.status.toLowerCase() === 'failed') {
 		const when = formatFailureTime(input.workflowRun.at);
@@ -218,7 +264,41 @@ export function detectTicketFailure(input: ITicketFailureInput): ITicketFailure 
 	if (input.resultField && isFailingResultValue(input.resultField.value)) {
 		reasons.push(`Test ${input.resultField.label.toLowerCase()}: ${input.resultField.value}`);
 	}
-	return reasons.length > 0 ? { reasons } : undefined;
+	if (reasons.length === 0) {
+		return undefined;
+	}
+	return run?.clearable ? { reasons, runFailure: true } : { reasons };
+}
+
+/**
+ * The reason of a run failure, or undefined (see the rules at the top): a failed, not dismissed record fails whatever
+ * the Status; a dismissed record covers the Status `Failed` its run wrote; without a failed record Status `Failed`
+ * fails on its own. `clearable`: "Clear Failure Mark" applies (not to a Status `Failed` set by hand after a successful
+ * run: changing the Status clears that one).
+ */
+function describeRunFailure(status: string | undefined, lastRun: ITicketLastRunRecord | undefined): { reason: string; clearable: boolean } | undefined {
+	if (lastRun?.status === 'Failed') {
+		if (lastRun.dismissedAt) {
+			return undefined;
+		}
+		const when = formatFailureTime(lastRun.at);
+		let reason = when ? `Last run failed (${when})` : 'Last run failed';
+		if (lastRun.failedStep) {
+			reason += ` — component '${lastRun.failedStep}' failed`;
+		}
+		if (lastRun.error) {
+			reason += `: ${truncate(lastRun.error, 120)}`;
+		}
+		if (status && !isFailedRunStatus(status)) {
+			reason += ` — the status (${status.trim()}) does not clear it; run again or Clear Failure Mark`;
+		}
+		return { reason, clearable: true };
+	}
+	// a legacy Status `Failed` (runs before CI-58) counts until a run completes; a stopped run says nothing about it
+	if (isFailedRunStatus(status) && lastRun?.status !== 'Completed') {
+		return { reason: 'Last run failed (Status: Failed)', clearable: true };
+	}
+	return undefined;
 }
 
 // --- propagation ---

@@ -60,7 +60,8 @@ import { describeRestoreDecision } from '../common/ticketRestore.js';
 import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHED_CATEGORIES, HIDDEN_STATUS_CATEGORIES_STORAGE_KEY, LEGACY_HIDE_FINISHED_TICKETS_STORAGE_KEY, resolveHiddenCategories, serializeHiddenCategories, toggleHiddenCategory } from '../common/ticketVisibility.js';
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
-import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, IFailingSummary } from '../common/ticketFailure.js';
+import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, dismissTicketRunFailure, formatFailureTime, formatTicketLastRunRecord, IFailingSummary, ITicketLastRunRecord, parseTicketLastRunRecord, TICKET_LAST_RUN_FILE_NAME } from '../common/ticketFailure.js';
+import { recordTicketChangeEntry } from './ticketChangeRecorder.js';
 import { createCSSRule } from '../../../../base/browser/domStylesheets.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
@@ -882,6 +883,41 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const pillEl = append(container, $(failingText ? 'span.ticket-child-count.ticket-child-count-failing' : 'span.ticket-child-count', { style }, pill.text));
 		pillEl.title = failingText ? `${failingText}\n\n${pill.tooltip}` : pill.tooltip;
 		return `${this._childCountMode}:${pill.text}:${pillEl.title}`;
+	}
+
+	/**
+	 * UI-20 rework: "Clear Failure Mark" dismisses the last failed run of a ticket: `dismissedAt` / `dismissedBy` in
+	 * `.agents/last_run.json` (the next run overwrites the record, so a new failure shows red again) and a change entry
+	 * in the ticket's work log (CI-50).
+	 */
+	private async _clearRunFailureMark(ticketUri: URI, ticketId: string): Promise<void> {
+		const configDir = URI.joinPath(ticketUri, '.agents');
+		const file = URI.joinPath(configDir, TICKET_LAST_RUN_FILE_NAME);
+		let record: ITicketLastRunRecord | undefined;
+		try {
+			record = parseTicketLastRunRecord((await this.fileService.readFile(file)).value.toString());
+		} catch {
+			// no record: a Status `Failed` from a run before UI-20
+		}
+		const now = new Date();
+		const dismissed = dismissTicketRunFailure(record, now, 'User');
+		try {
+			await this.fileService.writeFile(file, VSBuffer.fromString(formatTicketLastRunRecord(dismissed)));
+		} catch (err) {
+			this.notificationService.error(`Could not clear the failure mark of ${ticketId}: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+		const when = record?.status === 'Failed' ? formatFailureTime(record.at) : '';
+		const failed = `Last run failed${when ? ` (${when})` : ''}${record?.status === 'Failed' && record.failedStep ? ` — component '${record.failedStep}' failed` : ''}`;
+		try {
+			await recordTicketChangeEntry(this.fileService, configDir, [{
+				field: 'run_failure_mark', label: 'Run Failure Mark', source: 'ticket.md', actor: 'User', at: now.toISOString(), kind: 'inline',
+				old: failed, new: 'Cleared by User (Clear Failure Mark)'
+			}], { kind: 'User' });
+		} catch (err) {
+			console.error('[WorkspacesExplorer] Failed to log Clear Failure Mark:', err);
+		}
+		this.workspacesExplorerService.refreshCaches(ticketUri);
 	}
 
 	/**
@@ -2065,6 +2101,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 						this.notificationService.info(`Refreshed '${child.name}'.`);
 					})
 				);
+
+				// UI-20 rework: a run failure stays marked after a manual status change; clearing it is explicit
+				if (selectedChildren.length <= 1 && this.workspacesExplorerService.peekTicketFailure(child.uri)?.runFailure) {
+					const clearMark = new Action('clear_failure_mark', 'Clear Failure Mark', ThemeIcon.asClassName(Codicon.eraser), true, async () => {
+						await this._clearRunFailureMark(child.uri, realTicketId);
+					});
+					clearMark.tooltip = 'Clear the red mark of the last failed run (recorded in last_run.json and the work log); a new failed run marks it again';
+					childActions.push(clearMark);
+				}
 
 				if (isDirectory && !isRemoved) {
 					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.sparkleFilled), true, () => {

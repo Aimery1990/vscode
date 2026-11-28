@@ -11,7 +11,7 @@ import {
 	latestOutcome, parseDerivedOutcome, propagateDependencies, readDependsOn, readFollowDependencies, readResultFieldValue, resultValueFor,
 	serializeDerivedOutcome, setResultFieldValue, workflowRunOutcome
 } from '../../workspacesExplorer/common/ticketDependencies.js';
-import { parseTicketLastRunRecord, parseWorkflowRunsHead, TICKET_LAST_RUN_FILE_NAME } from '../../workspacesExplorer/common/ticketFailure.js';
+import { lastRunOutcome, parseTicketLastRunRecord, parseWorkflowRunsHead, TICKET_LAST_RUN_FILE_NAME } from '../../workspacesExplorer/common/ticketFailure.js';
 import { readTicketStatus, readTopLevelMetadata, setTicketStatusLine } from '../../workspacesExplorer/common/workspaceLifecycle.js';
 import { decideStatusAfterRun } from '../common/runCompletionStatus.js';
 import { IRunCompletionStatusDeps, loadTicketStatusSettings } from './runCompletionStatus.js';
@@ -188,7 +188,9 @@ export class TicketDependencyUpdater {
 			}
 		};
 		const lastRun = parseTicketLastRunRecord(await read(TICKET_LAST_RUN_FILE_NAME, 16384));
-		const own: IOutcomeRecord | undefined = lastRun ? { status: lastRun.status === 'Completed' ? 'success' : 'failed', at: Date.parse(lastRun.at), source: 'run' } : undefined;
+		// a run stopped by a person is no outcome (not a failure)
+		const ownStatus = lastRunOutcome(lastRun);
+		const own: IOutcomeRecord | undefined = lastRun && ownStatus ? { status: ownStatus, at: Date.parse(lastRun.at), source: 'run' } : undefined;
 		const head = parseWorkflowRunsHead(await read('workflow_runs.json', 4096));
 		const derivedText = await read(DEPENDENCY_OUTCOME_FILE_NAME, 4096);
 		return latestOutcome([own, workflowRunOutcome(head?.status, head?.at), derivedText ? parseDerivedOutcome(derivedText) : undefined, this._overrides.get(folderKey(folder))]);

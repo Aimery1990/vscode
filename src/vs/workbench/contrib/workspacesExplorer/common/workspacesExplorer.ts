@@ -237,8 +237,9 @@ export interface IWorkspacesExplorerService {
 	/**
 	 * UI-20: why the ticket folder `ticketUri` is failing, read from its parent's cached sub-tree level (filled by the
 	 * parent's {@link getTicketSubtreeSummary}); undefined when it is not failing or not scanned yet.
+	 * `runFailure`: the failure comes from the last ticket run ("Clear Failure Mark" applies, UI-20 rework).
 	 */
-	peekTicketFailure(ticketUri: URI): { readonly reasons: readonly string[] } | undefined;
+	peekTicketFailure(ticketUri: URI): { readonly reasons: readonly string[]; readonly runFailure?: boolean } | undefined;
 	/**
 	 * UI-23: the test result field (label and raw value) of the test-case ticket folder `ticketUri`, read from its
 	 * parent's cached sub-tree level like {@link peekTicketFailure}; undefined for tickets without a result field,

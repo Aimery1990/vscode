@@ -3373,7 +3373,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const runActor: ITicketChangeActor = { kind: 'Workflow', name: callerWorkflow?.label || 'Ticket Run' };
 			const ticketFolder = ticketUri.path.endsWith('.md') ? ticketFolderOfFile(ticketUri) : ticketUri;
 			// UI-20: run outcome for the Workspaces tree's failure markers (before ticket.md, whose change triggers the rescan)
-			await writeTicketLastRunRecord(this.fileService, ticketFolder, ticketLastRunRecordFromSteps(stepResults, new Date()));
+			// a run stopped by a person at a gate is recorded as Stopped: not red, not a failure for dependents
+			await writeTicketLastRunRecord(this.fileService, ticketFolder, ticketLastRunRecordFromSteps(stepResults, new Date(), stoppedByUser));
 			// CI-58: the status after the run: a Button Group target status, else the "on successful / failed run"
 			// setting (Done / Blocked by default); a stopped run leaves it
 			const explicitStatus = hasFailedSteps ? undefined : decidedStatus;

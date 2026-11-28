@@ -4,7 +4,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, detectTicketFailure, formatTicketLastRunRecord, isFailedRunStatus, isFailingResultValue, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
+import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, detectTicketFailure, dismissTicketRunFailure, formatTicketLastRunRecord, isDismissedRunFailure, lastRunOutcome, isFailedRunStatus, isFailingResultValue, parseTicketLastRunRecord, parseWorkflowRunsHead, readTestResultField, ticketLastRunRecordFromSteps } from '../../common/ticketFailure.js';
 import { ITicketSubtreeNode, ITicketSubtreeSummary } from '../../common/ticketSubtreeCount.js';
 import { CanonicalStatusCategory } from '../../common/workspacesExplorer.js';
 
@@ -77,11 +77,11 @@ suite('ticketFailure', () => {
 	test('detectTicketFailure: run, workflow and test result reasons; removed never fails', () => {
 		const at = new Date(2026, 10, 27, 17, 30).toISOString();
 		const run = detectTicketFailure({ status: 'Failed', removed: false, lastRun: { status: 'Failed', at, failedStep: 'Git Push' } });
-		assert.deepStrictEqual(run, { reasons: [`Last run failed 2026-11-27 17:30 — component 'Git Push' failed`] });
-		assert.deepStrictEqual(detectTicketFailure({ status: 'Failed', removed: false }), { reasons: ['Last run failed (Status: Failed)'] });
+		assert.deepStrictEqual(run, { reasons: [`Last run failed (2026-11-27 17:30) — component 'Git Push' failed`], runFailure: true });
+		assert.deepStrictEqual(detectTicketFailure({ status: 'Failed', removed: false }), { reasons: ['Last run failed (Status: Failed)'], runFailure: true });
 		// CI-58: the last_run.json record is the signal, whatever the status (a failed run may set Blocked, or nothing)
-		assert.deepStrictEqual(detectTicketFailure({ status: 'Blocked', removed: false, lastRun: { status: 'Failed', at } }), { reasons: ['Last run failed 2026-11-27 17:30'] });
-		assert.deepStrictEqual(detectTicketFailure({ status: 'In Progress', removed: false, lastRun: { status: 'Failed', at, failedStep: 'Py' } }), { reasons: [`Last run failed 2026-11-27 17:30 — component 'Py' failed`] });
+		assert.deepStrictEqual(detectTicketFailure({ status: 'Blocked', removed: false, lastRun: { status: 'Failed', at } }), { reasons: ['Last run failed (2026-11-27 17:30) — the status (Blocked) does not clear it; run again or Clear Failure Mark'], runFailure: true });
+		assert.deepStrictEqual(detectTicketFailure({ removed: false, lastRun: { status: 'Failed', at, failedStep: 'Py' } }), { reasons: [`Last run failed (2026-11-27 17:30) — component 'Py' failed`], runFailure: true });
 		// a later successful run clears it, also a legacy Status Failed
 		assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, lastRun: { status: 'Completed', at } }), undefined);
 		assert.strictEqual(detectTicketFailure({ status: 'Failed', removed: false, lastRun: { status: 'Completed', at } }), undefined);
@@ -91,6 +91,69 @@ suite('ticketFailure', () => {
 		assert.strictEqual(detectTicketFailure({ removed: false, workflowRun: { status: 'completed' } }), undefined);
 		assert.strictEqual(detectTicketFailure({ status: 'Removed', removed: true, resultField: { label: 'Result', value: 'Fail' } }), undefined);
 		assert.strictEqual(describeTicketFailure({ reasons: ['A', 'B'] }), 'Failing:\n• A\n• B');
+	});
+
+	test('UI-20 rework: the red mark follows the latest run outcome, not the status', () => {
+		const at = new Date(2026, 10, 28, 0, 12).toISOString();
+		const failedRun = { status: 'Failed' as const, at, failedStep: 'Python' };
+		// failed run + manual Done -> still failing, the reason says why and how to clear it
+		const done = detectTicketFailure({ status: 'Done', removed: false, lastRun: failedRun });
+		assert.deepStrictEqual(done, {
+			reasons: [`Last run failed (2026-11-28 00:12) — component 'Python' failed — the status (Done) does not clear it; run again or Clear Failure Mark`],
+			runFailure: true
+		});
+		// any other manual status too (even Completed set by hand)
+		assert.ok(detectTicketFailure({ status: 'Todo', removed: false, lastRun: failedRun })?.runFailure);
+		assert.ok(detectTicketFailure({ status: 'Completed', removed: false, lastRun: failedRun }));
+		assert.ok(detectTicketFailure({ removed: false, lastRun: failedRun }));
+		// a later successful run clears it
+		const later = new Date(2026, 10, 28, 1, 0);
+		assert.strictEqual(detectTicketFailure({ status: 'Completed', removed: false, lastRun: ticketLastRunRecordFromSteps([{ status: 'success' }], later) }), undefined);
+		assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, lastRun: ticketLastRunRecordFromSteps([{ status: 'success' }], later) }), undefined);
+		// a dismissal clears it, also the Status Failed written by that run
+		const dismissed = dismissTicketRunFailure(failedRun, later);
+		assert.deepStrictEqual(dismissed, { ...failedRun, dismissedAt: later.toISOString(), dismissedBy: 'User' });
+		assert.ok(isDismissedRunFailure(dismissed));
+		assert.deepStrictEqual(parseTicketLastRunRecord(formatTicketLastRunRecord(dismissed)), dismissed);
+		assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, lastRun: dismissed }), undefined);
+		assert.strictEqual(detectTicketFailure({ status: 'Failed', removed: false, lastRun: dismissed }), undefined);
+		// a new failed run after the dismissal writes a fresh record -> failing again
+		const again = ticketLastRunRecordFromSteps([{ status: 'failed', fieldLabel: 'Python', error: 'boom' }], new Date(2026, 10, 28, 2, 0));
+		assert.ok(!isDismissedRunFailure(again));
+		assert.ok(detectTicketFailure({ status: 'Failed', removed: false, lastRun: again })?.runFailure);
+		assert.ok(detectTicketFailure({ status: 'Done', removed: false, lastRun: again })?.runFailure);
+		// no record (run before UI-20): dismissing creates a failed record that is already dismissed
+		const legacy = dismissTicketRunFailure(undefined, later);
+		assert.deepStrictEqual(legacy, { status: 'Failed', at: later.toISOString(), dismissedAt: later.toISOString(), dismissedBy: 'User' });
+		assert.strictEqual(detectTicketFailure({ status: 'Failed', removed: false, lastRun: legacy }), undefined);
+		// a legacy Status Failed is cleared by a later completed run (CI-58: runs no longer write the Status)
+		assert.strictEqual(detectTicketFailure({ status: 'Failed', removed: false, lastRun: { status: 'Completed', at } }), undefined);
+		// a Test Case with Result Fail stays red whatever its status, until the Result changes; dismissing a run does not clear it
+		const tc = detectTicketFailure({ status: 'Done', removed: false, lastRun: dismissed, resultField: { label: 'Result', value: 'Fail' } });
+		assert.deepStrictEqual(tc, { reasons: ['Test result: Fail'] });
+		assert.strictEqual(detectTicketFailure({ status: 'Done', removed: false, resultField: { label: 'Result', value: 'Pass' } }), undefined);
+		// removed tickets never fail
+		assert.strictEqual(detectTicketFailure({ status: 'Removed', removed: true, lastRun: failedRun }), undefined);
+	});
+
+	test('a run stopped by a person (CI-25 Stop this run) is Stopped: not red, no outcome for dependents', () => {
+		const at = new Date(2026, 10, 28, 3, 0);
+		// the gate's step "failed" because the wait was cancelled, but the person stopped the run
+		const steps = [{ status: 'success', fieldLabel: 'Fetch' }, { status: 'failed', fieldLabel: 'Approve', error: `Stopped: the run was stopped while 'Approve' was waiting for a decision.` }];
+		const stopped = ticketLastRunRecordFromSteps(steps, at, true);
+		assert.deepStrictEqual(stopped, { status: 'Stopped', at: at.toISOString() });
+		assert.deepStrictEqual(parseTicketLastRunRecord(formatTicketLastRunRecord(stopped)), stopped);
+		assert.strictEqual(ticketLastRunRecordFromSteps(steps, at).status, 'Failed', 'without the stop flag the same steps are a failure');
+		assert.strictEqual(detectTicketFailure({ status: 'In Progress', removed: false, lastRun: stopped }), undefined);
+		assert.strictEqual(detectTicketFailure({ removed: false, lastRun: stopped }), undefined);
+		// dependents: no outcome from a stopped run; Completed / Failed (dismissed or not) map as before
+		assert.strictEqual(lastRunOutcome(stopped), undefined);
+		assert.strictEqual(lastRunOutcome({ status: 'Completed', at: at.toISOString() }), 'success');
+		assert.strictEqual(lastRunOutcome({ status: 'Failed', at: at.toISOString() }), 'failed');
+		assert.strictEqual(lastRunOutcome(dismissTicketRunFailure({ status: 'Failed', at: at.toISOString() }, at)), 'failed');
+		assert.strictEqual(lastRunOutcome(undefined), undefined);
+		// a legacy Status Failed is not cleared by a stop (only a completed run clears it)
+		assert.ok(detectTicketFailure({ status: 'Failed', removed: false, lastRun: stopped }));
 	});
 
 	test('propagation: all levels, regardless of the status filter (flagged), removed sub-trees skipped', () => {
