@@ -664,7 +664,7 @@ export const COMPONENT_SPECS = {
 				{ step: '4. Publish', detail: '{var} / {Label} = stdout (stderr on failure); {var.ok}, .exitCode, .stdout, .stderr, .command, .repoPath, .branch, .commit (also under the label: {Label.ok}, ...). A non-zero exit fails the step.' }
 			],
 			variableResolution: '{output_var} or {Field Label} for the output text, {output_var.exitCode} / {Field Label.branch} ... for the fields.',
-			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text) and TICKET_CONTEXT["field_label_result"] (dict).',
+			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text, never the dict) and TICKET_CONTEXT["<output_var>_result"] / TICKET_CONTEXT["field_label_result"] (dict). Same names in a whole ticket run, a workflow node and a single card run on the ticket page (there the last stored result is used).',
 			syntaxExamples: ['{Git Status}', '{Git Status.branch}', '{Commit Changes.commit}', 'TICKET_CONTEXT["commit_changes_result"]["exitCode"]'],
 			tips: [
 				'Log in once in a terminal (or set up an SSH key / credential helper): the component never asks for passwords.',
@@ -739,7 +739,7 @@ export const COMPONENT_SPECS = {
 				{ step: '4. Publish', detail: '{var} / {Label} = stdout (stderr on failure); {var.ok}, .exitCode, .stdout, .stderr, .command, .cwd, .durationMs (also under the label: {Label.ok}, ...). A non-zero exit fails the step; it is never retried automatically.' }
 			],
 			variableResolution: '{output_var} or {Field Label} for the output text, {output_var.exitCode} / {Field Label.stderr} ... for the fields.',
-			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text) and TICKET_CONTEXT["field_label_result"] (dict).',
+			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text, never the dict) and TICKET_CONTEXT["<output_var>_result"] / TICKET_CONTEXT["field_label_result"] (dict). Same names in a whole ticket run, a workflow node and a single card run on the ticket page (there the last stored result is used).',
 			syntaxExamples: ['ls -la {folder}', 'echo "Hello {name}" > out.txt', '{Build Project.exitCode}', 'TICKET_CONTEXT["build_project_result"]["stdout"]'],
 			tips: [
 				'Commands that ask for input (passwords, y/n) fail: there is no terminal. Use non-interactive flags (e.g. -y).',

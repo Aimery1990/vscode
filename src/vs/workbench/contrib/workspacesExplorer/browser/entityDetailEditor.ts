@@ -23,7 +23,7 @@ import { EntityDetailEditorInput, IEntityPreviewModule } from './entityDetailEdi
 import { TicketBoardController } from './ticketBoardView.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { ISubWorkflowDefinition } from '../../workflowsManager/common/workflowExecutionModel.js';
-import { ticketRootFieldValue } from '../../workflowsManager/common/ticketRunContext.js';
+import { publishStoredComponentResults, ticketRootFieldValue } from '../../workflowsManager/common/ticketRunContext.js';
 import { SUB_WORKFLOW_DEFINITION_REL_PATH, describeSubWorkflowSource, getSubWorkflowDefinitionUri, parseSubWorkflowDefinition } from '../../workflowsManager/common/subWorkflowTicket.js';
 import { URI } from '../../../../base/common/uri.js';
 import { FileAccess } from '../../../../base/common/network.js';
@@ -9931,6 +9931,14 @@ ${rawErr}
 					paramMap.set(`result.${id}`, primitiveVal);
 				}
 			}
+
+			// 5. Last stored results of git / shell / button_group cards under the same names as a whole ticket run
+			// (CI-67): {var}, {var.field}, {label_key.field}, {var_result} (JSON), next to the label forms above
+			const stored: Record<string, unknown> = {};
+			publishStoredComponentResults(stored, this._lastCustomModule.fields, this._lastParsedData?.customMetadata ?? {}, f => this._lookupCustomMetadataByField(f.label || f.id, f));
+			for (const [k, v] of Object.entries(stored)) {
+				paramMap.set(k, v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''));
+			}
 		}
 
 		return paramMap;
@@ -19304,6 +19312,11 @@ ${rawErr}
 					}
 				});
 			} catch { }
+
+			// The other cards' last stored results (git / shell / button_group) with the SAME rule as a whole ticket run
+			// (CI-67): TICKET_CONTEXT["Branch List"] = the text, TICKET_CONTEXT["branch_list_result"] = the dict (real
+			// numbers / booleans, not the strings of the {variable} map above)
+			publishStoredComponentResults(ticketContext, this._lastCustomModule?.fields, this._lastParsedData?.customMetadata ?? {}, f => this._lookupCustomMetadataByField(f.label || f.id, f));
 
 			if (this._lastCustomModule?.fields) {
 				for (const f of this._lastCustomModule.fields) {

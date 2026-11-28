@@ -38,7 +38,7 @@ import { RequestChannelClient } from '../../../../platform/request/common/reques
 import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import { ISubWorkflowDefinition, hasWorkflowProperty, isWorkflowRecord } from '../common/workflowExecutionModel.js';
 import { buildDynamicListContextValue } from '../common/dynamicListValue.js';
-import { ticketRunDescription, ticketRunTitle } from '../common/ticketRunContext.js';
+import { publishStoredComponentResults, ticketRunDescription, ticketRunTitle } from '../common/ticketRunContext.js';
 import { ISubWorkflowCallChain, createSubWorkflowCallChain, describeCallGraphNode, extendSubWorkflowCallChain } from '../common/subWorkflowCallGraph.js';
 import { ISubWorkflowInvocationResult, IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 import { mainWindow } from '../../../../base/browser/window.js';
@@ -1533,6 +1533,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const fieldsToRun: IRuntimeCustomField[] = (schema?.fields && Array.isArray(schema.fields) && schema.fields.length > 0)
 				? schema.fields
 				: this._synthesizeFieldsFromMetadata(customMetadata);
+
+			// Result components (git / shell / button_group) that have not run yet in this run show their last stored
+			// result in the canonical shape (label = text, <name>_result = dict), as on a single card run (CI-67)
+			publishStoredComponentResults(contextVariables, fieldsToRun, customMetadata);
 
 			// Pre-populate context with static defaults and contents from all fields
 			for (const f of fieldsToRun) {

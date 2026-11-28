@@ -4,6 +4,7 @@
 
 import { isAbsolute, join } from '../../../../base/common/path.js';
 import { IGitRunResult } from '../../entityPersistence/common/entityPersistence.js';
+import { publishResultOutputs } from './resultOutputs.js';
 
 /*
  * The `git` component (CI-24): which commands it offers, how a configuration becomes git argv arrays, how a run's
@@ -537,10 +538,6 @@ export function gitOutputFields(result: IGitRunResult): Record<GitOutputField, s
 	};
 }
 
-function cleanKey(key: string): string {
-	return key.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-}
-
 /**
  * Publishes a git result into run context variables: `{Label}` / label_key = main text, `{Label.field}` and
  * `{label_key.field}` for each structured field, and `{Label}_result` / `{label_key}_result` = all fields as a dict
@@ -550,15 +547,7 @@ function cleanKey(key: string): string {
  */
 export function publishGitOutputs(context: Record<string, unknown>, label: string, result: IGitRunResult, aliases: readonly (string | undefined)[] = []): string {
 	const main = gitMainOutput(result);
-	const fields = gitOutputFields(result);
-	const key = cleanKey(label);
-	for (const name of new Set([label, key, ...aliases.filter((a): a is string => !!a)])) {
-		context[name] = main;
-		context[`${name}_result`] = fields;
-		for (const [field, value] of Object.entries(fields)) {
-			context[`${name}.${field}`] = value;
-		}
-	}
+	publishResultOutputs(context, label, main, gitOutputFields(result), aliases);
 	return main;
 }
 

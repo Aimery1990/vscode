@@ -7,6 +7,7 @@ import { isMacintosh } from '../../../../base/common/platform.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IShellRunResult } from '../../entityPersistence/common/entityPersistence.js';
 import { truncateUtf8 } from './gitComponent.js';
+import { publishResultOutputs } from './resultOutputs.js';
 
 /*
  * The `shell` component (CI-55): runs a local zsh / bash / sh script. Pure helpers shared by the runtime, the editors
@@ -643,10 +644,6 @@ export function shellOutputFields(result: IShellRunResult): Record<ShellOutputFi
 	};
 }
 
-function cleanKey(key: string): string {
-	return key.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-}
-
 /**
  * Publishes a shell result into run context variables: `{Label}` / label_key = main text, `{Label.field}` and
  * `{label_key.field}` per structured field, and `{Label}_result` / `{label_key}_result` = all fields as a dict
@@ -655,14 +652,7 @@ function cleanKey(key: string): string {
  */
 export function publishShellOutputs(context: Record<string, unknown>, label: string, result: IShellRunResult, aliases: readonly (string | undefined)[] = []): string {
 	const main = shellMainOutput(result);
-	const fields = shellOutputFields(result);
-	for (const name of new Set([label, cleanKey(label), ...aliases.filter((a): a is string => !!a)])) {
-		context[name] = main;
-		context[`${name}_result`] = fields;
-		for (const [field, value] of Object.entries(fields)) {
-			context[`${name}.${field}`] = value;
-		}
-	}
+	publishResultOutputs(context, label, main, shellOutputFields(result), aliases);
 	return main;
 }
 

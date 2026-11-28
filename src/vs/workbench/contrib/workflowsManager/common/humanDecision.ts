@@ -5,6 +5,7 @@
 import { Event } from '../../../../base/common/event.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IActionButton } from '../../entityPersistence/common/entityPersistence.js';
+import { publishResultOutputs, resultLabelKey } from '../../customModules/common/resultOutputs.js';
 
 /*
  * Human decisions (CI-25): a Button Group component is a human approval gate. When a ticket run or a workflow node
@@ -170,24 +171,13 @@ export function buttonGroupOutputFields(decision: IHumanDecision): Record<typeof
 	return { id: decision.buttonId, label: decision.label, at: decision.at, by: decision.by };
 }
 
-function cleanKey(key: string): string {
-	return key.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-}
-
 /**
  * Publishes a decision into run context variables: `{Label}` / label_key = the clicked button's label, `{Label.id}`,
  * `{Label.label}`, `{Label.at}`, `{Label.by}` and `{Label}_result` / `{label_key}_result` (dict), also under each of
  * `aliases` (the output variable, UI-27). Returns the label.
  */
 export function publishButtonGroupOutputs(context: Record<string, unknown>, label: string, decision: IHumanDecision, aliases: readonly (string | undefined)[] = []): string {
-	const fields = buttonGroupOutputFields(decision);
-	for (const name of new Set([label, cleanKey(label), ...aliases.filter((a): a is string => !!a)])) {
-		context[name] = decision.label;
-		context[`${name}_result`] = fields;
-		for (const [field, value] of Object.entries(fields)) {
-			context[`${name}.${field}`] = value;
-		}
-	}
+	publishResultOutputs(context, label, decision.label, buttonGroupOutputFields(decision), aliases);
 	return decision.label;
 }
 
@@ -227,7 +217,7 @@ export function publishTicketDecisionsToWorkflow(context: Record<string, unknown
 		}
 		publishButtonGroupOutputs(context, step.fieldLabel, decision);
 		if (ticketId) {
-			const alias = `${ticketDecisionAliasPrefix(ticketId)}${cleanKey(step.fieldLabel)}`;
+			const alias = `${ticketDecisionAliasPrefix(ticketId)}${resultLabelKey(step.fieldLabel)}`;
 			context[alias] = decision.label;
 			context[`${alias}_result`] = buttonGroupOutputFields(decision);
 		}
