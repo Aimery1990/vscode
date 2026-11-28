@@ -12,7 +12,7 @@ import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/w
 import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, normalizeFieldType } from '../../../entityPersistence/common/entityPersistence.js';
 import { resolveDefaultModel } from '../../../agentsManager/common/agentsManager.js';
 import { getTemplateNameClashError } from '../../common/templateNameClash.js';
-import { IAiBasePrimitive, IComponentConfigProp, buildAiBasePrimitives, describeAiConfigProps, getAiConfigProps, getAiTemplateComponentTypes, getSecretPropNames } from '../../common/componentRegistry.js';
+import { CARD_OUTPUT_RULES, IAiBasePrimitive, IComponentConfigProp, buildAiBasePrimitives, describeAiConfigProps, getAiConfigProps, getAiTemplateComponentTypes, getSecretPropNames } from '../../common/componentRegistry.js';
 import { coerceComponentConfigValue, validateComponentConfig } from '../../common/componentConfigSchema.js';
 
 export const ListCustomModulesToolId = 'anyagent_list_custom_modules';
@@ -407,7 +407,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 								},
 								config: {
 									type: 'object',
-									description: `Component settings, by type (all optional; omitted settings use the defaults): ${describeAiConfigProps()}. Every type also accepts outputVariableName, disabled and required. Text can reference earlier values as {variable}. Secrets (${describeSecretProps()}) MUST be a variable reference like {API_TOKEN}, never the plain value. Browser credentials are [{key, value}] pairs referenced in defaultUrl as {key}. Inputs use 'parameters', Output uses 'outputSpecs', table columns use 'tableColumns'.`,
+									description: `Component settings, by type (all optional; omitted settings use the defaults): ${describeAiConfigProps()}. Every type also accepts outputVariableName, disabled and required. How later cards use a card's output: ${CARD_OUTPUT_RULES} Secrets (${describeSecretProps()}) MUST be a variable reference like {API_TOKEN}, never the plain value. Browser credentials are [{key, value}] pairs referenced in defaultUrl as {key}. Inputs use 'parameters', Output uses 'outputSpecs', table columns use 'tableColumns'.`,
 									additionalProperties: true
 								},
 								outputSpecs: {

@@ -51,7 +51,7 @@ import { IWorkflowExecutionService } from '../../workflowsManager/common/workflo
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField } from '../common/componentPalette.js';
 import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
-import { applyOutputVariableName, replaceOutputVariableReferences, validateOutputVariableName } from '../common/outputVariable.js';
+import { applyOutputVariableName, buildPythonInsertContext, replaceOutputVariableReferences, validateOutputVariableName } from '../common/outputVariable.js';
 import { renderOutputVariableChip } from './outputVariableChip.js';
 import { GIT_CONFIG_KEYS, gitMainOutput, pickGitConfig } from '../common/gitComponent.js';
 import { renderGitConfigForm, renderGitResultView } from './gitComponentView.js';
@@ -2097,28 +2097,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				if (!isMandatory && !isEmbeddedFieldMode) {
 					const outputVarChip = renderOutputVariableChip({
 						field,
-						getComponents: () => fields,
 						clipboardService: this._clipboardService,
 						notificationService: this.notificationService,
-						dialogService: this.dialogService,
-						commit: async (newName, oldName, updateReferences) => {
-							const error = validateOutputVariableName(newName, fields, field.id);
-							if (error) {
-								this.notificationService.warn(error);
-								return;
+						edit: {
+							getComponents: () => fields,
+							dialogService: this.dialogService,
+							commit: async (newName, oldName, updateReferences) => {
+								const error = validateOutputVariableName(newName, fields, field.id);
+								if (error) {
+									this.notificationService.warn(error);
+									return;
+								}
+								// Same save path as the Output Var row below
+								applyOutputVariableName(field, newName);
+								if (updateReferences) {
+									replaceOutputVariableReferences(fields, field.id, oldName, newName.trim());
+								}
+								this._syncDraft();
+								const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
+								renderCanvas();
+								if (mainViewport) {
+									mainViewport.scrollTop = savedScroll;
+								}
+								await this._persistCurrentModule();
 							}
-							// Same save path as the Output Var row below
-							applyOutputVariableName(field, newName);
-							if (updateReferences) {
-								replaceOutputVariableReferences(fields, field.id, oldName, newName.trim());
-							}
-							this._syncDraft();
-							const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
-							renderCanvas();
-							if (mainViewport) {
-								mainViewport.scrollTop = savedScroll;
-							}
-							await this._persistCurrentModule();
 						}
 					});
 					if (outputVarChip) {
@@ -9892,36 +9894,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							insertTextAtCursor('\nOUTPUT = ');
 						};
 
-						const otherFields = fields.filter(f => f && f !== field && (!this._isFlowchartNodeMode || f.id !== 'title') && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
-						const contextExpressions: string[] = [];
-						otherFields.forEach(of => {
-							const ofLabel = (of.label || of.id || '').trim();
-							if (of.type === 'parameters' && Array.isArray(of.parameters)) {
-								const paramGroupKey = ofLabel || 'Inputs';
-								of.parameters.forEach(p => {
-									const pName = (p.name || '').trim();
-									if (pName) {
-										if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(pName) && !contextExpressions.includes(pName)) {
-											contextExpressions.push(pName);
-										}
-										const expr = `TICKET_CONTEXT['${paramGroupKey}']['${pName}']`;
-										if (!contextExpressions.includes(expr)) {
-											contextExpressions.push(expr);
-										}
-									}
-								});
-							}
-							if (ofLabel && of.type !== 'parameters') {
-								const outVar = (of.outputVariableName || '').trim() || generateSmartPythonVarName(ofLabel, of.type);
-								if (outVar && !contextExpressions.includes(outVar)) {
-									contextExpressions.push(outVar);
-								}
-								const expr = `TICKET_CONTEXT['${ofLabel}']`;
-								if (!contextExpressions.includes(expr)) {
-									contextExpressions.push(expr);
-								}
-							}
-						});
+						// CI-69: the other cards as TICKET_CONTEXT["<Title>"] and their plain Python variable, nothing else
+						const contextEntries = buildPythonInsertContext(fields.filter(f => f && f !== field), field.id, { skipTitle: this._isFlowchartNodeMode });
+						const contextExpressions: string[] = contextEntries.map(e => e.insert);
+						const contextTitles = new Map(contextEntries.map(e => [e.insert, e.title]));
 						if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowVariablesProvider === 'function') {
 							for (const wv of this.input.workflowVariablesProvider()) {
 								if (wv.type === 'NODE') { continue; }
@@ -9930,7 +9906,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(vName) && !contextExpressions.includes(vName)) {
 										contextExpressions.push(vName);
 									} else {
-										const expr = `TICKET_CONTEXT['${vName}']`;
+										const expr = `TICKET_CONTEXT[${JSON.stringify(vName)}]`;
 										if (!contextExpressions.includes(expr)) {
 											contextExpressions.push(expr);
 										}
@@ -9947,7 +9923,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const fieldChip = append(varBar, $('button', {
 								type: 'button',
 								style: chipStyle,
-								title: `Insert ${expr}`
+								title: contextTitles.get(expr) ?? `Insert ${expr}`
 							}, `+ ${expr}`));
 							fieldChip.onmousedown = (e) => {
 								e.preventDefault();
@@ -9970,7 +9946,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const fieldChip = append(hiddenContainer, $('button', {
 									type: 'button',
 									style: chipStyle,
-									title: `Insert ${expr}`
+									title: contextTitles.get(expr) ?? `Insert ${expr}`
 								}, `+ ${expr}`));
 								fieldChip.onmousedown = (e) => {
 									e.preventDefault();

@@ -59,37 +59,118 @@ export function outputLabelKey(label: string): string {
 }
 
 export interface IOutputVariableHoverEntry {
-	/** Reference as written in other components, e.g. `{git_1}` or `{git_1.stdout}`. */
+	/** Exactly what the user writes: `{log_step}`, `TICKET_CONTEXT["Log Step"]` or `log_step`. */
 	readonly reference: string;
 	readonly type: string;
 	readonly description: string;
 }
 
 /**
- * What the component publishes, from its registry outputs, with the placeholders filled in: `{var…}` -> the variable,
- * `{Label…}` -> the label, `{label_key}` -> the cleaned label. Sub-fields (`{var.stdout}`, `{var}_result`, ...) are
- * published under the variable as well as under the label, so the variable form is the one shown.
+ * Python keywords, builtins and the names the Python runner defines itself: a card variable with one of these names is
+ * not exposed as a plain Python variable (the runner skips it), only `{var}` and `TICKET_CONTEXT["<Title>"]` work.
+ */
+const PYTHON_UNAVAILABLE_NAMES = new Set([
+	'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'case', 'class', 'continue', 'def', 'del', 'elif', 'else',
+	'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'match', 'nonlocal', 'not', 'or', 'pass', 'raise',
+	'return', 'try', 'while', 'with', 'yield', '_',
+	'abs', 'aiter', 'all', 'anext', 'any', 'ascii', 'bin', 'bool', 'breakpoint', 'bytearray', 'bytes', 'callable', 'chr', 'classmethod',
+	'compile', 'complex', 'copyright', 'credits', 'delattr', 'dict', 'dir', 'divmod', 'enumerate', 'eval', 'exec', 'exit', 'filter',
+	'float', 'format', 'frozenset', 'getattr', 'globals', 'hasattr', 'hash', 'help', 'hex', 'id', 'input', 'int', 'isinstance',
+	'issubclass', 'iter', 'len', 'license', 'list', 'locals', 'map', 'max', 'memoryview', 'min', 'next', 'object', 'oct', 'open', 'ord',
+	'pow', 'print', 'property', 'quit', 'range', 'repr', 'reversed', 'round', 'set', 'setattr', 'slice', 'sorted', 'staticmethod', 'str',
+	'sum', 'super', 'tuple', 'type', 'vars', 'zip', 'Ellipsis', 'NotImplemented',
+	// defined by the Python runner itself
+	'os', 'sys', 'json', 're', 'atexit', 'TICKET_CONTEXT', 'ticket_context', 'context', 'CONTEXT', 'ANY_AGENT_CONTEXT', 'OUTPUT', 'RESULT',
+	'CREATE_TICKETS', 'create_tickets', 'RUN_TICKETS', 'run_tickets', 'GET_OUTPUTS', 'get_outputs', 'GET_TICKETS', 'get_tickets',
+	'GET_TICKET', 'get_ticket', 'DISPLAY', 'display', 'set_output', 'return_output'
+]);
+
+/** True when `name` is also a plain variable in Python (a valid identifier that is not a keyword, builtin or runner name). */
+export function isPlainPythonVariable(name: string): boolean {
+	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith('_') && !PYTHON_UNAVAILABLE_NAMES.has(name) && !/(?:Error|Warning|Exception|Exit|Interrupt)$/.test(name);
+}
+
+/** How Python reads a card by its title: `TICKET_CONTEXT["Log Step"]`. */
+export function pythonTitleReference(title: string): string {
+	return `TICKET_CONTEXT[${JSON.stringify(title)}]`;
+}
+
+/** What the card's output is (the `{var}` description of its registry entry), e.g. "main text: stdout, ...". */
+export function outputValueDescription(type: string): string {
+	return getComponentSpec(type)?.outputs.find(o => o.name === '{var}')?.description ?? 'the card\'s output';
+}
+
+/**
+ * The ways to use a card's output (CI-69), nothing else: `{var}` in this ticket or a workflow,
+ * `TICKET_CONTEXT["<Title>"]` in Python, and the plain variable `var` in Python (left out when the name cannot be a
+ * Python variable). Sub-fields and suffixed names still work for older tickets but are never listed.
  */
 export function getOutputVariableHoverEntries(field: ICustomField, varName: string): IOutputVariableHoverEntry[] {
 	const spec = getComponentSpec(field.type);
-	if (!spec) {
-		return [{ reference: formatOutputVariableReference(varName), type: 'any', description: 'result of the component' }];
+	const type = spec?.outputs.find(o => o.name === '{var}')?.type ?? 'any';
+	const value = outputValueDescription(field.type);
+	const title = (field.label || field.id || '').trim();
+	const entries: IOutputVariableHoverEntry[] = [
+		{ reference: formatOutputVariableReference(varName), type, description: `${value} — in this ticket or a workflow` }
+	];
+	if (title) {
+		entries.push({ reference: pythonTitleReference(title), type, description: 'the same output in Python, by the card\'s title' });
 	}
-	const label = (field.label || field.id || '').trim();
-	const key = outputLabelKey(label);
-	return spec.outputs
-		.filter(o => o.name.includes('{'))
-		.map(o => ({
-			reference: o.name
-				.replace(/\{var(?=[.}\s])/g, `{${varName}`)
-				.replace(/\{label_key\}/g, key)
-				.replace(/\{Label(?=[.}\s])/g, `{${label}`)
-				// `{name}_status` / `{name}.rows` / `key_output` are written `{name_status}` / `{name.rows}` / `{key_output}`
-				.replace(/^\{([^{}]+)\}([._][A-Za-z0-9_]+)$/, '{$1$2}')
-				.replace(/^([A-Za-z0-9_]+_[A-Za-z0-9_]+)$/, '{$1}'),
-			type: o.type,
-			description: o.description
-		}));
+	if (isPlainPythonVariable(varName)) {
+		entries.push({ reference: varName, type, description: 'the same output in Python, as a plain variable' });
+	}
+	return entries;
+}
+
+export interface IPythonInsertContextEntry {
+	/** Text inserted at the cursor. */
+	readonly insert: string;
+	/** Tooltip. */
+	readonly title: string;
+	/** Title of the card it reads. */
+	readonly card: string;
+}
+
+/**
+ * The Python card's "Insert Context" list (CI-69): for every OTHER card, `TICKET_CONTEXT["<Title>"]` and its plain
+ * variable (when the name can be a Python variable); an Inputs card also lists `TICKET_CONTEXT["<Title>"]["<input>"]`
+ * per input. No sub-fields. Output / Display / Title cards are left out.
+ */
+export function buildPythonInsertContext(fields: readonly ICustomField[], selfId: string | undefined, options: { skipTitle?: boolean } = {}): IPythonInsertContextEntry[] {
+	const entries: IPythonInsertContextEntry[] = [];
+	const seen = new Set<string>();
+	const add = (insert: string, title: string, card: string) => {
+		if (!seen.has(insert)) {
+			seen.add(insert);
+			entries.push({ insert, title, card });
+		}
+	};
+	const self = (selfId || '').toLowerCase();
+	for (const f of fields) {
+		if (!f || (self && (f.id || '').toLowerCase() === self)) {
+			continue;
+		}
+		const type = (f.type || '').toLowerCase();
+		const title = (f.label || f.id || '').trim();
+		if (!title || type === 'output' || type === 'display' || title.toLowerCase() === 'output' || title.toLowerCase() === 'result' || (options.skipTitle && isTitleComponent(f))) {
+			continue;
+		}
+		if (type === 'parameters') {
+			for (const p of f.parameters ?? []) {
+				const name = (p.name || '').trim();
+				if (name) {
+					add(`${pythonTitleReference(title)}[${JSON.stringify(name)}]`, `Insert input "${name}" of card "${title}"`, title);
+				}
+			}
+			continue;
+		}
+		add(pythonTitleReference(title), `Insert the output of card "${title}" (by its title)`, title);
+		const info = getOutputVariableInfo(f);
+		if (info && isPlainPythonVariable(info.name)) {
+			add(info.name, `Insert the output of card "${title}" (its variable ${info.name}, same as ${formatOutputVariableReference(info.name)} outside Python)`, title);
+		}
+	}
+	return entries;
 }
 
 /**
@@ -109,11 +190,6 @@ export function getOutputSuffixes(type: string): string[] {
 		}
 	}
 	return suffixes;
-}
-
-/** Names of the dotted sub-fields a component publishes (e.g. git: `ok`, `exitCode`, `stdout`, ...). */
-export function getOutputSubFields(type: string): string[] {
-	return getOutputSuffixes(type).filter(s => s.startsWith('.')).map(s => s.slice(1));
 }
 
 /** Output variable a run publishes a component under: `outputVariableName`, or the name generated from `label`. */

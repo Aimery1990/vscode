@@ -5,7 +5,7 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { ICustomField } from '../../../entityPersistence/common/entityPersistence.js';
-import { applyOutputVariableName, countOutputVariableReferences, defaultOutputVariableName, findOutputVariableReferences, formatOutputVariableReference, getOutputSubFields, getOutputSuffixes, outputVariableNameOf, publishOutputVariableAliases, getOutputVariableHoverEntries, getOutputVariableInfo, hasOutputVariable, replaceOutputVariableInText, replaceOutputVariableReferences, validateOutputVariableName } from '../../common/outputVariable.js';
+import { applyOutputVariableName, countOutputVariableReferences, defaultOutputVariableName, findOutputVariableReferences, formatOutputVariableReference, getOutputSuffixes, outputVariableNameOf, publishOutputVariableAliases, getOutputVariableHoverEntries, getOutputVariableInfo, hasOutputVariable, buildPythonInsertContext, isPlainPythonVariable, pythonTitleReference, replaceOutputVariableInText, replaceOutputVariableReferences, validateOutputVariableName } from '../../common/outputVariable.js';
 
 function components(): ICustomField[] {
 	return [
@@ -46,23 +46,55 @@ suite('Output variable chip (UI-27)', () => {
 		assert.strictEqual(formatOutputVariableReference('git_1'), '{git_1}');
 	});
 
-	test('sub-fields and hover entries come from the registry', () => {
-		assert.deepStrictEqual(getOutputSubFields('git'), ['ok', 'exitCode', 'stdout', 'stderr', 'command', 'repoPath', 'branch', 'commit']);
-		assert.deepStrictEqual(getOutputSubFields('shell'), ['ok', 'exitCode', 'stdout', 'stderr', 'command', 'cwd', 'durationMs']);
-		assert.ok(getOutputSubFields('table').includes('rows'));
-		assert.deepStrictEqual(getOutputSubFields('python'), []);
+	test('CI-69: the hover lists only {var}, TICKET_CONTEXT["<Title>"] and the plain Python variable', () => {
 		const [, , git2, py] = components();
-		const gitRefs = getOutputVariableHoverEntries(git2, 'repo_log').map(e => e.reference);
-		assert.ok(gitRefs.includes('{repo_log}'));
-		assert.ok(gitRefs.includes('{repo_log.stdout}'));
-		assert.ok(gitRefs.includes('{repo_log_result}'));
-		assert.ok(gitRefs.includes('{Git 2}'));
+		assert.deepStrictEqual(getOutputVariableHoverEntries(git2, 'repo_log').map(e => e.reference), ['{repo_log}', 'TICKET_CONTEXT["Git 2"]', 'repo_log']);
+		assert.ok(getOutputVariableHoverEntries(git2, 'repo_log')[0].description.startsWith('main text: stdout'));
 		const pyEntries = getOutputVariableHoverEntries(py, 'python_1');
-		assert.ok(pyEntries.some(e => e.reference === '{python_1}' && e.description.includes('OUTPUT')));
-		assert.ok(pyEntries.some(e => e.reference === '{python_1_logs}'));
-		const httpRefs = getOutputVariableHoverEntries({ id: 'h', label: 'Api', type: 'http_request' }, 'api').map(e => e.reference);
-		assert.ok(httpRefs.includes('{api_status}'));
-		assert.ok(getOutputVariableHoverEntries({ id: 't', label: 'Jobs', type: 'table' }, 'job_rows').some(e => e.reference === '{job_rows.rows}'));
+		assert.ok(pyEntries[0].reference === '{python_1}' && pyEntries[0].description.includes('OUTPUT'));
+		for (const type of ['http_request', 'table', 'shell', 'button_group', 'browser', 'ssh', 'media_player'] as const) {
+			const refs = getOutputVariableHoverEntries({ id: 'x', label: 'Log Step', type }, 'log_step').map(e => e.reference);
+			assert.deepStrictEqual(refs, ['{log_step}', 'TICKET_CONTEXT["Log Step"]', 'log_step'], type);
+		}
+		// A name that cannot be a plain Python variable (builtin / keyword / runner name): only {var} and the title key
+		assert.deepStrictEqual(getOutputVariableHoverEntries({ id: 'l', label: 'List', type: 'git' }, 'list').map(e => e.reference), ['{list}', 'TICKET_CONTEXT["List"]']);
+		assert.deepStrictEqual(getOutputVariableHoverEntries({ id: 'o', label: 'Out', type: 'git' }, 'OUTPUT').map(e => e.reference), ['{OUTPUT}', 'TICKET_CONTEXT["Out"]']);
+		assert.strictEqual(pythonTitleReference('Say "hi"'), 'TICKET_CONTEXT["Say \\"hi\\""]');
+	});
+
+	test('CI-69: plain Python variable names', () => {
+		for (const ok of ['log_step', 'branch_list', 'repo_log', 'x1']) {
+			assert.strictEqual(isPlainPythonVariable(ok), true, ok);
+		}
+		for (const bad of ['list', 'print', 'class', 'None', 'OUTPUT', 'TICKET_CONTEXT', 'json', '_hidden', '1abc', 'a-b', 'KeyError', '']) {
+			assert.strictEqual(isPlainPythonVariable(bad), false, bad);
+		}
+	});
+
+	test('CI-69: Python Insert Context lists the other cards by title and plain variable, nothing else', () => {
+		const fields: ICustomField[] = [
+			{ id: 'title', label: 'Title', type: 'text', required: true },
+			{ id: 'inputs', label: 'Inputs', type: 'parameters', parameters: [{ id: 'p1', name: 'repo', label: 'Repo' }] },
+			{ id: 'branch_list', label: 'Branch List', type: 'git' },
+			{ id: 'log', label: 'Log Step', type: 'shell', outputVariableName: 'my_log', outputVariableManual: true },
+			{ id: 'lst', label: 'List', type: 'git' },
+			{ id: 'cur', label: 'Current Branch', type: 'python' },
+			{ id: 'out', label: 'Output', type: 'output' },
+			{ id: 'disp', label: 'Display', type: 'display' }
+		];
+		const inserts = buildPythonInsertContext(fields, 'cur', { skipTitle: true }).map(e => e.insert);
+		assert.deepStrictEqual(inserts, [
+			'TICKET_CONTEXT["Inputs"]["repo"]',
+			'TICKET_CONTEXT["Branch List"]', 'branch_list',
+			'TICKET_CONTEXT["Log Step"]', 'my_log',
+			'TICKET_CONTEXT["List"]'
+		]);
+		assert.ok(inserts.every(i => !/\.|_result|\{/.test(i)));
+		const entry = buildPythonInsertContext(fields, 'cur').find(e => e.insert === 'branch_list');
+		assert.ok(entry?.title.includes('Branch List') && entry.title.includes('{branch_list}'));
+		// The Title card is listed when not skipped; the card itself never is
+		assert.ok(buildPythonInsertContext(fields, 'cur').some(e => e.insert === 'TICKET_CONTEXT["Title"]'));
+		assert.ok(!buildPythonInsertContext(fields, 'cur').some(e => e.card === 'Current Branch'));
 	});
 
 	test('output suffixes from the registry', () => {

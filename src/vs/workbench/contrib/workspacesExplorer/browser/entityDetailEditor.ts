@@ -68,7 +68,7 @@ import { clashesWithBuiltInTicketType } from '../../customModules/common/templat
 import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
 import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { applyOutputVariableName, replaceOutputVariableReferences, validateOutputVariableName } from '../../customModules/common/outputVariable.js';
+import { applyOutputVariableName, buildPythonInsertContext, replaceOutputVariableReferences, validateOutputVariableName } from '../../customModules/common/outputVariable.js';
 import { renderOutputVariableChip } from '../../customModules/browser/outputVariableChip.js';
 import { MASKED_SECRET, maskBrowserCredentials, maskSecrets, pickBrowserCredentials, resolveBrowserCredentialUrl } from '../../customModules/common/browserCredentials.js';
 import { getAnyAgentGlobalFolders } from '../../customModules/common/anyagentGlobalPaths.js';
@@ -780,6 +780,18 @@ const COMPONENT_STRUCTURE_CSS = `
 	flex-wrap: wrap;
 	row-gap: 4px;
 	column-gap: 4px;
+}
+/* CI-69: read-only exported variable chip next to every card title (view / run mode); hidden while the toolbox is open (the toolbar shows the editable one) */
+.entity-detail-root .section-title .card-title-output-var-chip {
+	flex: 0 1 auto;
+	max-width: 100%;
+	font-size: 10.5px;
+	font-weight: 400;
+	text-transform: none;
+	letter-spacing: normal;
+}
+.entity-detail-root.component-toolbox-open .freestyle-component-frame .card-title-output-var-chip {
+	display: none;
 }
 .entity-detail-root .freestyle-component-toolbar .anyagent-output-var-chip {
 	flex: 0 1 auto;
@@ -1978,6 +1990,32 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	/**
+	 * Puts the read-only exported variable chip (UI-27 / CI-69) into the title row of the first card of every component
+	 * that has a variable: `→ name`, click copies `{name}`, the tooltip lists `{name}`, `TICKET_CONTEXT["<Title>"]` and
+	 * the plain Python variable. Used for Freestyle and template tickets alike (also when nothing can be edited).
+	 */
+	private _addViewModeOutputVariableChips(content: readonly Node[], starts: readonly { fieldId: string; start: number }[], fields: readonly ICustomField[]): void {
+		for (const entry of starts) {
+			const field = fields.find(f => (f.id || '').toLowerCase() === (entry.fieldId || '').toLowerCase());
+			const card = content[entry.start];
+			if (!field || isTitleComponent(field) || isDescriptionComponent(field) || !isHTMLElement(card) || !card.classList.contains('section-card')) {
+				continue;
+			}
+			const titleRow = Array.from(card.children).find(c => c.classList.contains('section-title'));
+			if (!isHTMLElement(titleRow)) {
+				continue;
+			}
+			const chip = renderOutputVariableChip({ field, clipboardService: this._clipboardService, notificationService: this._notificationService });
+			if (!chip) {
+				continue;
+			}
+			chip.classList.add('card-title-output-var-chip');
+			const labelGroup = titleRow.firstElementChild;
+			(isHTMLElement(labelGroup) ? labelGroup : titleRow).appendChild(chip);
+		}
+	}
+
+	/**
 	 * Wraps the card(s) of one Freestyle component in a frame with its structure toolbar (shown while the component
 	 * toolbox is open): drag handle, rename, configure, move up / down and remove. The frame is also a drop target
 	 * for toolbox components and moved cards.
@@ -2002,11 +2040,13 @@ export class EntityDetailEditor extends EditorPane {
 		// Output variable chip (UI-27): only in this toolbar, so it shows while the structure is being edited
 		const outputVarChip = options.configurable ? renderOutputVariableChip({
 			field,
-			getComponents: () => this._freestyleSchema?.fields ?? [],
 			clipboardService: this._clipboardService,
 			notificationService: this._notificationService,
-			dialogService: this._dialogService,
-			commit: (newName, oldName, updateReferences) => this._renameFreestyleOutputVariable(field.id, newName, oldName, updateReferences)
+			edit: {
+				getComponents: () => this._freestyleSchema?.fields ?? [],
+				dialogService: this._dialogService,
+				commit: (newName, oldName, updateReferences) => this._renameFreestyleOutputVariable(field.id, newName, oldName, updateReferences)
+			}
 		}) : undefined;
 		const grip = options.movable ? $('span.freestyle-component-grip', { title: 'Drag to reorder' }, $(`span${ThemeIcon.asCSSSelector(Codicon.gripper)}`)) : undefined;
 		const toolbar = $('div.freestyle-component-toolbar', undefined,
@@ -21923,7 +21963,6 @@ ${interpolatedPrompt}`;
 						? `Executed: ${lastExecutedText.substring(0, 16)} (${durationMs !== undefined ? `${durationMs}ms` : 'ok'})`
 						: 'Ready to execute';
 
-					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
 					const baseChipHtml = part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': 'TICKET_CONTEXT[\'\']', 'data-cursor-offset': '-2', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert TICKET_CONTEXT[\'\'] into script' },
 						'+ TICKET_CONTEXT[\'\']'
 					));
@@ -21931,35 +21970,17 @@ ${interpolatedPrompt}`;
 						'+ OUTPUT ='
 					));
 
-					const pythonContextExprs: string[] = [];
-					for (const ofField of otherFields) {
-						const ofLabel = (ofField.label || ofField.id || '').trim();
-						if (ofField.type === 'parameters' && Array.isArray(ofField.parameters)) {
-							const paramGroupKey = ofLabel || 'Inputs';
-							for (const p of ofField.parameters) {
-								const pName = (p.name || '').trim();
-								if (pName) {
-									const expr = `TICKET_CONTEXT['${paramGroupKey}']['${pName}']`;
-									if (!pythonContextExprs.includes(expr)) {
-										pythonContextExprs.push(expr);
-									}
-								}
-							}
-						}
-						if (ofLabel) {
-							const expr = `TICKET_CONTEXT['${ofLabel}']`;
-							if (!pythonContextExprs.includes(expr)) {
-								pythonContextExprs.push(expr);
-							}
-						}
-					}
+					// CI-69: the other cards as TICKET_CONTEXT["<Title>"] and their plain Python variable, nothing else
+					const pythonContextEntries = buildPythonInsertContext((customModule?.fields || []).filter(f => f && (f.label || f.id) !== k), fieldItem.id || rawKey, { skipTitle: true });
+					const pythonContextExprs = pythonContextEntries.map(e => e.insert);
+					const pythonContextTitles = new Map(pythonContextEntries.map(e => [e.insert, e.title]));
 
 					const maxInitialVisible = 2;
 					const visibleExprs = pythonContextExprs.slice(0, maxInitialVisible);
 					const hiddenExprs = pythonContextExprs.slice(maxInitialVisible);
 
 					const visibleChipsNodes = visibleExprs.map(expr => {
-						return part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
+						return part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: pythonContextTitles.get(expr) ?? `Insert ${textOf(expr)}` },
 							'+ ',
 							textOf(expr)
 						));
@@ -21970,7 +21991,7 @@ ${interpolatedPrompt}`;
 						hiddenChipsNodes.push(part('pythonCtxHiddenGroup', $('span.python-ctx-hidden-group', { style: 'display: none;' },
 							...hiddenExprs.flatMap(expr => {
 								return [
-									part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
+									part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: pythonContextTitles.get(expr) ?? `Insert ${textOf(expr)}` },
 										'+ ',
 										textOf(expr)
 									))
@@ -23749,6 +23770,10 @@ ${interpolatedPrompt}`;
 				}
 			}
 		}
+
+		// CI-69: every card with an exported variable shows it next to its title, read-only (click copies {var}); the
+		// editable chip of the Freestyle structure toolbar replaces it while the component toolbox is open
+		this._addViewModeOutputVariableChips(customFieldsContent, componentCardStarts, customModule?.fields ?? []);
 
 		if (freestyleSchema) {
 			// Frame each component's card(s) with its structure toolbar, in structure order (Title / Description excluded)

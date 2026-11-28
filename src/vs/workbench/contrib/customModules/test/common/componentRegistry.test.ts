@@ -8,7 +8,7 @@ import { ICustomField, normalizeFieldType } from '../../../entityPersistence/com
 import { BASE_COMPONENT_PALETTE } from '../../common/componentPalette.js';
 import {
 	COMMON_COMPONENT_PROPS, COMPONENT_SPECS, NODE_PALETTE_ORDER, TEMPLATE_PALETTE_ORDER, buildAiBasePrimitives, buildPrimitivesCatalog,
-	describeAiConfigProps, describeOutput, getAiConfigProps, getAiTemplateComponentTypes, getAllComponentSpecs, getComponentConfig,
+	CARD_OUTPUT_RULES, describeAiConfigProps, describeOutput, documentedOutputName, documentedOutputs, getAiConfigProps, getAiTemplateComponentTypes, getAllComponentSpecs, getComponentConfig,
 	getComponentProps, getComponentSpec, getNodeComponentPalette, getPrimitiveGuide, getSecretPropNames
 } from '../../common/componentRegistry.js';
 import { validateComponentConfig } from '../../common/componentConfigSchema.js';
@@ -101,7 +101,7 @@ suite('componentRegistry', () => {
 			assert.strictEqual(guide.type, spec.type);
 			assert.strictEqual(guide.title, spec.displayName);
 			assert.ok(guide.summary && guide.runTicketsFlow.steps.length > 0);
-			assert.deepStrictEqual(guide.outputs, spec.outputs.map(describeOutput));
+			assert.deepStrictEqual(guide.outputs, documentedOutputs(spec.outputs).map(describeOutput));
 		}
 		assert.strictEqual(getPrimitiveGuide('python', 'My Script').title, 'My Script');
 		assert.strictEqual(getPrimitiveGuide('dynamic_list', 'SEO Pack', 'cls_1').type, 'reusable_class');
@@ -114,15 +114,15 @@ suite('componentRegistry', () => {
 			const spec = getComponentSpec(entry.type)!;
 			assert.strictEqual(entry.description, spec.description);
 			assert.strictEqual(entry.icon, spec.icon.id);
-			for (const out of spec.outputs) {
-				assert.ok(entry.supportedOutputs?.some(line => line.startsWith(out.name)), `${spec.type}: ${out.name}`);
+			for (const out of documentedOutputs(spec.outputs)) {
+				assert.ok(entry.supportedOutputs?.some(line => line.startsWith(documentedOutputName(out.name))), `${spec.type}: ${out.name}`);
 			}
 			for (const prop of spec.props.filter(p => p.role !== 'state')) {
 				assert.ok(entry.supportedInputs?.some(line => line.startsWith(prop.name)), `${spec.type}: ${prop.name}`);
 			}
 		}
 		for (const primitive of buildAiBasePrimitives()) {
-			assert.strictEqual(primitive.outputs.length, getComponentSpec(primitive.type)!.outputs.length);
+			assert.strictEqual(primitive.outputs.length, documentedOutputs(getComponentSpec(primitive.type)!.outputs).length);
 			// Examples only use declared props
 			const names = new Set<string>(getComponentProps(primitive.type).map(p => p.name));
 			for (const key of Object.keys(primitive.example)) {
@@ -199,5 +199,29 @@ suite('validateComponentConfig', () => {
 		// Button Group gate (CI-25): the Waiting Prompt is an AI-writable text setting
 		assert.deepStrictEqual(codes('button_group', { waitingPrompt: 'Approve {version}?' }), []);
 		assert.deepStrictEqual(codes('button_group', { waitingPrompt: { text: 'x' } }), ['type:waitingPrompt']);
+	});
+
+	test('CI-69: docs, help and AI catalogs describe only the card rules (no sub-fields, no derived names)', () => {
+		const derived = /\{[^{}]*\.(?:ok|exitCode|stdout|stderr|command|repoPath|branch|commit|cwd|durationMs|id|label|at|by|rows|json|output|sqlOutput|table|columns|dbPath|tableName)\}|\}_[a-z]|\{[A-Z][^{}]*_(?:result|status|ok|data|body|raw|url|logs|code|output|rows|payload)\}|_result\}|"[^"]*_result"|<var>_|label_key|Subtitles\}|Sub-fields? \./;
+		const texts: string[] = [];
+		for (const spec of getAllComponentSpecs()) {
+			const guide = getPrimitiveGuide(spec.type);
+			texts.push(spec.description, spec.runtime, ...spec.notes, ...guide.outputs, guide.runTicketsFlow.variableResolution, guide.runTicketsFlow.downstreamPassing, ...guide.runTicketsFlow.steps.map(st => st.detail), ...guide.syntaxExamples, ...guide.tips);
+		}
+		for (const entry of buildPrimitivesCatalog()) {
+			texts.push(...(entry.supportedOutputs ?? []), ...(entry.notes ?? []), entry.executionBehavior);
+		}
+		for (const primitive of buildAiBasePrimitives()) {
+			texts.push(...primitive.outputs);
+		}
+		const offending = texts.filter(t => derived.test(t));
+		assert.deepStrictEqual(offending, []);
+		// The rules themselves: title key, one variable, the plain Python variable; no "default" wording
+		assert.ok(CARD_OUTPUT_RULES.includes('TICKET_CONTEXT["Log Step"]') && CARD_OUTPUT_RULES.includes('{log_step}') && /plain variable/.test(CARD_OUTPUT_RULES));
+		assert.ok(!/default/i.test(CARD_OUTPUT_RULES));
+		assert.ok(getPrimitiveGuide('git').runTicketsFlow.downstreamPassing.includes(CARD_OUTPUT_RULES));
+		assert.ok(getPrimitiveGuide('git').outputs.some(line => line.startsWith('TICKET_CONTEXT["<Title>"]')));
+		// The compatibility names are still declared (runtime aliases), only hidden
+		assert.ok(getComponentSpec('git')!.outputs.some(o => o.name === '{var}_result' && o.internal));
 	});
 });

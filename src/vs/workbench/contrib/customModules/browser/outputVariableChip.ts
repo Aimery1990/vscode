@@ -10,20 +10,26 @@ import { IClipboardService } from '../../../../platform/clipboard/common/clipboa
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { ICustomField } from '../../entityPersistence/common/entityPersistence.js';
-import { countOutputVariableReferences, findOutputVariableReferences, formatOutputVariableReference, getOutputSubFields, getOutputVariableHoverEntries, getOutputVariableInfo, IOutputVariableReference, validateOutputVariableName } from '../common/outputVariable.js';
+import { countOutputVariableReferences, findOutputVariableReferences, formatOutputVariableReference, getOutputVariableHoverEntries, getOutputVariableInfo, IOutputVariableReference, validateOutputVariableName } from '../common/outputVariable.js';
 
 /**
- * The output variable chip of a component card in edit mode (UI-27): `→ name` in the card header. Click copies the
- * reference (`{name}`), the pencil renames it inline (same validation and save path as the component settings), and
- * after a rename the references in the other components can be updated too. Used by the Freestyle ticket page, the
- * template designer and the workflow node component editor.
+ * The exported variable chip of a component card (UI-27): `→ name` in the card header. Click copies the reference
+ * (`{name}`). In edit mode the pencil renames it inline (same validation and save path as the component settings), and
+ * after a rename the references in the other components can be updated too. In view / run mode (CI-69) the chip is
+ * read-only (no pencil) and is shown on every card that has a variable. Used by the ticket page (Freestyle and
+ * template tickets), the template designer and the workflow node component editor.
  */
 export interface IOutputVariableChipOptions {
 	readonly field: ICustomField;
-	/** The components of the same ticket / template / node (uniqueness and references). */
-	getComponents(): readonly ICustomField[];
 	readonly clipboardService: IClipboardService;
 	readonly notificationService: INotificationService;
+	/** Edit mode only: rename with the pencil. Without it the chip is read-only (view / run mode). */
+	readonly edit?: IOutputVariableChipEditOptions;
+}
+
+export interface IOutputVariableChipEditOptions {
+	/** The components of the same ticket / template / node (uniqueness and references). */
+	getComponents(): readonly ICustomField[];
 	readonly dialogService: IDialogService;
 	/**
 	 * Saves the new name through the host's component settings path; with `updateReferences` the references to the
@@ -34,19 +40,14 @@ export interface IOutputVariableChipOptions {
 
 const MAX_LISTED_REFERENCES = 12;
 
-/** Tooltip of the chip: how to use it, the sub-fields and what the component publishes. */
+/**
+ * Tooltip of the chip (CI-69): only the ways to use the card's output — `{name}` in this ticket or a workflow,
+ * `TICKET_CONTEXT["<Title>"]` and the plain variable in Python. Click copies `{name}`.
+ */
 export function outputVariableChipTooltip(field: ICustomField, name: string): string {
-	const lines = [`Output variable — click to copy ${formatOutputVariableReference(name)}`];
-	const subFields = getOutputSubFields(field.type);
-	if (subFields.length > 0) {
-		lines.push(`Sub-fields: ${subFields.map(s => `.${s}`).join(' ')}`);
-	}
-	const entries = getOutputVariableHoverEntries(field, name);
-	if (entries.length > 0) {
-		lines.push('', 'Publishes:');
-		for (const e of entries) {
-			lines.push(`  ${e.reference} — ${e.description}`);
-		}
+	const lines = [`Exported variable of this card — click to copy ${formatOutputVariableReference(name)}`, ''];
+	for (const e of getOutputVariableHoverEntries(field, name)) {
+		lines.push(`${e.reference} — ${e.description}`);
 	}
 	return lines.join('\n');
 }
@@ -72,15 +73,16 @@ export function renderOutputVariableChip(options: IOutputVariableChipOptions): H
 	const copyBtn = $<HTMLButtonElement>('button.anyagent-output-var-chip-copy', {
 		type: 'button',
 		title: outputVariableChipTooltip(field, name),
-		'aria-label': `Output variable ${name}: copy ${reference}`
+		'aria-label': `Exported variable ${name}: copy ${reference}`
 	},
 		$('span.anyagent-output-var-chip-arrow', { 'aria-hidden': 'true' }, '→'),
 		nameEl
 	);
-	const editBtn = $<HTMLButtonElement>('button.anyagent-output-var-chip-edit', { type: 'button', title: 'Rename Output Variable', 'aria-label': 'Rename Output Variable' },
+	const edit = options.edit;
+	const editBtn = edit ? $<HTMLButtonElement>('button.anyagent-output-var-chip-edit', { type: 'button', title: 'Rename Exported Variable', 'aria-label': 'Rename Exported Variable' },
 		$(`span${ThemeIcon.asCSSSelector(Codicon.edit)}`)
-	);
-	const chip = $('span.anyagent-output-var-chip', { 'data-output-var': name, 'data-component-id': field.id }, copyBtn, editBtn);
+	) : undefined;
+	const chip = $(`span.anyagent-output-var-chip${edit ? '' : '.readonly'}`, { 'data-output-var': name, 'data-component-id': field.id }, copyBtn, ...(editBtn ? [editBtn] : []));
 	// Keep clicks / drags inside the chip away from the card (drag handles, card selection)
 	chip.onmousedown = e => e.stopPropagation();
 	chip.ondragstart = e => {
@@ -109,6 +111,10 @@ export function renderOutputVariableChip(options: IOutputVariableChipOptions): H
 		}, 1200);
 	};
 
+	if (!edit || !editBtn) {
+		return chip;
+	}
+
 	editBtn.onclick = e => {
 		e.preventDefault();
 		e.stopPropagation();
@@ -126,7 +132,7 @@ export function renderOutputVariableChip(options: IOutputVariableChipOptions): H
 		input.focus();
 		input.select();
 		const validate = (): string | undefined => {
-			const error = input.value.trim() === name ? undefined : validateOutputVariableName(input.value, options.getComponents(), field.id);
+			const error = input.value.trim() === name ? undefined : validateOutputVariableName(input.value, edit.getComponents(), field.id);
 			input.classList.toggle('invalid', !!error);
 			input.title = error ?? 'Enter: save · Escape: cancel';
 			return error;
@@ -180,13 +186,13 @@ export function renderOutputVariableChip(options: IOutputVariableChipOptions): H
 	};
 
 	const renameTo = async (newName: string) => {
-		const refs = findOutputVariableReferences(options.getComponents(), field.id, name);
+		const refs = findOutputVariableReferences(edit.getComponents(), field.id, name);
 		const count = countOutputVariableReferences(refs);
 		if (count === 0) {
-			await options.commit(newName, name, false);
+			await edit.commit(newName, name, false);
 			return;
 		}
-		const { result } = await options.dialogService.prompt<'update' | 'keep' | 'cancel'>({
+		const { result } = await edit.dialogService.prompt<'update' | 'keep' | 'cancel'>({
 			type: Severity.Info,
 			message: `Also update ${count} reference${count === 1 ? '' : 's'} to ${reference}?`,
 			detail: `The variable is renamed to ${formatOutputVariableReference(newName)}. These places still use the old name:\n${describeReferences(refs)}`,
@@ -199,7 +205,7 @@ export function renderOutputVariableChip(options: IOutputVariableChipOptions): H
 		if (result === 'cancel') {
 			return;
 		}
-		await options.commit(newName, name, result === 'update');
+		await edit.commit(newName, name, result === 'update');
 		if (result === 'keep') {
 			options.notificationService.warn(`${count} reference${count === 1 ? '' : 's'} still use${count === 1 ? 's' : ''} ${reference}: ${refs.map(r => r.fieldLabel).filter((l, i, a) => a.indexOf(l) === i).join(', ')}.`);
 		}

@@ -82,6 +82,23 @@ export interface IComponentOutputVar {
 	readonly when: 'both' | 'ticket' | 'node';
 	readonly description: string;
 	readonly example?: string;
+	/**
+	 * Still published (older tickets and templates keep working) but never documented, displayed or suggested (CI-69):
+	 * users and the AI only see the card rules (TICKET_CONTEXT["<Title>"] and the one variable of the card: {var}, and var in Python).
+	 */
+	readonly internal?: boolean;
+}
+
+/**
+ * The rules users and the AI are told (CI-69): the card title is the key in Python, and each card has ONE output
+ * variable (generated from the title, renamable) used as {var} in the ticket or workflow and as the plain variable
+ * `var` in Python. Nothing else is advertised.
+ */
+export const CARD_OUTPUT_RULES = 'Rule 1: in Python the card\'s title is its key: TICKET_CONTEXT["<Title>"] gives the card\'s output (e.g. TICKET_CONTEXT["Log Step"]). Rule 2: each card may have an exported variable related to its title: for the title "Log Step" the system can typically generate log_step, or the user specifies their own exported variable name. Write {log_step} to use the output in this ticket or in a workflow; in Python log_step is also a plain variable with the same output.';
+
+/** The outputs that are documented and shown (the internal compatibility names are left out). */
+export function documentedOutputs(outputs: readonly IComponentOutputVar[]): IComponentOutputVar[] {
+	return outputs.filter(o => !o.internal);
 }
 
 /** Text of the help modal (user facing). */
@@ -149,14 +166,14 @@ export const COMMON_COMPONENT_PROPS = [
 	{ name: 'id', kind: 'string', role: 'structured', required: true, description: 'Stable component id (letters, digits, _ and -).' },
 	{ name: 'label', kind: 'string', role: 'structured', required: true, description: 'Display name. Ticket values are stored under it, so do not rename components that already hold data.' },
 	{ name: 'type', kind: 'string', role: 'structured', required: true, description: 'Component type id.' },
-	{ name: 'outputVariableName', kind: 'string', description: 'Variable name later steps use. Default: generated from the label (e.g. "AI Prompt" -> ai_prompt).' },
+	{ name: 'outputVariableName', kind: 'string', description: 'The card\'s exported variable, related to its title: for "AI Prompt" the system can typically generate ai_prompt, or the user specifies their own name. Used as {name} in the ticket or a workflow, and as the plain variable name in Python.' },
 	{ name: 'outputVariableManual', kind: 'boolean', role: 'state', description: 'True once the user typed outputVariableName by hand (it then no longer follows the label).' },
 	{ name: 'disabled', kind: 'boolean', default: false, description: 'Skip this component when running.' },
 	{ name: 'required', kind: 'boolean', default: false, description: 'Ticket form: the value must be filled in.' },
 	{ name: 'defaultValue', kind: 'string', role: 'state', description: 'Seed value written when the component is created (e.g. the Python template); read only as a fallback.' }
 ] as const satisfies readonly IComponentConfigProp[];
 
-const VAR_NOTE = 'Every value component also publishes its result under {var} (outputVariableName or the generated name), under its label and under its id. Sub-fields and suffixed outputs ({var.ok}, {var}_result, ...) are published under {var} and also under the label and its cleaned key ({Label.ok}, {label_key}_result).';
+const VAR_NOTE = CARD_OUTPUT_RULES;
 
 const DATE_PROPS = [
 	{ name: 'defaultContent', kind: 'string', ticketValue: true, description: 'Initial value in the stored format.' }
@@ -175,11 +192,11 @@ function dateHelp(title: string, format: string, example: string, isRange: boole
 			{ step: '1. Read value', detail: 'Uses the run input override if given, otherwise the saved ticket value, otherwise the default value.' },
 			{ step: '2. Pass-through', detail: 'The string is NOT reformatted or validated; {variables} inside it are interpolated, then it is stored in the context under the field label.' }
 		],
-		variableResolution: '{Field Label}',
+		variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 		downstreamPassing: isRange
 			? 'Downstream steps receive the whole "start ~ end" string. In Python, split it with value.split("~") and strip each side.'
 			: 'Downstream steps receive the string as-is. Parse it in Python (e.g. datetime.fromisoformat) before comparing.',
-		syntaxExamples: ['{Field Label}'],
+		syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 		tips: isRange
 			? ['Always keep the " ~ " separator between start and end.', `Example value: ${example}`]
 			: [`Example value: ${example}`]
@@ -288,7 +305,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string | object', when: 'both', description: 'model reply; parsed into an object when the reply is JSON', example: '"Summary: ..."' },
-			{ name: '{Label}', type: 'string | object', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string | object', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: {
 			id: 'analysis_prompt',
@@ -315,7 +332,7 @@ export const COMPONENT_SPECS = {
 				{ step: '3. Inference Dispatch', detail: 'Executes executePrompt(...) against the selected model API synchronously and monitors execution latency.' },
 				{ step: '4. Output Capture & Audit Log', detail: 'Captures the generated response text, saves it into customMetadata and contextVariables, and prepares it for Output Manifest aggregation.' }
 			],
-			variableResolution: 'Access generated response via {Field Label}, {{AI Prompt 1}}, or {ticketId.AI Prompt 1}.',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'The Output primitive automatically detects and imports this text into the final ticket result manifest.',
 			syntaxExamples: ['{AI Prompt 1}', '{{AI Prompt 1}}', '{{AI Prompt 1.result}}'],
 			tips: [
@@ -353,7 +370,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'path of the saved audio file', example: '"attachments/tts_audio.mp3"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same path under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same path in Python, by the card title' }
 		],
 		example: {
 			id: 'tts_audio',
@@ -380,10 +397,10 @@ export const COMPONENT_SPECS = {
 			headline: 'How RUN_TICKETS Executes Audio / TTS Primitive',
 			steps: [
 				{ step: '1. Cache & Persistence Check', detail: 'Checks if an audio file (e.g. .mp3) has already been generated for the current text and saved inside the ticket folder.' },
-				{ step: '2. Variable Interpolation & Synthesis', detail: 'If not cached or if forced, interpolates {Field Label} variables and dispatches text to the selected AI model API to synthesize speech.' },
+				{ step: '2. Variable Interpolation & Synthesis', detail: 'If not cached or if forced, interpolates {variables} and dispatches text to the selected AI model API to synthesize speech.' },
 				{ step: '3. Local Ticket Storage', detail: 'Saves the returned audio binary (MP3/WAV) into the ticket attachments directory and records the file path in customMetadata.' }
 			],
-			variableResolution: 'Exposes the saved audio file path and text under {Field Label} in contextVariables.',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Downstream steps or Output primitives can reference the generated audio file path.',
 			syntaxExamples: ['{Title}', '{AI Prompt 1}', '{TTS Audio 1}'],
 			tips: [
@@ -426,9 +443,9 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'media file path; with subtitles extracted (ticket run): the timed subtitle text, one "[start - end] text" line per segment', example: '"[0:01.2 - 0:03.4] Hello there"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' },
-			{ name: '{Label Subtitles}', type: 'string', when: 'ticket', description: 'timed subtitle text, when subtitles are enabled and extracted' },
-			{ name: '{Label Path}', type: 'string', when: 'ticket', description: 'media file path, when subtitles are enabled and extracted' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' },
+			{ name: '{Label Subtitles}', type: 'string', when: 'ticket', description: 'timed subtitle text, when subtitles are enabled and extracted', internal: true },
+			{ name: '{Label Path}', type: 'string', when: 'ticket', description: 'media file path, when subtitles are enabled and extracted', internal: true }
 		],
 		example: {
 			id: 'media_player_1',
@@ -460,7 +477,7 @@ export const COMPONENT_SPECS = {
 				{ step: '2. Subtitles (when enabled)', detail: 'Uses the saved subtitles when they were extracted from this same file (name / path and size); otherwise extracts them now with the component settings (same limits and progress as the card) and saves them in the ticket. A failed or refused extraction (e.g. over the size limit) fails this step with the reason. In a workflow node (no ticket) subtitles are not extracted.' },
 				{ step: '3. Context Export', detail: 'Exposes the local media file path, or the timed subtitles, to downstream steps in contextVariables.' }
 			],
-			variableResolution: 'Exposes the local media file path under {Field Label} in contextVariables. With subtitles enabled and extracted, {Field Label} is the timed subtitle text ("[0:01.2 - 0:03.4] line" per line), {Field Label Subtitles} the same text and {Field Label Path} the media path.',
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python: the media file path, or with subtitles enabled and extracted the timed subtitle text ("[0:01.2 - 0:03.4] line" per line).',
 			downstreamPassing: 'Downstream Python or AI Prompt steps can reference the imported media file path, or the timed subtitles when they were extracted.',
 			syntaxExamples: ['{MP3 / MP4 Player 1}'],
 			tips: [
@@ -491,7 +508,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'combined (edited) transcript of all clips' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same text in Python, by the card title' }
 		],
 		example: {
 			id: 'voice_note_1',
@@ -511,9 +528,9 @@ export const COMPONENT_SPECS = {
 			headline: 'How Workflows & Tickets Use Voice Note',
 			steps: [
 				{ step: '1. Transcript Aggregation', detail: 'Collects transcripts from all recorded clips inside the Voice Note component.' },
-				{ step: '2. Context Export', detail: 'Exposes the combined transcript text under {Field Label} so downstream AI Prompt or Python steps can reference your spoken notes.' }
+				{ step: '2. Context Export', detail: 'The combined transcript text is the card\'s output, so downstream AI Prompt or Python steps can reference your spoken notes.' }
 			],
-			variableResolution: 'Exposes the combined voice transcript text under {Field Label} in contextVariables.',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Downstream AI Prompt, Python, or Display steps can reference the transcribed notes directly.',
 			syntaxExamples: ['{Voice Note}'],
 			tips: [
@@ -544,10 +561,10 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'extracted readable page text' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
-			{ name: '{var}_url', type: 'string', when: 'both', description: 'URL with credential values shown as ***', example: '"https://site/api?key=***"' },
-			{ name: '{var}_resolved_url', type: 'string', when: 'both', description: 'same masked URL (older name)' },
-			{ name: '{Label}_url', type: 'string', when: 'node', description: 'masked URL under the raw label (node runs only)' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same text in Python, by the card title' },
+			{ name: '{var}_url', type: 'string', when: 'both', description: 'URL with credential values shown as ***', example: '"https://site/api?key=***"', internal: true },
+			{ name: '{var}_resolved_url', type: 'string', when: 'both', description: 'same masked URL (older name)', internal: true },
+			{ name: '{Label}_url', type: 'string', when: 'node', description: 'masked URL under the raw label (node runs only)', internal: true }
 		],
 		example: {
 			id: 'web_browser',
@@ -578,12 +595,12 @@ export const COMPONENT_SPECS = {
 			steps: [
 				{ step: '1. URL Resolution', detail: 'Uses the template\'s credentials. Replaces each {name} of a credential with its URL-encoded value (a credential wins over a variable with the same name), then replaces other {variable} references with Inputs or earlier outputs. Unknown {x} stay as written. Credentials not referenced in the URL become request headers named after them.' },
 				{ step: '2. Fetch with Retries', detail: 'Without header credentials, extracts the page with the built-in web content extractor and, if it fails, falls back to a plain HTTP GET with tags stripped. With header credentials, uses the plain HTTP GET with those headers directly (the extractor cannot send headers). Failed attempts are retried with the configured delay.' },
-				{ step: '3. Secret Masking', detail: 'Credential values are shown as *** in the stored URL, {FieldLabel_url}, run details (header names only), logs and error messages. The fetched page text itself is not changed.' },
-				{ step: '4. Output', detail: 'Stores the page text as {FieldLabel} and the masked URL as {FieldLabel_url}.' }
+				{ step: '3. Secret Masking', detail: 'Credential values are shown as *** in the stored URL, run details (header names only), logs and error messages. The fetched page text itself is not changed.' },
+				{ step: '4. Output', detail: 'The page text is the card\'s output: {output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.' }
 			],
-			variableResolution: 'Access the extracted text via {Field Label} or {{Field Label}}; the masked URL via {Field Label_url}.',
-			downstreamPassing: 'Subsequent AI Prompt primitives can reference {{Browser 1}} to summarize or analyze the page.',
-			syntaxExamples: ['https://site/api?user={user}&key={my_api_key}', '{Browser 1}', '{Browser 1_url}'],
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.',
+			downstreamPassing: 'The page text is the card\'s output. ' + CARD_OUTPUT_RULES,
+			syntaxExamples: ['https://site/api?user={user}&key={my_api_key}', '{browser_1}', 'TICKET_CONTEXT["Browser 1"]'],
 			tips: [
 				'Put secrets in Credentials, not directly in the URL: only credential values are masked.',
 				'Keep URLs fully qualified (including https://).'
@@ -602,7 +619,7 @@ export const COMPONENT_SPECS = {
 		ai: 'exposed',
 		purpose: 'Runs one git command (status, clone, checkout, pull, fetch, add, commit, push, log, diff, branch or custom) in a repository.',
 		description: 'Runs one real git command on this computer. gitCommand selects it: status | clone | checkout | pull | fetch | add | commit | push | log | diff | branch | custom (default status). gitRepoPath is the working directory for every command except clone (absolute, ~/..., or relative to the workspace folder). Parameters per command: clone = gitRemoteUrl (required), gitCloneDir (target directory; default: repo name in the workspace folder), gitBranch (optional); checkout = gitBranch (required), gitCreateBranch (-b); pull = gitRemote, gitBranch; fetch = gitRemote; add = gitPaths (default ".") or gitAll (git add -A, paths not used); commit = gitMessage (required; runs only git commit, it never stages: put an add card before it); push = gitRemote, gitBranch, gitSetUpstream (-u); log = gitLogCount (default 10); diff = gitDiffTarget (optional target / paths / options); branch = gitBranch (empty: list all branches, set: create it); custom = gitCustomArgs (the arguments after "git", required). Every text value supports {variable} references; a variable is always ONE argument (no word splitting). Arguments are run as an argv array without a shell. git never prompts (GIT_TERMINAL_PROMPT=0): authentication uses the user\'s existing credential helpers / SSH keys; never put credentials in the config. Each command is exactly ONE git invocation, the same as the native git command: commands are never combined (no add + commit in one card). Force push and reset --hard are not offered (only custom runs what the user explicitly wrote). A non-zero exit code fails the component.',
-		runtime: 'Merges the ticket\'s own settings over the template, resolves {variables}, builds the argv of ONE git command (never a chain; the deprecated gitAddAll of older commit cards is ignored and only logged), runs git in gitRepoPath via the shared-process git service (timeout 120 s, non-interactive), captures stdout, stderr, exit code and duration, then reads the current branch (git rev-parse --abbrev-ref HEAD) and short HEAD commit. Publishes the main text and the structured fields; stores the result (stdout / stderr cut to 3072 bytes) in the ticket value under gitLastResult. Exit code != 0, a timeout or an invalid config fails the step (the run stops like for other components). A template with neither gitCommand nor gitRepoPath (pre CI-24 reference-only component) runs nothing and publishes gitRemoteUrl.',
+		runtime: 'Merges the ticket\'s own settings over the template, resolves {variables}, builds the argv of ONE git command (never a chain; the deprecated gitAddAll of older commit cards is ignored and only logged), runs git in gitRepoPath via the shared-process git service (timeout 120 s, non-interactive), captures stdout, stderr, exit code and duration, then reads the current branch (git rev-parse --abbrev-ref HEAD) and short HEAD commit. Publishes the output text as the card\'s output; stores the result (stdout / stderr cut to 3072 bytes) in the ticket value under gitLastResult. Exit code != 0, a timeout or an invalid config fails the step (the run stops like for other components). A template with neither gitCommand nor gitRepoPath (pre CI-24 reference-only component) runs nothing and publishes gitRemoteUrl.',
 		props: [
 			{ name: 'gitCommand', kind: 'string', enum: ['status', 'clone', 'checkout', 'pull', 'fetch', 'add', 'commit', 'push', 'log', 'diff', 'branch', 'custom'], default: 'status', ticketValue: true, description: 'git command to run.' },
 			{ name: 'gitRepoPath', kind: 'string', ticketValue: true, description: 'Repository path / working directory (all commands except clone). Supports {var}.' },
@@ -623,16 +640,16 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'main text: stdout, or stderr when the command failed', example: '"On branch main\\nnothing to commit"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
-			{ name: '{var.ok}', type: 'boolean', when: 'both', description: 'true when the git command exited with 0', example: 'true' },
-			{ name: '{var.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when git could not start)', example: '0' },
-			{ name: '{var.stdout}', type: 'string', when: 'both', description: 'standard output' },
-			{ name: '{var.stderr}', type: 'string', when: 'both', description: 'standard error' },
-			{ name: '{var.command}', type: 'string', when: 'both', description: 'command line that ran', example: '"git commit -m \'Fix\'"' },
-			{ name: '{var.repoPath}', type: 'string', when: 'both', description: 'working directory (clone: the new folder)' },
-			{ name: '{var.branch}', type: 'string', when: 'both', description: 'current branch after the command', example: '"main"' },
-			{ name: '{var.commit}', type: 'string', when: 'both', description: 'short HEAD commit after the command', example: '"3f2a9c1"' },
-			{ name: '{var}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["git_1_result"]["exitCode"]); also under {label_key}_result' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same text in Python, by the card title' },
+			{ name: '{var.ok}', type: 'boolean', when: 'both', description: 'true when the git command exited with 0', example: 'true', internal: true },
+			{ name: '{var.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when git could not start)', example: '0', internal: true },
+			{ name: '{var.stdout}', type: 'string', when: 'both', description: 'standard output', internal: true },
+			{ name: '{var.stderr}', type: 'string', when: 'both', description: 'standard error', internal: true },
+			{ name: '{var.command}', type: 'string', when: 'both', description: 'command line that ran', example: '"git commit -m \'Fix\'"', internal: true },
+			{ name: '{var.repoPath}', type: 'string', when: 'both', description: 'working directory (clone: the new folder)', internal: true },
+			{ name: '{var.branch}', type: 'string', when: 'both', description: 'current branch after the command', example: '"main"', internal: true },
+			{ name: '{var.commit}', type: 'string', when: 'both', description: 'short HEAD commit after the command', example: '"3f2a9c1"', internal: true },
+			{ name: '{var}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["git_1_result"]["exitCode"]); also under {label_key}_result', internal: true }
 		],
 		example: {
 			id: 'git_commit',
@@ -645,7 +662,6 @@ export const COMPONENT_SPECS = {
 		notes: [
 			'Runs real git commands on the user\'s computer: commit / push / checkout change the repository.',
 			'Credentials are never stored in the config: git uses the user\'s credential helper / SSH agent and never prompts; a missing login fails the step.',
-			'Structured fields are read with a dot: {Commit Changes.exitCode}, {Commit Changes.branch}.',
 			'One card runs one native git command. To stage and commit, use two cards: add (gitAll: true for git add -A) and then commit.'
 		],
 		help: {
@@ -661,11 +677,11 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Resolve', detail: 'Ticket settings win over the template. {variables} are resolved in every value; each variable stays one argument.' },
 				{ step: '2. Run', detail: 'git runs with the argument list (no shell) in the repository path, non-interactively, timeout 120 s. One card is one git command, never a chain: commit only commits (stage with an add card before it).' },
 				{ step: '3. Inspect', detail: 'Reads the current branch and short HEAD commit after the command.' },
-				{ step: '4. Publish', detail: '{var} / {Label} = stdout (stderr on failure); {var.ok}, .exitCode, .stdout, .stderr, .command, .repoPath, .branch, .commit (also under the label: {Label.ok}, ...). A non-zero exit fails the step.' }
+				{ step: '4. Publish', detail: 'The card\'s output is the command\'s output text (stdout; stderr when it failed): {output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python. A non-zero exit fails the step.' }
 			],
-			variableResolution: '{output_var} or {Field Label} for the output text, {output_var.exitCode} / {Field Label.branch} ... for the fields.',
-			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text, never the dict) and TICKET_CONTEXT["<output_var>_result"] / TICKET_CONTEXT["field_label_result"] (dict). Same names in a whole ticket run, a workflow node and a single card run on the ticket page (there the last stored result is used).',
-			syntaxExamples: ['{Git Status}', '{Git Status.branch}', '{Commit Changes.commit}', 'TICKET_CONTEXT["commit_changes_result"]["exitCode"]'],
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python: the command\'s output text.',
+			downstreamPassing: 'The card\'s output is the command\'s output text (stdout; stderr when the command failed). ' + CARD_OUTPUT_RULES + ' The same in a whole ticket run, a workflow node and a single card run (there the last stored result is used).',
+			syntaxExamples: ['{git_status}', 'TICKET_CONTEXT["Git Status"]', 'for line in TICKET_CONTEXT["Branch List"].splitlines(): ...'],
 			tips: [
 				'Log in once in a terminal (or set up an SSH key / credential helper): the component never asks for passwords.',
 				'Use custom for anything else (e.g. stash list, tag v1.0); force push and reset --hard are deliberately not offered as options.'
@@ -684,7 +700,7 @@ export const COMPONENT_SPECS = {
 		ai: 'exposed',
 		purpose: 'Runs a command or multi-line script with zsh, bash or sh on this computer.',
 		description: 'Runs shellScript (one command or a multi-line script) locally with shellType (zsh | bash | sh; default zsh on macOS, bash elsewhere) as `<shell> -c <script>`, in shellCwd (absolute, ~/..., or relative to the workspace / workflow folder; default the workspace folder). shellEnv adds environment variables, one KEY=VALUE per line (no secrets in plain text: a secret-looking name must reference a variable, e.g. API_TOKEN={API_TOKEN}; BASH_ENV, ENV, ZDOTDIR, IFS, LD_* / DYLD_* and ANYAGENT_VAR_* are refused). shellTimeoutSec (default 120, max 3600) kills the whole process group. {variables} in the script are NOT pasted into the script text: each is passed as an environment variable and the reference becomes "${ANYAGENT_VAR_name}", so a value can never inject shell syntax (it stays one word, also inside quotes). References with no value (e.g. awk \'{print $1}\') are left as written. Non-interactive: no stdin, no terminal; commands that prompt fail. SAFETY: a script written or changed by AI must be confirmed by a person (Confirm button on the card, which shows the full script, folder and shell) before its first run; scripts typed in the UI are confirmed implicitly. An unconfirmed script fails the step with "Shell script needs confirmation". A non-zero exit code, a timeout or an invalid config fails the component; it is never retried automatically.',
-		runtime: 'Merges the ticket\'s own settings over the template, checks the confirmation marker (shellConfirmedHash = HMAC of shell + cwd + script + env with a local key; fails the step when it does not match), resolves {variables} into ANYAGENT_VAR_* environment variables, runs `<shell> -c <script>` in the working directory via the shared-process service (stdin closed, no TTY, process group killed on timeout / Stop), captures stdout / stderr (4 MB each), exit code and duration. Publishes the main text and the structured fields; stores the result (stdout / stderr cut to 3072 bytes) under shellLastResult. Exit code != 0, a timeout, an unconfirmed script or an invalid config fails the step (the run stops like for other components); never retried.',
+		runtime: 'Merges the ticket\'s own settings over the template, checks the confirmation marker (shellConfirmedHash = HMAC of shell + cwd + script + env with a local key; fails the step when it does not match), resolves {variables} into ANYAGENT_VAR_* environment variables, runs `<shell> -c <script>` in the working directory via the shared-process service (stdin closed, no TTY, process group killed on timeout / Stop), captures stdout / stderr (4 MB each), exit code and duration. Publishes the output text as the card\'s output; stores the result (stdout / stderr cut to 3072 bytes) under shellLastResult. Exit code != 0, a timeout, an unconfirmed script or an invalid config fails the step (the run stops like for other components); never retried.',
 		props: [
 			{ name: 'shellScript', kind: 'string', required: true, ticketValue: true, description: 'Command or multi-line script. {var} references are passed as environment variables (never pasted as text).' },
 			{ name: 'shellCwd', kind: 'string', ticketValue: true, description: 'Working directory: absolute, ~/..., or relative to the workspace / workflow folder (default: that folder). Supports {var}.' },
@@ -696,15 +712,15 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'main text: stdout, or stderr when the script failed', example: '"build ok\\n"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same text under the label' },
-			{ name: '{var.ok}', type: 'boolean', when: 'both', description: 'true when the script exited with 0', example: 'true' },
-			{ name: '{var.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when it could not start, 124 on timeout)', example: '0' },
-			{ name: '{var.stdout}', type: 'string', when: 'both', description: 'standard output' },
-			{ name: '{var.stderr}', type: 'string', when: 'both', description: 'standard error' },
-			{ name: '{var.command}', type: 'string', when: 'both', description: 'script as executed ({variables} shown as "${ANYAGENT_VAR_...}")', example: '"ls -la \\"${ANYAGENT_VAR_folder}\\""' },
-			{ name: '{var.cwd}', type: 'string', when: 'both', description: 'working directory', example: '"/Users/me/project"' },
-			{ name: '{var.durationMs}', type: 'number', when: 'both', description: 'duration in milliseconds', example: '42' },
-			{ name: '{var}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["shell_1_result"]["exitCode"]); also under {label_key}_result' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same text in Python, by the card title' },
+			{ name: '{var.ok}', type: 'boolean', when: 'both', description: 'true when the script exited with 0', example: 'true', internal: true },
+			{ name: '{var.exitCode}', type: 'number', when: 'both', description: 'exit code (-1 when it could not start, 124 on timeout)', example: '0', internal: true },
+			{ name: '{var.stdout}', type: 'string', when: 'both', description: 'standard output', internal: true },
+			{ name: '{var.stderr}', type: 'string', when: 'both', description: 'standard error', internal: true },
+			{ name: '{var.command}', type: 'string', when: 'both', description: 'script as executed ({variables} shown as "${ANYAGENT_VAR_...}")', example: '"ls -la \\"${ANYAGENT_VAR_folder}\\""', internal: true },
+			{ name: '{var.cwd}', type: 'string', when: 'both', description: 'working directory', example: '"/Users/me/project"', internal: true },
+			{ name: '{var.durationMs}', type: 'number', when: 'both', description: 'duration in milliseconds', example: '42', internal: true },
+			{ name: '{var}_result', type: 'object', when: 'both', description: 'all fields above as one dict (Python: TICKET_CONTEXT["shell_1_result"]["exitCode"]); also under {label_key}_result', internal: true }
 		],
 		example: {
 			id: 'shell_build',
@@ -718,8 +734,7 @@ export const COMPONENT_SPECS = {
 		notes: [
 			'Runs real commands on the user\'s computer. A script written or changed by AI does not run until a person confirms it on the card.',
 			'Do not put passwords or tokens into shellScript or shellEnv: reference a variable (e.g. TOKEN={API_TOKEN}).',
-			'{variables} reach the script as environment variables ("${ANYAGENT_VAR_name}"); write them where a shell word is expected. Inside a quoted heredoc (<<\'EOF\') they are not replaced.',
-			'Structured fields are read with a dot: {Build Project.exitCode}, {Build Project.stderr}.'
+			'{variables} reach the script as environment variables ("${ANYAGENT_VAR_name}"); write them where a shell word is expected. Inside a quoted heredoc (<<\'EOF\') they are not replaced.'
 		],
 		help: {
 			badge: 'Execution & Automation',
@@ -736,18 +751,18 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Confirm', detail: 'A script written or changed by AI needs a person\'s confirmation (the card shows the full script, folder and shell). Unconfirmed scripts fail with "Shell script needs confirmation".' },
 				{ step: '2. Resolve', detail: 'Ticket settings win over the template. Each {variable} in the script becomes "${ANYAGENT_VAR_name}" and its value is passed in the environment, so values can never become shell code.' },
 				{ step: '3. Run', detail: '<shell> -c <script> runs in the working directory without input or terminal; after the timeout (or Stop) the whole process group is killed.' },
-				{ step: '4. Publish', detail: '{var} / {Label} = stdout (stderr on failure); {var.ok}, .exitCode, .stdout, .stderr, .command, .cwd, .durationMs (also under the label: {Label.ok}, ...). A non-zero exit fails the step; it is never retried automatically.' }
+				{ step: '4. Publish', detail: 'The card\'s output is the script\'s output text (stdout; stderr when it failed): {output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python. A non-zero exit fails the step; it is never retried automatically.' }
 			],
-			variableResolution: '{output_var} or {Field Label} for the output text, {output_var.exitCode} / {Field Label.stderr} ... for the fields.',
-			downstreamPassing: 'Later steps read {Field Label} and its fields; Python gets TICKET_CONTEXT["Field Label"] (text, never the dict) and TICKET_CONTEXT["<output_var>_result"] / TICKET_CONTEXT["field_label_result"] (dict). Same names in a whole ticket run, a workflow node and a single card run on the ticket page (there the last stored result is used).',
-			syntaxExamples: ['ls -la {folder}', 'echo "Hello {name}" > out.txt', '{Build Project.exitCode}', 'TICKET_CONTEXT["build_project_result"]["stdout"]'],
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python: the script\'s output text.',
+			downstreamPassing: 'The card\'s output is the script\'s output text (stdout; stderr when the script failed). ' + CARD_OUTPUT_RULES + ' The same in a whole ticket run, a workflow node and a single card run (there the last stored result is used).',
+			syntaxExamples: ['ls -la {folder}', 'echo "Hello {name}" > out.txt', '{build_project}', 'TICKET_CONTEXT["Build Project"]'],
 			tips: [
 				'Commands that ask for input (passwords, y/n) fail: there is no terminal. Use non-interactive flags (e.g. -y).',
 				'For remote servers use the SSH component; for git use the Git component.'
 			]
 		},
 		templatePalette: { defaultName: 'Shell' },
-		nodePalette: { label: 'Shell', accent: '#f59e0b', icon: Codicon.terminal, tooltip: 'Run a local zsh / bash / sh script and publish its output (exit code, stdout, stderr).' }
+		nodePalette: { label: 'Shell', accent: '#f59e0b', icon: Codicon.terminal, tooltip: 'Run a local zsh / bash / sh script and publish its output text.' }
 	},
 
 	python: {
@@ -758,7 +773,7 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Runs a local Python script and publishes its return value.',
-		description: 'Runs a local Python script. Read upstream values from TICKET_CONTEXT (dict) or directly as globals; return the result by assigning OUTPUT = ... (or calling set_output(value)). Built-ins available: CREATE_TICKETS, RUN_TICKETS, GET_TICKET, GET_TICKETS, GET_OUTPUTS, DISPLAY. Output is exposed downstream as the component variable plus <var>_output / <var>_logs.',
+		description: 'Runs a local Python script. Read upstream values from TICKET_CONTEXT (dict) or directly as globals; return the result by assigning OUTPUT = ... (or calling set_output(value)). Built-ins available: CREATE_TICKETS, RUN_TICKETS, GET_TICKET, GET_TICKETS, GET_OUTPUTS, DISPLAY. The return value is the card\'s output (TICKET_CONTEXT["<Title>"], {var}, and the plain variable in Python).',
 		runtime: 'Interpolates {variables}, runs pythonCode with pythonPath (default: system python3) with TICKET_CONTEXT injected, captures stdout / stderr, exit code and the return value (OUTPUT, set_output(...) or RESULT). A non-zero exit fails the step.',
 		props: [
 			{ name: 'pythonCode', kind: 'string', required: true, ticketValue: true, description: 'Script. Read TICKET_CONTEXT, assign OUTPUT.' },
@@ -771,11 +786,11 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'any', when: 'both', description: 'return value (OUTPUT / set_output / RESULT): dict, list, number, boolean or text', example: '{"status": "success"}' },
-			{ name: '{Label}', type: 'any', when: 'both', description: 'same value under the label' },
-			{ name: '{var}_output', type: 'any', when: 'ticket', description: 'return value' },
-			{ name: '{var}_result', type: 'any', when: 'ticket', description: 'raw result captured from the script' },
-			{ name: '{var}_logs', type: 'string', when: 'ticket', description: 'console output (stdout / stderr)' },
-			{ name: '{var}_code', type: 'string', when: 'ticket', description: 'the script that ran' }
+			{ name: '{Label}', type: 'any', when: 'both', description: 'same value in Python, by the card title' },
+			{ name: '{var}_output', type: 'any', when: 'ticket', description: 'return value', internal: true },
+			{ name: '{var}_result', type: 'any', when: 'ticket', description: 'raw result captured from the script', internal: true },
+			{ name: '{var}_logs', type: 'string', when: 'ticket', description: 'console output (stdout / stderr)', internal: true },
+			{ name: '{var}_code', type: 'string', when: 'ticket', description: 'the script that ran', internal: true }
 		],
 		example: {
 			id: 'python_1',
@@ -799,8 +814,8 @@ export const COMPONENT_SPECS = {
 				{ step: '3. Script Execution & Return Value Capture', detail: 'Runs script synchronously with timeout protection, capturing stdout, stderr, exit code, runtime duration, and the explicit Return Value (OUTPUT = ..., set_output(...), or RESULT).' },
 				{ step: '4. Output Manifest & Return Value Decoupling', detail: 'Distinguishes between Console Logs (stdout/stderr) and the actual Return Value (OUTPUT). Downstream primitives and Output Manifests receive the clean returned value (dict, list, number, boolean, or string) without terminal log banners.' }
 			],
-			variableResolution: 'TICKET_CONTEXT[\'Field Label\'] or {Field Label}',
-			downstreamPassing: 'The Return Value (OUTPUT) is passed directly to Output Manifests and downstream primitives as structured data (dict, list, or text).',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
+			downstreamPassing: 'The Return Value (OUTPUT) is the card\'s output (dict, list, or text). ' + CARD_OUTPUT_RULES,
 			syntaxExamples: [
 				'# Directly access upstream data via TICKET_CONTEXT (auto-parsed from JSON / Markdown)\njob_data = TICKET_CONTEXT.get("Linkedin Job Info Summary", {})\n\n# Define clean return value consumed by Output Manifest:\nOUTPUT = {"status": "success", "processed_jobs": len(job_data)}',
 				'set_output({"total": 100, "items": [...]})',
@@ -829,7 +844,7 @@ export const COMPONENT_SPECS = {
 		ai: 'exposed',
 		purpose: 'Calls an HTTP / REST API and publishes the parsed response.',
 		description: 'Universal HTTP / REST API client: GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS with {variable} URL, query parameters (httpParams), headers (httpHeaders), auth (httpAuthType none | bearer | api_key | basic | custom), request body (httpBodyType none | json | raw | x-www-form-urlencoded with httpBodyContent) and timeout (httpTimeoutMs, default 30000). A JSON response is parsed, so later steps read {var.field}. Secrets (httpAuthToken, httpApiKeyValue, httpAuthPassword) must be variable references such as {API_TOKEN}.',
-		runtime: 'Interpolates {variables} in URL, params, headers, auth and body, sends the request (no body for GET / HEAD), parses a JSON response, and registers the parsed data plus <Label>_status / <Label>_ok in context. Request settings saved on the ticket win over the template.',
+		runtime: 'Interpolates {variables} in URL, params, headers, auth and body, sends the request (no body for GET / HEAD), parses a JSON response, and publishes the parsed data (or the response text) as the card\'s output. Request settings saved on the ticket win over the template.',
 		props: [
 			{ name: 'httpUrl', kind: 'string', required: true, ticketValue: true, description: 'Endpoint URL. Supports {var}.' },
 			{ name: 'httpMethod', kind: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'], default: 'GET', ticketValue: true, description: 'HTTP method (unknown values fall back to GET).' },
@@ -856,12 +871,12 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object | string', when: 'both', description: 'parsed response data (JSON) or response text; never the transport envelope', example: '{"id": 7, "name": "x"}' },
-			{ name: '{Label}', type: 'object | string', when: 'both', description: 'same value under the label' },
-			{ name: '{var}_status', type: 'number', when: 'both', description: 'HTTP status code', example: '200' },
-			{ name: '{var}_ok', type: 'boolean', when: 'both', description: 'true for a 2xx status', example: 'true' },
-			{ name: '{var}_data', type: 'object | string', when: 'both', description: 'parsed response data (only when not null)' },
-			{ name: '{var}_body', type: 'string', when: 'both', description: 'response body' },
-			{ name: '{var}_raw', type: 'string', when: 'both', description: 'raw response text' }
+			{ name: '{Label}', type: 'object | string', when: 'both', description: 'same value in Python, by the card title' },
+			{ name: '{var}_status', type: 'number', when: 'both', description: 'HTTP status code', example: '200', internal: true },
+			{ name: '{var}_ok', type: 'boolean', when: 'both', description: 'true for a 2xx status', example: 'true', internal: true },
+			{ name: '{var}_data', type: 'object | string', when: 'both', description: 'parsed response data (only when not null)', internal: true },
+			{ name: '{var}_body', type: 'string', when: 'both', description: 'response body', internal: true },
+			{ name: '{var}_raw', type: 'string', when: 'both', description: 'raw response text', internal: true }
 		],
 		example: {
 			id: 'api_request_1',
@@ -894,14 +909,13 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Dynamic Interpolation', detail: 'Interpolates variables across URL, query parameters, headers, auth token, and request body.' },
 				{ step: '2. HTTP Dispatch', detail: 'Sends HTTP request via native fetch with configurable timeout and abort protection.' },
 				{ step: '3. Response Parsing', detail: 'Captures status code, status text, response headers, and auto-parses response body into structured JSON if valid.' },
-				{ step: '4. Downstream Output Registration', detail: 'Registers the parsed response under the component variable, plus {FieldLabel_status} and {FieldLabel_ok}.' }
+				{ step: '4. Downstream Output Registration', detail: 'The parsed response is the card\'s output: {output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.' }
 			],
-			variableResolution: '{Field Label}, {Field Label.data.property}, {Field Label_status}, {Field Label_ok}',
-			downstreamPassing: 'Subsequent AI Prompts, Python scripts (TICKET_CONTEXT), and Output Manifests receive full parsed JSON or response text.',
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.',
+			downstreamPassing: 'The parsed JSON (or the response text) is the card\'s output. ' + CARD_OUTPUT_RULES,
 			syntaxExamples: [
 				'{Upload Resume.data.share_path}',
-				'{Get Resume.resume_data.hero.headline}',
-				'{API Request_status}',
+				'TICKET_CONTEXT["API Request"]',
 				'TICKET_CONTEXT[\'Upload Resume\'][\'data\'][\'share_path\']'
 			],
 			tips: [
@@ -938,16 +952,16 @@ export const COMPONENT_SPECS = {
 		outputs: [
 			{ name: '{var}', type: 'object[] | string', when: 'both', description: 'rows (array of objects keyed by column name); the SQL output text when there are no rows', example: '[{"job_id": 1, "title": "Engineer"}]' },
 			{ name: '{Label}', type: 'object', when: 'both', description: 'table payload {columns, rows, dbPath, tableName, sqlOutput, output, ...}' },
-			{ name: '{var.rows}', type: 'object[]', when: 'both', description: 'rows' },
-			{ name: '{var.json}', type: 'string', when: 'both', description: 'rows as JSON text' },
-			{ name: '{var.output}', type: 'string | object[]', when: 'both', description: 'SQL output text, else the rows' },
-			{ name: '{var.sqlOutput}', type: 'string', when: 'both', description: 'SQL output text' },
-			{ name: '{var.table}', type: 'string', when: 'ticket', description: 'rows as a Markdown table' },
-			{ name: '{var.columns}', type: 'object[]', when: 'ticket', description: 'column definitions' },
-			{ name: '{var.dbPath}', type: 'string', when: 'ticket', description: 'bound SQLite file' },
-			{ name: '{var.tableName}', type: 'string', when: 'ticket', description: 'bound SQLite table' },
-			{ name: '{var}_rows / _output / _payload', type: 'object[] / string / object', when: 'both', description: 'rows / SQL output text / payload under the cleaned label' },
-			{ name: '{var}_columns / _db_path / _table_name', type: 'object[] / string / string', when: 'ticket', description: 'columns / SQLite file / table under the cleaned label' }
+			{ name: '{var.rows}', type: 'object[]', when: 'both', description: 'rows', internal: true },
+			{ name: '{var.json}', type: 'string', when: 'both', description: 'rows as JSON text', internal: true },
+			{ name: '{var.output}', type: 'string | object[]', when: 'both', description: 'SQL output text, else the rows', internal: true },
+			{ name: '{var.sqlOutput}', type: 'string', when: 'both', description: 'SQL output text', internal: true },
+			{ name: '{var.table}', type: 'string', when: 'ticket', description: 'rows as a Markdown table', internal: true },
+			{ name: '{var.columns}', type: 'object[]', when: 'ticket', description: 'column definitions', internal: true },
+			{ name: '{var.dbPath}', type: 'string', when: 'ticket', description: 'bound SQLite file', internal: true },
+			{ name: '{var.tableName}', type: 'string', when: 'ticket', description: 'bound SQLite table', internal: true },
+			{ name: '{var}_rows / _output / _payload', type: 'object[] / string / object', when: 'both', description: 'rows / SQL output text / payload under the cleaned label', internal: true },
+			{ name: '{var}_columns / _db_path / _table_name', type: 'object[] / string / string', when: 'ticket', description: 'columns / SQLite file / table under the cleaned label', internal: true }
 		],
 		example: {
 			id: 'job_listings_table',
@@ -977,9 +991,9 @@ export const COMPONENT_SPECS = {
 				{ step: '2. AI & Script Manipulation', detail: 'AI agents can read, insert, update, delete rows, or run SQL queries via anyagent_operate_ticket_table.' },
 				{ step: '3. SQLite Database Sync', detail: 'Automatically creates the SQLite table (CREATE TABLE IF NOT EXISTS) and persists/updates or deletes records in the bound .db file.' }
 			],
-			variableResolution: '{Field Label}, {Field Label.json}, {Field Label.dbPath}, {Field Label.tableName}',
-			downstreamPassing: 'Downstream AI Prompts receive a formatted Markdown table, and Python scripts can access rows and dbPath via TICKET_CONTEXT.',
-			syntaxExamples: ['{Job Listings Table}', '{Job Listings Table.json}', 'TICKET_CONTEXT[\'Job Listings Table\']'],
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.',
+			downstreamPassing: 'The table is the card\'s output. ' + CARD_OUTPUT_RULES,
+			syntaxExamples: ['{job_listings_table}', 'TICKET_CONTEXT["Job Listings Table"]'],
 			tips: [
 				'Mark a unique identifier column (such as id or job_id) as Primary Key (PK) so "Update in SQLite" performs clean upserts.',
 				'Press Cmd+V / Ctrl+V directly inside the table or click "Paste Data" to bulk-import rows from spreadsheets or Markdown.'
@@ -1066,7 +1080,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object', when: 'both', description: 'ticket handle {success, ticketId, ticketName, ticketType, entityUri, targetFolder, fields}' },
-			{ name: '{Label}', type: 'object', when: 'both', description: 'same handle under the label' }
+			{ name: '{Label}', type: 'object', when: 'both', description: 'same handle in Python, by the card title' }
 		],
 		example: { id: 'new_run', label: 'New Run', type: 'create_tickets', wfTicketType: 'training_run', wfTicketTitle: 'Run {run_no}', wfTicketParams: { lr: '{lr}' } },
 		notes: [
@@ -1108,7 +1122,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object', when: 'both', description: 'run result {success, ticketId, status: "success" | "failed", output, error, durationMs}', example: '{"status": "success", "output": {"success": true}}' },
-			{ name: '{Label}', type: 'object', when: 'both', description: 'same result under the label' }
+			{ name: '{Label}', type: 'object', when: 'both', description: 'same result in Python, by the card title' }
 		],
 		example: { id: 'run_it', label: 'Run It', type: 'run_tickets', wfTicketTarget: '{new_run}' },
 		notes: [],
@@ -1145,7 +1159,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object | any | null', when: 'both', description: 'Output dictionary, one item, or null when the template has no Output component' },
-			{ name: '{Label}', type: 'object | any | null', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'object | any | null', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'run_result', label: 'Run Result', type: 'get_outputs', wfTicketTarget: '{new_run}', wfTicketField: 'accuracy' },
 		notes: [],
@@ -1181,7 +1195,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object | any', when: 'both', description: 'ticket object (with subWorkflow, the calling contract, for a sub_workflow ticket), or the value of wfTicketField' },
-			{ name: '{Label}', type: 'object | any', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'object | any', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'parent', label: 'Parent', type: 'get_ticket', wfTicketTarget: 'JOB-0001' },
 		notes: ['For several tickets use Get Tickets.'],
@@ -1229,7 +1243,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object[] | any[]', when: 'both', description: 'list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata} (plus subWorkflow {name, inputs, outputs, sourceWorkflow} for sub_workflow tickets), or one field value per ticket' },
-			{ name: '{Label}', type: 'object[] | any[]', when: 'both', description: 'same list under the label' }
+			{ name: '{Label}', type: 'object[] | any[]', when: 'both', description: 'same list in Python, by the card title' }
 		],
 		example: { id: 'done_runs', label: 'Done Runs', type: 'get_tickets', wfTicketType: 'training_run', wfTicketStatus: 'Done' },
 		notes: ['Give at least one filter.'],
@@ -1288,7 +1302,7 @@ export const COMPONENT_SPECS = {
 		props: [{ name: 'defaultContent', kind: 'string', ticketValue: true, description: 'Initial text.' }],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'the text as stored' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'expense_title', label: 'Title / Subject', type: 'text' },
 		notes: [VAR_NOTE],
@@ -1301,9 +1315,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Value Extraction', detail: 'Reads value from input overrides or ticket metadata, else the default value.' },
 				{ step: '2. Variable Registration', detail: 'Interpolates {variables} and registers the string as-is (not trimmed) into contextVariables[FieldLabel].' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Available for URL interpolation, prompt placeholders, or workflow condition evaluation.',
-			syntaxExamples: ['{Field Label}', '{{Field Label}}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Use clear, concise labels so other primitives can easily reference the field by name.']
 		},
 		templatePalette: { defaultName: 'Text Field' }
@@ -1322,7 +1336,7 @@ export const COMPONENT_SPECS = {
 		props: [{ name: 'defaultContent', kind: 'string', ticketValue: true, description: 'Initial text or Markdown template.' }],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'the text as stored' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'business_reason', label: 'Business Justification', type: 'textarea' },
 		notes: [VAR_NOTE],
@@ -1335,9 +1349,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Multiline Retrieval', detail: 'Retrieves complete multiline string value.' },
 				{ step: '2. Variable Context Insertion', detail: 'Inserts string verbatim into contextVariables.' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Often fed into AI Prompt templates as background context or instruction bodies.',
-			syntaxExamples: ['{Field Label}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Supports standard Markdown formatting for structured descriptions.']
 		},
 		templatePalette: { defaultName: 'Description' }
@@ -1363,7 +1377,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'number | string', when: 'both', description: 'the number, rounded to precision (empty stays "")', example: '12.5' },
-			{ name: '{Label}', type: 'number | string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'number | string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'budget_amount', label: 'Budget Amount', type: 'number', unit: '$', precision: 2 },
 		notes: [VAR_NOTE, 'Empty values and {variable} values are allowed when saving; they are checked after interpolation at run time.'],
@@ -1381,9 +1395,9 @@ export const COMPONENT_SPECS = {
 				{ step: '2. Bounds Validation', detail: 'Checks min and max thresholds; an invalid or out-of-range value fails the step.' },
 				{ step: '3. Context Registration', detail: 'Stores parsed number into contextVariables for mathematical expressions.' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Used by workflow condition branches (e.g. if amount > 1000) or prompt evaluation.',
-			syntaxExamples: ['{Field Label}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Can be used in Python-like expressions within workflow condition routers.']
 		},
 		templatePalette: { defaultName: 'Amount' }
@@ -1405,7 +1419,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'the selected option', example: '"Travel"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'category', label: 'Expense Category', type: 'select', options: ['Travel', 'Meals & Entertainment', 'Office Supplies', 'Software Subscriptions', 'Other'] },
 		notes: [VAR_NOTE, 'The run does not check that the value is one of the options.'],
@@ -1421,9 +1435,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Read value', detail: 'Uses the run input override, else the selected option, else the default option. The value is not checked against the options list.' },
 				{ step: '2. Context Assignment', detail: 'Stores selected string into contextVariables[FieldLabel].' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Ideal for workflow routing (e.g. if priority == "High").',
-			syntaxExamples: ['{Field Label}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Configure clear, mutually exclusive options for deterministic workflow decisions.']
 		},
 		templatePalette: { defaultName: 'Select Option', defaultChoices: ['Option 1', 'Option 2', 'Option 3'] }
@@ -1445,7 +1459,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'checked options as stored (JSON array text)', example: '["Urgent"]' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'tags', label: 'Compliance Tags', type: 'multiselect', options: ['Urgent', 'Over-Budget', 'Client-Rebillable', 'Receipt-Verified'] },
 		notes: [VAR_NOTE],
@@ -1458,9 +1472,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Read value', detail: 'Reads the checked options as stored with the ticket (a JSON array).' },
 				{ step: '2. Context Assignment', detail: 'Stores the value as-is into contextVariables[FieldLabel].' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Useful for multi-tag categorization and filter matching.',
-			syntaxExamples: ['{Field Label}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Parse the JSON array in Python (json.loads) when you need individual tags.']
 		},
 		templatePalette: { defaultName: 'Tags', defaultChoices: ['Tag A', 'Tag B', 'Tag C'] }
@@ -1479,7 +1493,7 @@ export const COMPONENT_SPECS = {
 		props: [{ name: 'defaultContent', kind: 'string', enum: ['true', 'false'], default: 'false', ticketValue: true, description: 'Initial state.' }],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: '"true" / "false" as stored', example: '"true"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'requires_cfo_approval', label: 'Requires CFO Sign-off', type: 'switch' },
 		notes: [VAR_NOTE],
@@ -1492,9 +1506,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Read value', detail: 'Reads the stored state ("true" / "false"), else the default state.' },
 				{ step: '2. Context Registration', detail: 'Registers the value as stored into contextVariables (it is not converted to a boolean).' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Directly drives workflow conditional links (e.g. if is_urgent == "true").',
-			syntaxExamples: ['{Field Label}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Combine with workflow condition branches to selectively skip or trigger expensive steps.']
 		},
 		templatePalette: { defaultName: 'Enabled Flag' }
@@ -1506,7 +1520,7 @@ export const COMPONENT_SPECS = {
 		description: 'Calendar date. Value is a string "YYYY-MM-DD" (e.g. "2026-11-25"); passed through unchanged at run time.',
 		runtime: PASS_THROUGH_RUNTIME, props: DATE_PROPS, outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'date string YYYY-MM-DD', example: '"2026-11-25"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'expense_date', label: 'Expense Date', type: 'date' }, notes: [VAR_NOTE],
 		help: dateHelp('Date', 'YYYY-MM-DD', '2026-11-25', false),
@@ -1518,7 +1532,7 @@ export const COMPONENT_SPECS = {
 		description: 'Time of day. Value is a string "HH:MM" in 24-hour format (e.g. "09:30").',
 		runtime: PASS_THROUGH_RUNTIME, props: DATE_PROPS, outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'time string HH:MM', example: '"09:30"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'incident_time', label: 'Incident Time', type: 'time' }, notes: [VAR_NOTE],
 		help: dateHelp('Time', 'HH:MM (24-hour)', '09:30', false),
@@ -1530,7 +1544,7 @@ export const COMPONENT_SPECS = {
 		description: 'Date and time. Value is a string "YYYY-MM-DDTHH:MM" (e.g. "2026-11-25T09:30"); older values may use a space instead of "T".',
 		runtime: PASS_THROUGH_RUNTIME, props: DATE_PROPS, outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'date-time string YYYY-MM-DDTHH:MM', example: '"2026-11-25T09:30"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'submission_time', label: 'Submission Timestamp', type: 'datetime' }, notes: [VAR_NOTE],
 		help: dateHelp('Date & Time', 'YYYY-MM-DDTHH:MM (the picker writes a "T"; older values may use a space instead)', '2026-11-25T09:30', false),
@@ -1542,7 +1556,7 @@ export const COMPONENT_SPECS = {
 		description: 'Range of dates. Value is one string "start ~ end" with each side "YYYY-MM-DD" (e.g. "2026-11-25 ~ 2026-11-30").',
 		runtime: PASS_THROUGH_RUNTIME, props: DATE_PROPS, outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'one "start ~ end" string', example: '"2026-11-25 ~ 2026-11-30"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'travel_period', label: 'Travel Dates', type: 'date_range' }, notes: [VAR_NOTE],
 		help: dateHelp('Date Range', 'YYYY-MM-DD', '2026-11-25 ~ 2026-11-30', true),
@@ -1554,7 +1568,7 @@ export const COMPONENT_SPECS = {
 		description: 'Range of times. Value is one string "start ~ end" with each side "HH:MM" (e.g. "09:00 ~ 18:00").',
 		runtime: PASS_THROUGH_RUNTIME, props: DATE_PROPS, outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'one "start ~ end" string', example: '"09:00 ~ 18:00"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'working_hours', label: 'Shift Hours', type: 'time_range' }, notes: [VAR_NOTE],
 		help: dateHelp('Time Range', 'HH:MM (24-hour)', '09:00 ~ 18:00', true),
@@ -1566,7 +1580,7 @@ export const COMPONENT_SPECS = {
 		description: 'Range of date-times. Value is one string "start ~ end" with each side "YYYY-MM-DDTHH:MM" (e.g. "2026-11-25T09:00 ~ 2026-11-25T18:00").',
 		runtime: PASS_THROUGH_RUNTIME, props: DATE_PROPS, outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'one "start ~ end" string', example: '"2026-11-25T09:00 ~ 2026-11-25T18:00"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'booking_window', label: 'Booking Window', type: 'datetime_range' }, notes: [VAR_NOTE],
 		help: dateHelp('Date & Time Range', 'YYYY-MM-DDTHH:MM', '2026-11-25T09:00 ~ 2026-11-25T18:00', true),
@@ -1581,8 +1595,8 @@ export const COMPONENT_SPECS = {
 		usableIn: ['ticket', 'node'],
 		ai: 'exposed',
 		purpose: 'Repeating entries of sub-fields; publishes a JSON array.',
-		description: 'Nested repeatable line items or sub-table. Supports itemFields (array of sub-fields) or componentRef (reusable class ID). Stored value: a JSON array of entries, one object per entry keyed by sub-field label, with optional "_index" and "_title". In a ticket run it publishes that array as structured JSON (without "_index"; every sub-field label present, "" when empty) under outputVariableName (or the name generated from the label, e.g. expense_items) and under its label, plus {name.json} with the JSON text; an empty list publishes []. Read it as {expense_items}, {expense_items.0.Date} or, in Python, as a list of dicts. Example: [{"_title": "Trip A", "Item Name": "Taxi", "Date": "2026-11-25", "Amount ($)": "12", "Notes": ""}].',
-		runtime: 'Parses the stored entries (in a node: defaultContent) into an array of objects keyed by sub-field label and publishes it under {var}, the label and {var.json}; the card is marked Done, also when empty ([]).',
+		description: 'Nested repeatable line items or sub-table. Supports itemFields (array of sub-fields) or componentRef (reusable class ID). Stored value: a JSON array of entries, one object per entry keyed by sub-field label, with optional "_index" and "_title". In a ticket run it publishes that array as structured JSON (without "_index"; every sub-field label present, "" when empty) as the card\'s output; an empty list publishes []. Read it as {expense_items} (the card\'s variable) or, in Python, as a list of dicts: TICKET_CONTEXT["<Title>"] or expense_items. Example: [{"_title": "Trip A", "Item Name": "Taxi", "Date": "2026-11-25", "Amount ($)": "12", "Notes": ""}].',
+		runtime: 'Parses the stored entries (in a node: defaultContent) into an array of objects keyed by sub-field label and publishes it as the card\'s output; the card is marked Done, also when empty ([]).',
 		props: [
 			{ name: 'itemFields', kind: 'objectArray', role: 'structured', description: 'Sub-fields [{id, label, type, options?}]. Give itemFields or componentRef.' },
 			{ name: 'componentRef', kind: 'string', role: 'structured', description: 'Reusable class id instead of itemFields.' },
@@ -1590,8 +1604,8 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object[]', when: 'both', description: 'entries, one object per entry keyed by sub-field label ("_title" kept, "_index" dropped, missing sub-fields ""); [] when empty', example: '[{"_title": "Trip A", "Item Name": "Taxi", "Amount ($)": "12"}]' },
-			{ name: '{Label}', type: 'object[]', when: 'both', description: 'same array under the label' },
-			{ name: '{var}.json / {Label}.json', type: 'string', when: 'both', description: 'the same array as JSON text' }
+			{ name: '{Label}', type: 'object[]', when: 'both', description: 'same array in Python, by the card title' },
+			{ name: '{var}.json / {Label}.json', type: 'string', when: 'both', description: 'the same array as JSON text', internal: true }
 		],
 		example: {
 			id: 'expense_items',
@@ -1612,12 +1626,12 @@ export const COMPONENT_SPECS = {
 			headline: 'How RUN_TICKETS Executes Dynamic List Container',
 			steps: [
 				{ step: '1. Item Records', detail: 'Reads the saved entries. Each entry becomes one object keyed by sub-field label, e.g. { "Item Name": "Taxi", "Amount": "12" }; an entry title is kept as "_title". Values stay as saved (text).' },
-				{ step: '2. Publish as JSON Array', detail: 'Publishes the array under the output variable name (outputVariableName, or the name generated from the label, e.g. expense_items) and under the label. {name.json} holds the same array as JSON text.' },
+				{ step: '2. Publish as JSON Array', detail: 'Publishes the array under the output variable name (outputVariableName, or the name generated from the label, e.g. expense_items) (Python: TICKET_CONTEXT["<Title>"]).' },
 				{ step: '3. Done Status', detail: 'The card is marked Done like any input. An empty list is Done too and publishes [].' }
 			],
-			variableResolution: '{expense_items} / {expense_items.0.Amount} / {Field Label.json}',
-			downstreamPassing: 'Python reads it as a list of dicts (TICKET_CONTEXT["expense_items"] or the expense_items global); {expense_items} in a prompt inserts the JSON text; GET_OUTPUTS returns the array when an Output component lists it.',
-			syntaxExamples: ['{expense_items}', '{expense_items.0.Amount}', '{expense_items.json}'],
+			variableResolution: '{expense_items} in the ticket or workflow, TICKET_CONTEXT["Expense Items"] in Python.',
+			downstreamPassing: 'Python reads it as a list of dicts (TICKET_CONTEXT["<Title>"]); {expense_items} in a prompt inserts the JSON text; GET_OUTPUTS returns the array when an Output component lists it.',
+			syntaxExamples: ['{expense_items}', 'TICKET_CONTEXT["Expense Items"]'],
 			tips: ['Ideal for order items, milestone matrices, test step checklists, or multi-item data grids.', 'Example value: [{"_title": "Trip A", "Item Name": "Taxi", "Amount": "12"}, {"Item Name": "Hotel", "Amount": "90"}]']
 		},
 		templatePalette: { defaultName: 'Container' }
@@ -1636,7 +1650,7 @@ export const COMPONENT_SPECS = {
 		props: [],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'the stored attachment value (file references)' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'receipt_files', label: 'Receipts & Invoices', type: 'attachment' },
 		notes: ['Not available in workflow nodes.'],
@@ -1649,9 +1663,9 @@ export const COMPONENT_SPECS = {
 				{ step: '1. Path Resolution', detail: 'Resolves workspace relative file URIs.' },
 				{ step: '2. Context Binding', detail: 'Registers file URI paths into contextVariables for file reading tools.' }
 			],
-			variableResolution: '{Field Label}',
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
 			downstreamPassing: 'Passed to vision models or document summarization tools.',
-			syntaxExamples: ['{Field Label}'],
+			syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 			tips: ['Keeps files versioned locally alongside the ticket folder.']
 		},
 		templatePalette: { defaultName: 'Attachment' }
@@ -1666,19 +1680,19 @@ export const COMPONENT_SPECS = {
 		ai: 'exposed',
 		purpose: 'Human decision gate: a run waits until a person clicks one of the buttons; the clicked button is the output.',
 		description: 'Row of buttons [{id, label, color?, targetStatus?}] that acts as a human approval gate. When a ticket run or a workflow run (also a ticket run inside a workflow node, or the component directly in a node) reaches it, the run PAUSES until a person clicks one of the buttons: on the ticket page (the card shows "Waiting for your decision"), on the workflow canvas (the node shows the buttons), from the notification, or via resumeWorkflow with { label: "<button>" }. The clicked button\'s label is the output; a button\'s targetStatus becomes the ticket status when the run ends successfully. The ticket opens to the right of the workflow so the person sees what they approve; waitingPrompt (default "Waiting for your decision", {variables} allowed) is the text shown while waiting; "Stop this run" ends the whole run (the step fails as stopped). Clicking a button outside a run changes the status (targetStatus) and records the choice as the component value.',
-		runtime: 'Waits for a click (no timeout, never decided automatically). Publishes {Label} = clicked label and {Label.id} / {Label.label} / {Label.at} / {Label.by}; stores {buttonId, label, at, by, targetStatus} as the ticket value; the ticket status at the end of a successful run is the clicked button\'s targetStatus (instead of Completed). A stopped run cancels the wait and fails the step. Pending waits are kept in memory: reloading the window ends the waiting run.',
+		runtime: 'Waits for a click (no timeout, never decided automatically). Publishes the clicked label as the card\'s output; stores {buttonId, label, at, by, targetStatus} as the ticket value; the ticket status at the end of a successful run is the clicked button\'s targetStatus (instead of Completed). A stopped run cancels the wait and fails the step. Pending waits are kept in memory: reloading the window ends the waiting run.',
 		props: [
 			{ name: 'buttons', kind: 'objectArray', role: 'structured', required: true, description: 'Buttons [{id, label*, color?, targetStatus?}]. Without buttons the card shows Approve (-> Done) and Reject (-> Blocked).' },
 			{ name: 'waitingPrompt', kind: 'string', default: 'Waiting for your decision', description: 'Waiting Prompt: text shown on the ticket card, the workflow node and the notification while a run waits. Supports {variables}.' }
 		],
 		outputs: [
 			{ name: '{var}', type: 'string', when: 'both', description: 'label of the clicked button', example: '"Approve"' },
-			{ name: '{Label}', type: 'string', when: 'both', description: 'same label under the component label and its label_key (link conditions: @review == \'Approve\'); a ticket run inside a workflow node also publishes it unprefixed in the workflow' },
-			{ name: '{var.id}', type: 'string', when: 'both', description: 'id of the clicked button', example: '"btn_approve"' },
-			{ name: '{var.label}', type: 'string', when: 'both', description: 'label of the clicked button' },
-			{ name: '{var.at}', type: 'string', when: 'both', description: 'ISO time of the click', example: '"2026-11-27T15:04:05.000Z"' },
-			{ name: '{var.by}', type: 'string', when: 'both', description: 'who decided ("User" for a click in the app)' },
-			{ name: '{var}_result', type: 'object', when: 'both', description: '{id, label, at, by} as one dict (Python: TICKET_CONTEXT["review_result"]["label"]); also under {label_key}_result' }
+			{ name: '{Label}', type: 'string', when: 'both', description: 'same clicked label in Python, by the card title (link conditions use the variable: @review == \'Approve\'); a ticket run inside a workflow node also publishes it in the workflow' },
+			{ name: '{var.id}', type: 'string', when: 'both', description: 'id of the clicked button', example: '"btn_approve"', internal: true },
+			{ name: '{var.label}', type: 'string', when: 'both', description: 'label of the clicked button', internal: true },
+			{ name: '{var.at}', type: 'string', when: 'both', description: 'ISO time of the click', example: '"2026-11-27T15:04:05.000Z"', internal: true },
+			{ name: '{var.by}', type: 'string', when: 'both', description: 'who decided ("User" for a click in the app)', internal: true },
+			{ name: '{var}_result', type: 'object', when: 'both', description: '{id, label, at, by} as one dict (Python: TICKET_CONTEXT["review_result"]["label"]); also under {label_key}_result', internal: true }
 		],
 		example: {
 			id: 'review_actions',
@@ -1692,7 +1706,7 @@ export const COMPONENT_SPECS = {
 		},
 		notes: [
 			'A run that reaches the buttons waits for a person: only add it where a human decision is wanted.',
-			'Branch in a workflow with link conditions on the label key: @review == \'Approve\' / @review == \'Reject\' (label "Review" -> review). This works for the buttons directly in a node and for a node that runs a ticket containing them: the ticket\'s decisions are published unprefixed in the workflow (review, Review, review_result, Review.by ...; if a variable of that name already exists, the latest decision wins), besides the ticket-prefixed ANYAG-0121.review, and as the identifier-safe ANYAG_0121_review / ANYAG_0121_review_result for a specific ticket (@ANYAG_0121_review == \'Approve\').',
+			'Branch in a workflow with link conditions on the output variable: @review == \'Approve\' / @review == \'Reject\' (title "Review" -> review). This works for the buttons directly in a node and for a node that runs a ticket containing them (if a variable of that name already exists, the latest decision wins).',
 			'Old data may use the legacy type id "button"; it is migrated to "button_group" on load.'
 		],
 		help: {
@@ -1706,12 +1720,12 @@ export const COMPONENT_SPECS = {
 			steps: [
 				{ step: '1. Pause', detail: 'The run stops at the buttons. The ticket opens to the right of the workflow (or is revealed where it is already open) with the card highlighted and the Waiting Prompt (default "Waiting for your decision"); the workflow node shows the prompt and the buttons; a notification can reveal the ticket again. "Stop this run" on the card or the node ends the whole run.' },
 				{ step: '2. Decide', detail: 'A person clicks a button (ticket page, canvas or notification); an agent can resume the workflow with the button label when told to. Stop ends the wait and the run.' },
-				{ step: '3. Publish', detail: '{Label} = clicked label; {Label.id}, {Label.label}, {Label.at}, {Label.by}. The choice is stored on the ticket. When a workflow node runs the ticket, the decision is also published unprefixed in the workflow (latest decision wins) and as <TICKET_ID>_<label_key> (e.g. ANYAG_0121_review), so the next link can branch: @review == \'Approve\'.' },
+				{ step: '3. Publish', detail: 'The clicked label is the card\'s output: {output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python. The choice is stored on the ticket. When a workflow node runs the ticket, the decision is also published in the workflow (latest decision wins), so the next link can branch: @review == \'Approve\'.' },
 				{ step: '4. Status', detail: 'The button\'s target status becomes the ticket status when the run finishes successfully.' }
 			],
-			variableResolution: '{Field Label} (clicked label), {Field Label.at}, {Field Label.by}',
+			variableResolution: '{output_var} in the ticket or workflow (clicked label), TICKET_CONTEXT["<Title>"] in Python.',
 			downstreamPassing: 'Later steps and link conditions read the decision, e.g. @review == \'Approve\' on the links after the node (also when the node runs a ticket containing the buttons).',
-			syntaxExamples: ['{Review}', '{Review.by}', '@review == \'Approve\''],
+			syntaxExamples: ['{review}', 'TICKET_CONTEXT["Review"]', '@review == \'Approve\''],
 			tips: ['Outside a run, clicking a button still changes the ticket status and records the choice.']
 		},
 		templatePalette: { defaultName: 'Action Buttons' },
@@ -1746,8 +1760,8 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'object', when: 'both', description: '{"command": ["last N lines", ...]} per command', example: '{"df -h": ["Filesystem Size Used"]}' },
-			{ name: '{Label}', type: 'object', when: 'both', description: 'same object under the label' },
-			{ name: '{var}_output', type: 'object', when: 'ticket', description: 'same object' }
+			{ name: '{Label}', type: 'object', when: 'both', description: 'same object in Python, by the card title' },
+			{ name: '{var}_output', type: 'object', when: 'ticket', description: 'same object', internal: true }
 		],
 		example: {
 			id: 'ssh_1',
@@ -1778,7 +1792,7 @@ export const COMPONENT_SPECS = {
 				{ step: '3. Sequential Multi-Command Execution', detail: 'Executes all configured command send bars in addition order (#1 → #2 → ...), tracking working directory changes (e.g. cd /var/www) across commands.' },
 				{ step: '4. Standard JSON Output Generation', detail: 'Builds a valid JSON object mapping each executed command string to an array of its last N output lines, replacing the component Output cleanly for downstream nodes.' }
 			],
-			variableResolution: '{Field Label} or {Field Label_output}',
+			variableResolution: '{output_var} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.',
 			downstreamPassing: 'The complete JSON object { "pwd": ["/home/user/project"], "ls -la": ["total 128", ...] } is exposed to downstream AI Prompts, Python scripts, and Output Manifests.',
 			syntaxExamples: [
 				'{\n  "pwd": ["/home/user/project"],\n  "docker ps": ["CONTAINER ID   IMAGE   STATUS"]\n}',
@@ -1815,7 +1829,7 @@ export const COMPONENT_SPECS = {
 		],
 		outputs: [
 			{ name: '{var}', type: 'any | object', when: 'both', description: 'sub-workflow outputs: the raw value with one output item, else a dictionary keyed by output name' },
-			{ name: '{Label}', type: 'any | object', when: 'both', description: 'same value under the label' }
+			{ name: '{Label}', type: 'any | object', when: 'both', description: 'same value in Python, by the card title' }
 		],
 		example: { id: 'call_sub', label: 'Call Sub-Workflow', type: 'sub_workflow', subWorkflowId: 'FINDJ-0042', subWorkflowInputs: { query: '{keyword}' } },
 		notes: [
@@ -1838,7 +1852,7 @@ export const COMPONENT_SPECS = {
 				{ step: '4. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name. A failed sub-workflow marks the step Failed.' }
 			],
 			'Later steps read the result from the output variable.',
-			['{call_sub_workflow_result}'],
+			['{call_sub_workflow}', 'TICKET_CONTEXT["Call Sub-Workflow"]'],
 			['To create a new sub-workflow, select nodes on a workflow canvas and encapsulate them (Workflow Outline > Encapsulate Selected Nodes): the nodes move into the new sub_workflow ticket and are replaced by one node calling it. Or create a sub_workflow ticket from code / AI: CREATE_TICKETS(ticket_type="sub_workflow", path=<parent workflow folder>, params={"definition": {"name": ..., "nodes": [...], "links": [...], "inputs": [...], "outputs": [...]}}). It must be created inside a workflow folder; without a definition it starts empty. This component only calls existing ones.', 'Recursion is never allowed: saving a template or workflow whose calls form a cycle shows an error naming the chain, and such a run refuses to start.']),
 		templatePalette: { defaultName: 'Call Sub-Workflow' }
 	}
@@ -1874,12 +1888,12 @@ export const REUSABLE_CLASS_HELP: IComponentHelp & { readonly title: string; rea
 	headline: 'How RUN_TICKETS Executes Reusable Classes',
 	steps: [
 		{ step: '1. Item Records', detail: 'A Reusable Class instance is a Dynamic List of the class sub-fields. Each entry becomes one object keyed by sub-field label (missing sub-fields are "").' },
-		{ step: '2. Publish as JSON Array', detail: 'Publishes the array of entries under the instance variable name (outputVariableName, or the name generated from the label) and under the label; {name.json} holds the JSON text.' },
+		{ step: '2. Publish as JSON Array', detail: 'Publishes the array of entries under the instance variable name (outputVariableName, or the name generated from the label) (Python: TICKET_CONTEXT["<Title>"]).' },
 		{ step: '3. Done Status', detail: 'The card is marked Done like any input; an empty instance publishes [].' }
 	],
-	variableResolution: '{seo_pack_1} / {seo_pack_1.0.meta_title}',
+	variableResolution: '{seo_pack_1} in the ticket or workflow, TICKET_CONTEXT["<Title>"] or output_var in Python.',
 	downstreamPassing: 'Python reads it as a list of dicts; {seo_pack_1} in a prompt inserts the JSON text; GET_OUTPUTS returns the array when an Output component lists it.',
-	syntaxExamples: ['{seo_pack_1}', '{seo_pack_1.0.meta_title}', '{seo_pack_1.json}'],
+	syntaxExamples: ['{seo_pack_1}', 'TICKET_CONTEXT["SEO Pack 1"]'],
 	tips: ['Build reusable classes for domain-specific groups like "SEO Metadata", "Approval Block", or "Deployment Specs".']
 };
 
@@ -1959,7 +1973,18 @@ export interface IComponentCatalogEntry {
 /** One line for an output variable: `{var} (string, ticket run only): description, e.g. "x"`. */
 export function describeOutput(out: IComponentOutputVar): string {
 	const when = out.when === 'both' ? '' : `, ${out.when} run only`;
-	return `${out.name} (${out.type}${when}): ${out.description}${out.example ? `, e.g. ${out.example}` : ''}`;
+	return `${documentedOutputName(out.name)} (${out.type}${when}): ${out.description}${out.example ? `, e.g. ${out.example}` : ''}`;
+}
+
+/** How an output is written for users and the AI (CI-69): `{var}` (also the plain variable in Python), `{Label}` = TICKET_CONTEXT["<Title>"]. */
+export function documentedOutputName(name: string): string {
+	if (name === '{var}') {
+		return '{var} (in Python also the plain variable var)';
+	}
+	if (name === '{Label}') {
+		return 'TICKET_CONTEXT["<Title>"]';
+	}
+	return name;
 }
 
 function describeProp(prop: IComponentConfigProp): string {
@@ -1982,7 +2007,7 @@ export function buildPrimitivesCatalog(): IComponentCatalogEntry[] {
 			entry.supportedInputs = inputs.map(describeProp);
 		}
 		if (spec.outputs.length > 0) {
-			entry.supportedOutputs = spec.outputs.map(describeOutput);
+			entry.supportedOutputs = documentedOutputs(spec.outputs).map(describeOutput);
 		}
 		if (spec.usableIn.length < 2) {
 			entry.usableIn = [...spec.usableIn];
@@ -2019,7 +2044,7 @@ export function buildAiBasePrimitives(): IAiBasePrimitive[] {
 			requiresOptions: props.some(prop => prop.name === 'options' && prop.required),
 			supportsItemFields: props.some(prop => prop.name === 'itemFields'),
 			example: { ...spec.example },
-			outputs: spec.outputs.map(describeOutput)
+			outputs: documentedOutputs(spec.outputs).map(describeOutput)
 		};
 		if (spec.notes.length > 0) {
 			entry.notes = [...spec.notes];
@@ -2108,12 +2133,12 @@ function toGuide(type: string, title: string, icon: ThemeIcon, help: IComponentH
 export function getPrimitiveGuide(fieldType: string, customLabel?: string, componentRef?: string): IPrimitiveGuide {
 	if (componentRef || (fieldType || '').trim().toLowerCase() === 'reusable_class') {
 		const h = REUSABLE_CLASS_HELP;
-		return toGuide('reusable_class', customLabel || h.title, h.icon, h, h.summary ?? '', COMPONENT_SPECS.dynamic_list.outputs);
+		return toGuide('reusable_class', customLabel || h.title, h.icon, h, h.summary ?? '', documentedOutputs(COMPONENT_SPECS.dynamic_list.outputs));
 	}
 
 	const spec = getComponentSpec(fieldType);
 	if (spec) {
-		return toGuide(spec.type, customLabel || spec.displayName, spec.icon, spec.help, spec.description, spec.outputs);
+		return toGuide(spec.type, customLabel || spec.displayName, spec.icon, spec.help, spec.description, documentedOutputs(spec.outputs));
 	}
 
 	// Generic fallback
@@ -2131,11 +2156,11 @@ export function getPrimitiveGuide(fieldType: string, customLabel?: string, compo
 				{ step: '1. Value Resolution', detail: 'Reads input or stored value from ticket metadata.' },
 				{ step: '2. Context Insertion', detail: 'Registers field value into contextVariables under its label.' }
 			],
-			variableResolution: '{Field Label}',
-			downstreamPassing: 'Available downstream via {Field Label} or {TicketName.Field Label}.'
+			variableResolution: '{output_var} in the ticket or workflow; TICKET_CONTEXT["<Title>"] or output_var in Python',
+			downstreamPassing: CARD_OUTPUT_RULES
 		},
 		outputs: [],
-		syntaxExamples: ['{Field Label}'],
+		syntaxExamples: ['{output_var}', 'TICKET_CONTEXT["<Title>"]'],
 		tips: ['Configure descriptive field labels for seamless variable interpolation downstream.']
 	};
 }
