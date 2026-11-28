@@ -61,6 +61,7 @@ import { applyStatusFilter, describeHiddenTickets, describeStatusFilter, FINISHE
 import { getLabelColor } from '../common/ticketLabels.js';
 import { CHILD_COUNT_MODE_STORAGE_KEY, CHILD_COUNT_MODES, ChildCountMode, countSubtree, describeChildCountPill, ITicketSubtreeCounts, ITicketSubtreeSummary, parseChildCountMode } from '../common/ticketSubtreeCount.js';
 import { classifyTestResult, collectFailingDescendants, describeFailingBelow, describeTestResult, describeTicketFailure, IFailingSummary } from '../common/ticketFailure.js';
+import { createCSSRule } from '../../../../base/browser/domStylesheets.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
@@ -173,6 +174,16 @@ interface IRenderedRowEntry {
 }
 
 /** Editor panes that can reload their content (e.g. the entity detail editor). */
+let createWorkspaceDialogFontRuleCreated = false;
+/** UI-29: the New Workspace dialog's form controls inherit the workbench font (Chromium gives buttons Arial). */
+function ensureCreateWorkspaceDialogFontRule(): void {
+	if (createWorkspaceDialogFontRuleCreated) {
+		return;
+	}
+	createWorkspaceDialogFontRuleCreated = true;
+	createCSSRule('.create-workspace-modal-overlay button, .create-workspace-modal-overlay input, .create-workspace-modal-overlay textarea, .create-workspace-modal-overlay select', 'font-family: inherit;');
+}
+
 function isRefreshablePane(pane: unknown): pane is { refresh(): unknown } {
 	return typeof (pane as { refresh?: unknown } | undefined)?.refresh === 'function';
 }
@@ -2584,6 +2595,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const overlay = append(this.containerEl, $('.create-workspace-modal-overlay'));
 		this.createWorkspaceModalOverlay = overlay;
+		// UI-29: buttons, inputs and text boxes use the workbench font (form controls do not inherit it by default)
+		ensureCreateWorkspaceDialogFontRule();
+		overlay.style.fontFamily = 'var(--vscode-font-family)';
 		overlay.style.position = 'fixed';
 		overlay.style.top = '0';
 		overlay.style.left = '0';
@@ -2675,7 +2689,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const wsIdBox = append(row2, $('.form-group'));
 		append(wsIdBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace ID (Ancestor Origin):'));
 		const wsIdInput = append(wsIdBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: inherit; font-weight: 600;'
 		})) as HTMLInputElement;
 		wsIdInput.readOnly = true;
 		wsIdInput.placeholder = 'e.g., ABCD-0000';
@@ -3294,7 +3308,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const typePromptBox = append(modalBody, $('.form-group'));
 		append(typePromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
 		const typePromptInput = append(typePromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;'
 		})) as HTMLTextAreaElement;
 		typePromptInput.value = 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.';
 
@@ -3302,7 +3316,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const ticketPromptBox = append(modalBody, $('.form-group'));
 		append(ticketPromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
 		const ticketPromptInput = append(ticketPromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;'
 		})) as HTMLTextAreaElement;
 		ticketPromptInput.placeholder = 'Optional custom instruction or rules for this specific workspace...';
 
