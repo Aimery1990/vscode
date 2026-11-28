@@ -67,6 +67,7 @@ import { createCSSRule } from '../../../../base/browser/domStylesheets.js';
 import { renderLabelDefinitionsEditor, renderStatusLifecycleMatrix, summarizeCategoryMap } from './workspaceLifecycleEditor.js';
 import { IWorkspacePin, isWorkspacePinned, orderByPins, parseWorkspacePins, pinWorkspace, serializeWorkspacePins, unpinWorkspace, WORKSPACE_PINS_STORAGE_KEY } from '../common/workspacePins.js';
 import { readTicketFileResolved } from './ticketFieldFiles.js';
+import { computeTicketRevealPath, describeRevealHiddenByFilter, WORKSPACES_AUTO_REVEAL_SETTING } from '../common/ticketReveal.js';
 import { buildPrunedTicketTree, describeSearchResult, findExactIdMatch, findMatchRange, GO_TO_TICKET_COMMAND_ID, IPrunedTicketTree, ITicketSearchEntry, ITicketSearchResult, normalizeTicketQuery, searchTickets, splitHighlight, TICKET_SEARCH_DEBOUNCE_MS, TICKET_SEARCH_MIN_QUERY_LENGTH } from '../common/ticketSearch.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
@@ -367,6 +368,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.renderContent();
 			}
 		}));
+		this._registerAutoReveal();
 	}
 
 	async showInExplorer(resourceUri: URI): Promise<void> {
@@ -1115,6 +1117,162 @@ export class MainWorkspaceViewPane extends ViewPane {
 			await this._openTicketEditor(entry.resource, entry.type);
 		}
 		await rendered;
+	}
+
+	// --- UI-36: follow the active editor (like the Explorer's `explorer.autoReveal`) ---
+
+	/** Bumped by every reveal; an older reveal still waiting on the workspace list gives up. */
+	private _autoRevealToken = 0;
+	/** The active editor changed while the view was hidden: reveal once it is shown again. */
+	private _autoRevealPendingOnShow = false;
+	private _revealHintEl?: HTMLElement;
+	private _revealHintTimer: ReturnType<typeof setTimeout> | undefined;
+
+	private _registerAutoReveal(): void {
+		const isOn = () => this.configurationService.getValue<boolean>(WORKSPACES_AUTO_REVEAL_SETTING) !== false;
+		const onEditorChange = () => {
+			if (!isOn()) {
+				return;
+			}
+			if (!this.isBodyVisible()) {
+				this._autoRevealPendingOnShow = true;
+				return;
+			}
+			void this.revealActiveTicket(false);
+		};
+		this._register(this.editorService.onDidActiveEditorChange(onEditorChange));
+		this._register(this.onDidChangeBodyVisibility(visible => {
+			if (visible && this._autoRevealPendingOnShow) {
+				this._autoRevealPendingOnShow = false;
+				if (isOn()) {
+					void this.revealActiveTicket(false);
+				}
+			}
+		}));
+		this._register(this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration(WORKSPACES_AUTO_REVEAL_SETTING) && isOn()) {
+				onEditorChange();
+			}
+		}));
+		this._autoRevealPendingOnShow = isOn(); // the editor restored at start-up
+		this._register(toDisposable(() => this._clearRevealHint()));
+	}
+
+	/** The ticket folder the active editor shows (ticket page, workflow canvas or sub-workflow canvas). */
+	private _getActiveTicketUri(): URI | undefined {
+		const input = this.editorService.activeEditor;
+		if (input instanceof EntityDetailEditorInput) {
+			return input.previewModule ? undefined : input.entityUri; // template / workflow-node previews are not tickets
+		}
+		if (input instanceof WorkflowEditorInput) {
+			return input.workflowUri; // includes SubWorkflowCanvasEditorInput (its ticket folder)
+		}
+		return undefined;
+	}
+
+	/**
+	 * Selects the active editor's ticket in the tree: expands its workspace and ancestors (loading every child along
+	 * the path), highlights the row and scrolls it to the middle if it is off-screen. Never moves keyboard focus.
+	 * Automatic reveals do nothing when the row is selected already and keep a typed filter; `manual` (the Reveal
+	 * Active Ticket command) clears the filter first. A row hidden by the status filter stays hidden: the
+	 * selection is kept and a short inline hint says so. Returns whether a ticket was found for the editor.
+	 */
+	async revealActiveTicket(manual: boolean): Promise<boolean> {
+		const ticketUri = this._getActiveTicketUri();
+		if (!ticketUri) {
+			return false;
+		}
+		const token = ++this._autoRevealToken;
+		try {
+			const workspaces = (await this.workspacesExplorerService.getWorkspaces()).filter(w => !w.isMissing);
+			if (token !== this._autoRevealToken || this._store.isDisposed) {
+				return false;
+			}
+			const path = computeTicketRevealPath(ticketUri, workspaces.map(w => w.uri));
+			if (!path) {
+				return false;
+			}
+			const ws = workspaces[path.workspaceIndex];
+			const wsKey = this.getCanonicalId(ws.id);
+			const ticketKey = this.getCanonicalId(path.ticket);
+			if (!manual && this.selectedItemId === ticketKey && this.selectedItemIds.has(ticketKey)) {
+				return true; // already selected (e.g. the editor was opened by a click on this row): no re-render
+			}
+			if (manual) {
+				this._clearFilter();
+			}
+			const REVEAL_LIMIT = 100000;
+			for (const key of [wsKey, this.getCanonicalId(ws.uri), ...path.ancestors.map(a => this.getCanonicalId(a))]) {
+				this.expandedWorkspaces.add(key);
+				if ((this.nodeVisibleLimitMap.get(key) ?? 0) < REVEAL_LIMIT) {
+					this.nodeVisibleLimitMap.set(key, REVEAL_LIMIT); // the ticket may be past the first page of its level
+				}
+			}
+			this.selectedWorkspaceId = wsKey;
+			this.selectedItemId = ticketKey;
+			this.lastSelectedAnchorId = ticketKey;
+			this.selectedItemIds.clear();
+			this.selectedItemIds.add(ticketKey);
+			this._scrollToSelectionPending = true;
+			this._clearRevealHint();
+			const rendered = this.renderContent();
+			const version = this.renderVersion;
+			await rendered;
+			if (version !== this.renderVersion || token !== this._autoRevealToken || this._store.isDisposed) {
+				return true; // a newer render / reveal took over
+			}
+			if (!this.renderedOrder.some(r => r.canonicalId === ticketKey)) {
+				this._scrollToSelectionPending = false; // do not jump later, when the row shows up for another reason
+				if (!this.filterText && this._hiddenStatusCategories.size > 0) {
+					const label = this.workspacesExplorerService.getMetadataSnapshot(path.ticket)?.ticketId || basename(path.ticket);
+					this._showRevealHint(describeRevealHiddenByFilter(label));
+				}
+			}
+			return true;
+		} catch {
+			return false; // never let a reveal break the view
+		}
+	}
+
+	/** Whether the row is fully visible in every scrolling container between it and the tree box. */
+	private _isRowInView(row: HTMLElement): boolean {
+		const rowRect = row.getBoundingClientRect();
+		for (let el = row.parentElement; el; el = el.parentElement) {
+			if (el.scrollHeight > el.clientHeight) {
+				const box = el.getBoundingClientRect();
+				if (rowRect.top < box.top || rowRect.bottom > box.bottom) {
+					return false;
+				}
+			}
+			if (el === this.treeBoxEl) {
+				break;
+			}
+		}
+		return true;
+	}
+
+	private _showRevealHint(text: string): void {
+		if (!this.containerEl || !this.treeBoxEl) {
+			return;
+		}
+		this._clearRevealHint();
+		const hint = $('div.workspaces-reveal-hint', {
+			style: 'flex-shrink: 0; font-size: 11px; padding: 3px 8px; border-radius: 4px; color: var(--vscode-descriptionForeground); background: var(--vscode-inputValidation-infoBackground, transparent); border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-focusBorder));'
+		}, text);
+		hint.title = `${describeStatusFilter(this._hiddenStatusCategories)}. Use the filter icon in the panel header to show it`;
+		hint.setAttribute('role', 'status');
+		this.containerEl.insertBefore(hint, this.treeBoxEl);
+		this._revealHintEl = hint;
+		this._revealHintTimer = setTimeout(() => this._clearRevealHint(), 6000);
+	}
+
+	private _clearRevealHint(): void {
+		if (this._revealHintTimer) {
+			clearTimeout(this._revealHintTimer);
+			this._revealHintTimer = undefined;
+		}
+		this._revealHintEl?.remove();
+		this._revealHintEl = undefined;
 	}
 
 	/** Opens a ticket the way a click on its row does. */
@@ -1897,7 +2055,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const selectedRow = this.renderedOrder.find(r => r.canonicalId === this.selectedItemId)?.rowEl;
 				if (selectedRow) {
 					this._scrollToSelectionPending = false;
-					selectedRow.scrollIntoView({ block: 'center' });
+					if (!this._isRowInView(selectedRow)) {
+						selectedRow.scrollIntoView({ block: 'center' });
+					}
 				}
 			}
 		}

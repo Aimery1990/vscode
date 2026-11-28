@@ -32,6 +32,10 @@ import { describeTicketLocation, GO_TO_TICKET_COMMAND_ID, ITicketSearchEntry, IT
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { ITicketMentionService, TicketMentionService } from './ticketMentionChips.js';
 import { openSubWorkflowTicketCanvas } from '../../workflowsManager/browser/subWorkflowLiveView.js';
+import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { ActiveEditorContext } from '../../../common/contextkeys.js';
+import { WorkflowEditor } from '../../workflowsManager/browser/workflowEditor.js';
+import { REVEAL_ACTIVE_TICKET_COMMAND_ID, WORKSPACES_AUTO_REVEAL_SETTING } from '../common/ticketReveal.js';
 import { isSubWorkflowTicketType } from '../../customModules/common/subWorkflowType.js';
 
 import {
@@ -328,6 +332,62 @@ registerAction2(class GoToTicketAction extends Action2 {
 			await openSubWorkflowTicketCanvas(editorService, entry.resource, name);
 		} else {
 			await editorService.openEditor(new EntityDetailEditorInput(entry.resource, name), { pinned: true });
+		}
+	}
+});
+
+// UI-36: the Workspaces tree follows the active ticket editor (like the Explorer's `explorer.autoReveal`).
+Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
+	id: 'anyagentWorkspaces',
+	title: localize('anyagentWorkspacesConfigurationTitle', "AnyAgent Workspaces"),
+	type: 'object',
+	properties: {
+		[WORKSPACES_AUTO_REVEAL_SETTING]: {
+			type: 'boolean',
+			default: true,
+			description: localize('anyagentWorkspacesAutoReveal', "Reveal and select the active ticket in the Workspaces tree")
+		}
+	}
+});
+
+// `activeEditor` is the editor pane id; the workflow pane also shows Sub-Workflow canvases (a WorkflowEditorInput)
+const activeTicketEditorContext = ContextKeyExpr.or(
+	ActiveEditorContext.isEqualTo(EntityDetailEditor.ID),
+	ActiveEditorContext.isEqualTo(WorkflowEditor.ID)
+);
+
+registerAction2(class RevealActiveTicketAction extends Action2 {
+	constructor() {
+		super({
+			id: REVEAL_ACTIVE_TICKET_COMMAND_ID,
+			title: localize2('revealActiveTicket', "Reveal Active Ticket in Workspaces"),
+			tooltip: localize('revealActiveTicketTooltip', "Reveal and select the ticket of the active editor in the Workspaces tree"),
+			category: localize2('anyAgentCategory', "AnyAgent"),
+			icon: Codicon.target,
+			f1: true,
+			menu: [{
+				id: MenuId.ViewTitle,
+				when: ContextKeyExpr.equals('view', WORKSPACE_PANE_VIEW_ID),
+				group: 'navigation',
+				order: 3
+			}, {
+				id: MenuId.EditorTitle,
+				when: activeTicketEditorContext,
+				group: 'navigation',
+				order: 100
+			}]
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const viewsService = accessor.get(IViewsService);
+		const notificationService = accessor.get(INotificationService);
+		const pane = await viewsService.openView(WORKSPACE_PANE_VIEW_ID, false);
+		if (!(pane instanceof MainWorkspaceViewPane)) {
+			return;
+		}
+		if (!await pane.revealActiveTicket(true)) {
+			notificationService.info(localize('revealActiveTicketNone', "The active editor does not show a ticket of a workspace in the Workspaces tree."));
 		}
 	}
 });
