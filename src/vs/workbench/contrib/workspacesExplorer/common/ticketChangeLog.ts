@@ -101,6 +101,8 @@ const TICKET_MD_STANDARD_FIELDS: ReadonlyMap<string, string> = new Map([
 	['Labels', 'labels'],
 	['Current AI Agent', 'current_ai_agent'],
 	['Link To', 'link_to'],
+	['Depends On', 'depends_on'],
+	['Update Status From Dependencies', 'update_status_from_dependencies'],
 ]);
 
 export const CUSTOM_FIELD_ID_PREFIX = 'custom:';

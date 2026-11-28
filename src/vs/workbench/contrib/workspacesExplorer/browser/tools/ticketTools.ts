@@ -431,7 +431,7 @@ export class ManageLinksTool implements IToolImpl {
 			toolReferenceName: 'manageLinks',
 			displayName: localize('ticket.tool.links.displayName', "Manage Ticket Links"),
 			userDescription: localize('ticket.tool.links.userDescription', "Batch manage bi-directional links between tickets"),
-			modelDescription: 'Batch manage bi-directional links between tickets. Supports 1-to-N, N-to-1, and N-to-M link/unlink operations, validates active status (non-REMOVED), atomically updates Link To / Linked By on both sides, and synchronizes the transaction worklog.md across all involved tickets.',
+			modelDescription: 'Batch manage bi-directional links between tickets. Supports 1-to-N, N-to-1, and N-to-M link/unlink operations, validates active status (non-REMOVED), atomically updates Link To / Linked By on both sides, and synchronizes the transaction worklog.md across all involved tickets. With link_type \'depends_on\' it edits the sources\' Depends On list instead: a ticket\'s status (and Result field) then follows the run outcomes of the tickets it depends on (all succeeded -> its "on successful run" status, default Done; any failed -> its "on failed run" status, default Blocked).',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.link,
@@ -446,6 +446,15 @@ export class ManageLinksTool implements IToolImpl {
 						type: 'array',
 						items: { type: 'string' },
 						description: 'List of source ticket IDs initiating or modifying the links (e.g. [\'FNDJ1-0001\']).'
+					},
+					link_type: {
+						type: 'string',
+						enum: ['link', 'depends_on'],
+						description: '\'link\' (default): Link To / Linked By. \'depends_on\': the source tickets depend on the targets (their Depends On list; add / remove / set).'
+					},
+					update_status_from_dependencies: {
+						type: 'boolean',
+						description: 'Only with link_type \'depends_on\': whether the source tickets\' status follows their dependencies (default on).'
 					},
 					action: {
 						type: 'string',
@@ -496,7 +505,9 @@ export class ManageLinksTool implements IToolImpl {
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
 			const res = await this.ticketEngine.manageLinks(invocation.parameters as IManageLinksToolOptions);
-			return toolResult(res, `Bi-directional links updated: action '${res.action}' synchronized across ${res.synchronized_tickets_count} ticket(s).`);
+			return toolResult(res, (res as { link_type?: string }).link_type === 'depends_on'
+				? `Depends On updated: action '${res.action}' on ${res.synchronized_tickets_count} ticket(s).`
+				: `Bi-directional links updated: action '${res.action}' synchronized across ${res.synchronized_tickets_count} ticket(s).`);
 		} catch (err) {
 			return toolError(errorText(err));
 		}

@@ -8,11 +8,13 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { ICustomModule } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../../workspacesExplorer/common/workspacesExplorer.js';
-import { findTemplateForType } from '../../workspacesExplorer/common/ticketStatusPicker.js';
+import { findTemplateForType, ITemplateStatusLike } from '../../workspacesExplorer/common/ticketStatusPicker.js';
 import { readTicketStatus, readTopLevelMetadata } from '../../workspacesExplorer/common/workspaceLifecycle.js';
 import { readTicketFileResolvedIfExists } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { parseTicketChangeRecords, TICKET_CHANGE_RECORDS_HEADING } from '../../workspacesExplorer/common/ticketChangeLog.js';
+import { isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { getTicketDependencyUpdater } from './ticketDependencyUpdater.js';
 import { decideStatusAfterRun, FAILED_RUN_STATUS_SETTING_KEY, hasStatusChangeSince, RUN_STATUS_SETTING_KEY, RunOutcome, RunStatusDecision } from '../common/runCompletionStatus.js';
 
 /**
@@ -134,6 +136,33 @@ async function workflowSettings(fileService: IFileService, workflowFolder: URI, 
 	return { success: pick(RUN_STATUS_SETTING_KEY, template?.statusOnSuccessfulRun), failure: pick(FAILED_RUN_STATUS_SETTING_KEY, template?.statusOnFailedRun) };
 }
 
+/** The CI-58 settings of a ticket and what resolving them needs. */
+export interface ITicketStatusSettings {
+	readonly success: unknown;
+	readonly failure: unknown;
+	readonly templateStatuses?: readonly ITemplateStatusLike[];
+	readonly lifecycle?: IWorkspaceStatusesInfo;
+}
+
+/**
+ * The "status after a run" settings of any ticket (used by the dependency updates, CI-59): a Freestyle ticket's own
+ * structure, a workflow's flowchart (then its template), else its template.
+ */
+export async function loadTicketStatusSettings(deps: IRunCompletionStatusDeps, ticketFolder: URI, ticketMd: string): Promise<ITicketStatusSettings> {
+	const type = readTopLevelMetadata(ticketMd, 'Ticket Type') || readTopLevelMetadata(ticketMd, 'Type');
+	const lifecycle = await workspaceLifecycleOf(deps, ticketFolder);
+	if (isFreestyleTicketType(type)) {
+		const schema = await readFreestyleSchema(deps.fileService, ticketFolder).catch(() => undefined);
+		return { success: schema?.statusOnSuccessfulRun, failure: schema?.statusOnFailedRun, templateStatuses: schema?.statuses, lifecycle };
+	}
+	const template = await templateOfType(deps, ticketFolder, type);
+	if ((type || '').toLowerCase() === 'workflow') {
+		const settings = await workflowSettings(deps.fileService, ticketFolder, template);
+		return { ...settings, templateStatuses: template?.statuses, lifecycle };
+	}
+	return { success: template?.statusOnSuccessfulRun, failure: template?.statusOnFailedRun, templateStatuses: template?.statuses, lifecycle };
+}
+
 /**
  * At the end of a workflow run: moves the workflow ticket to its "on successful run" status (Done by default) or "on
  * failed run" status (Blocked by default) through the normal status writer, recorded as the Workflow (CI-50). A
@@ -144,8 +173,10 @@ export async function applyStatusAfterWorkflowRun(deps: IRunCompletionStatusDeps
 	if (outcome === 'stopped') {
 		return 'Status after run: not changed (the run was stopped).';
 	}
+	const folder = typeof workflowUri === 'string' ? URI.parse(workflowUri) : workflowUri;
+	// CI-59: the tickets depending on this workflow follow its outcome (queued, after the status below is written)
+	const notifyDependents = () => void getTicketDependencyUpdater(deps).onOutcome(folder, { status: outcome === 'success' ? 'success' : 'failed', at: Date.now(), source: 'workflow' });
 	try {
-		const folder = typeof workflowUri === 'string' ? URI.parse(workflowUri) : workflowUri;
 		const text = await readTicketMd(deps.fileService, folder);
 		if (text === undefined) {
 			return 'Status after run: no ticket.md for this workflow, status not changed.';
@@ -169,5 +200,7 @@ export async function applyStatusAfterWorkflowRun(deps: IRunCompletionStatusDeps
 	} catch (err) {
 		deps.logService.warn('[RunCompletionStatus] Failed to set the status after the workflow run:', err);
 		return `Status after run: not changed (error: ${err?.message || String(err)}).`;
+	} finally {
+		notifyDependents();
 	}
 }

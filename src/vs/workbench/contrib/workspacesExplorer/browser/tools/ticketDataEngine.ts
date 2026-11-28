@@ -25,6 +25,8 @@ import { coerceTicketLabelsInput, hasTicketLabel, isDefinedLabel, ITicketLabelDe
 import { readTicketLabels, setTicketLabelsLine } from '../../common/workspaceLifecycle.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { expandHomePath, getAnyAgentGlobalFolders, getRetiredGlobalWorkspaceCode, getRetiredGlobalWorkspaceMessage } from '../../../customModules/common/anyagentGlobalPaths.js';
+import { parseDependsOn, readDependsOn, setDependsOnLine, setFollowDependenciesLine } from '../../common/ticketDependencies.js';
+import { invalidateTicketDependencyIndex } from '../../../workflowsManager/browser/ticketDependencyUpdater.js';
 
 /** Loosely-typed JSON object (tool parameters, parsed ticket values). */
 type IJsonObject = { [key: string]: unknown };
@@ -112,6 +114,10 @@ export interface IManageLinksToolOptions {
 	action: 'add_links' | 'remove_links' | 'set_links';
 	target_ticket_ids: string[];
 	worklog_record: IWorklogRecord;
+	/** `link` (default): Link To / Linked By. `depends_on` (CI-59): the sources' Depends On lists. */
+	link_type?: 'link' | 'depends_on';
+	/** depends_on only: the sources' "Update status from dependencies" switch (default on). */
+	update_status_from_dependencies?: boolean;
 }
 
 export interface IGetTicketHistoryToolOptions {
@@ -1507,6 +1513,10 @@ export class TicketDataEngine {
 
 		const involvedTicketPaths: ITicketResolvedPaths[] = [];
 
+		if (options.link_type === 'depends_on') {
+			return this._manageDependsOn(wsUri, options);
+		}
+
 		for (const srcId of options.source_ticket_ids) {
 			const srcPaths = await this.resolveTicketPaths(wsUri, srcId);
 			if (!srcPaths) { continue; }
@@ -1569,6 +1579,47 @@ export class TicketDataEngine {
 			sources: options.source_ticket_ids,
 			targets: options.target_ticket_ids,
 			synchronized_tickets_count: involvedTicketPaths.length
+		};
+	}
+
+	/** anyagent_manage_links with link_type `depends_on` (CI-59): edits the sources' Depends On (no reverse field). */
+	private async _manageDependsOn(wsUri: URI, options: IManageLinksToolOptions) {
+		const targets = parseDependsOn(options.target_ticket_ids.join(', '));
+		const updated: { ticket_id: string; depends_on: string[] }[] = [];
+		for (const srcId of options.source_ticket_ids) {
+			const srcPaths = await this.resolveTicketPaths(wsUri, srcId);
+			if (!srcPaths) { continue; }
+			const content = await readTicketFileResolved(this.fileService, srcPaths.ticketMdUri);
+			let list = readDependsOn(content);
+			if (options.action === 'add_links') {
+				for (const t of targets) { if (!list.includes(t)) { list.push(t); } }
+			} else if (options.action === 'remove_links') {
+				list = list.filter(id => !targets.includes(id));
+			} else {
+				list = [...targets];
+			}
+			list = list.filter(id => id !== srcPaths.ticketId.toUpperCase());
+			let next = setDependsOnLine(content, list);
+			if (typeof options.update_status_from_dependencies === 'boolean') {
+				next = setFollowDependenciesLine(next, options.update_status_from_dependencies);
+			}
+			if (next !== content) {
+				await writeTicketFile(this.fileService, srcPaths.ticketMdUri, next, 'AI Agent');
+			}
+			if (options.worklog_record) {
+				await this.appendWorklog(srcPaths.worklogMdUri, options.worklog_record);
+			}
+			updated.push({ ticket_id: srcPaths.ticketId, depends_on: list });
+		}
+		invalidateTicketDependencyIndex(this.fileService);
+		return {
+			success: true,
+			action: options.action,
+			link_type: 'depends_on',
+			sources: options.source_ticket_ids,
+			targets,
+			updated,
+			synchronized_tickets_count: updated.length
 		};
 	}
 

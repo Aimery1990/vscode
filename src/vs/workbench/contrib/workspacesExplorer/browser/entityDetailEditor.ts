@@ -36,7 +36,10 @@ import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialSe
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
-import { ensureThemedControlRules, openWorkspaceLifecycleDialog, THEMED_DESCRIPTION_COLOR, THEMED_MENU_COLORS, themedOverlayHost } from './workspaceLifecycleEditor.js';
+import { ensureThemedControlRules, openWorkspaceLifecycleDialog, THEMED_DESCRIPTION_COLOR, THEMED_INPUT_COLORS, THEMED_MENU_COLORS, THEMED_PRIMARY_BUTTON_COLORS, THEMED_SECONDARY_BUTTON_COLORS, themedOverlayHost } from './workspaceLifecycleEditor.js';
+import { DEPENDS_ON_FIELD_KEY, FOLLOW_DEPENDENCIES_FIELD_KEY, parseDependsOn, setDependsOnLine, setFollowDependenciesLine } from '../common/ticketDependencies.js';
+import { readTopLevelMetadata } from '../common/workspaceLifecycle.js';
+import { invalidateTicketDependencyIndex } from '../../workflowsManager/browser/ticketDependencyUpdater.js';
 import { buildPriorityOptions, getPriorityColor, groupStatusOptions, ITemplateStatusLike, resolveEffectiveStatusOptions } from '../common/ticketStatusPicker.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
 import { checkTicketAttachments, readTicketAttachmentManifest, withTicketAttachmentChange } from './ticketAttachmentIntegrity.js';
@@ -5302,6 +5305,113 @@ export class EntityDetailEditor extends EditorPane {
 				}
 			})
 		);
+	}
+
+	/**
+	 * Ticket page sidebar: Depends On (CI-59). The IDs show as mention chips (UI-31, applied by the page's mention
+	 * controller); the edit button opens a small editor for the list and the "Update status from dependencies" switch.
+	 */
+	private _buildDependsOnSidebarRow(data: IParsedTicketData): HTMLElement {
+		const ids = parseDependsOn(data.metadata?.[DEPENDS_ON_FIELD_KEY]);
+		const follow = !['off', 'false', 'no', '0'].includes((data.metadata?.[FOLLOW_DEPENDENCIES_FIELD_KEY] || '').trim().toLowerCase());
+		const editBtn = $<HTMLButtonElement>('button.ticket-depends-on-edit-btn', { type: 'button', title: 'Edit Depends On', 'aria-label': 'Edit Depends On', style: 'background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; padding: 2px; border-radius: 4px;' },
+			$('span' + ThemeIcon.asCSSSelector(Codicon.edit), { style: 'font-size: 12px; pointer-events: none;' })
+		);
+		editBtn.onclick = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._showDependsOnEditor(editBtn, ids, follow);
+		};
+		const value = ids.length === 0
+			? $('span', { style: `font-size: 0.82em; opacity: 0.6; font-style: italic; ${THEMED_DESCRIPTION_COLOR}` }, 'None')
+			: $('span.ticket-depends-on-ids', { style: 'font-size: 0.85em; line-height: 1.9;' }, ids.join(', '));
+		return $('div.sidebar-row.ticket-depends-on-row', undefined,
+			$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
+				$('span.sidebar-label', { title: 'When the tickets this one depends on get a new run outcome, this ticket\'s status (and Result) follows: all succeeded → its "on successful run" status, any failed → its "on failed run" status' }, 'DEPENDS ON'),
+				editBtn
+			),
+			$('div', { style: 'padding: 2px 0;' }, value),
+			...(ids.length > 0 ? [$('div', { style: `font-size: 0.78em; ${THEMED_DESCRIPTION_COLOR}` }, follow ? 'Status follows these tickets\' runs' : 'Status does not follow these tickets (off)')] : [])
+		);
+	}
+
+	/** The Depends On editor under `anchor`: an ID list and the follow switch; Save writes ticket.md (CI-50: User). */
+	private _closeDependsOnEditor: (() => void) | undefined;
+
+	private _showDependsOnEditor(anchor: HTMLElement, ids: readonly string[], follow: boolean): void {
+		const doc = mainWindow.document;
+		this._closeDependsOnEditor?.();
+		const rect = anchor.getBoundingClientRect();
+		const width = 280;
+		const left = Math.max(8, Math.min(Math.round(rect.right - width), mainWindow.innerWidth - width - 8));
+		const input = $<HTMLInputElement>('input.anyag-themed-input', { type: 'text', value: ids.join(', '), placeholder: 'e.g. ANYAG-0120, ANYAG-0122', 'aria-label': 'Ticket IDs this ticket depends on', style: `width: 100%; box-sizing: border-box; padding: 4px 6px; border-radius: 4px; font-size: 12px; ${THEMED_INPUT_COLORS}` });
+		input.value = ids.join(', ');
+		const followBox = $<HTMLInputElement>('input', { type: 'checkbox', 'aria-label': 'Update status from dependencies' });
+		followBox.checked = follow;
+		const iconButton = (icon: ThemeIcon, title: string, primary: boolean) => $<HTMLButtonElement>(`button.${primary ? 'anyag-btn-primary' : 'anyag-btn-secondary'}`, { type: 'button', title, 'aria-label': title, style: `display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 24px; padding: 0; border-radius: 4px; cursor: pointer; ${primary ? THEMED_PRIMARY_BUTTON_COLORS : THEMED_SECONDARY_BUTTON_COLORS}` },
+			$('span' + ThemeIcon.asCSSSelector(icon), { style: 'font-size: 13px; pointer-events: none;' })
+		);
+		const saveBtn = iconButton(Codicon.check, 'Save Depends On', true);
+		const cancelBtn = iconButton(Codicon.close, 'Cancel', false);
+		const editor = $('div.ticket-depends-on-editor', { role: 'dialog', 'aria-label': 'Depends On', style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${left}px; width: ${width}px; z-index: 10000; box-sizing: border-box; padding: 10px; display: flex; flex-direction: column; gap: 8px; border-radius: 8px; font-size: 12px; ${THEMED_MENU_COLORS}` },
+			$('div', { style: 'font-weight: 600;' }, 'Depends On'),
+			input,
+			$('label', { style: 'display: flex; align-items: center; gap: 6px; cursor: pointer;', title: 'All dependencies succeeded → the "on successful run" status (default Done); any failed → the "on failed run" status (default Blocked); a Result field becomes Pass / Fail' }, followBox, $('span', undefined, 'Update status from dependencies')),
+			$('div', { style: 'display: flex; justify-content: flex-end; gap: 6px;' }, cancelBtn, saveBtn)
+		);
+		const close = () => {
+			if (this._closeDependsOnEditor === close) {
+				this._closeDependsOnEditor = undefined;
+			}
+			doc.removeEventListener('mousedown', onOutside, true);
+			editor.remove();
+		};
+		this._closeDependsOnEditor = close;
+		const onOutside = (e: MouseEvent) => {
+			if (!editor.contains(e.target as Node) && !anchor.contains(e.target as Node)) {
+				close();
+			}
+		};
+		const save = async () => {
+			const ownId = (this._lastParsedData?.ticketId || '').toUpperCase();
+			const next = parseDependsOn(input.value).filter(id => id !== ownId);
+			close();
+			const target = this._ticketFileUri;
+			if (!target) {
+				return;
+			}
+			try {
+				const content = await this._safeReadFile(target);
+				let updated = setDependsOnLine(content, next);
+				if (next.length > 0 || readTopLevelMetadata(content, FOLLOW_DEPENDENCIES_FIELD_KEY) !== undefined || !followBox.checked) {
+					updated = setFollowDependenciesLine(updated, followBox.checked);
+				}
+				if (updated !== content) {
+					await writeTicketFile(this._fileService, target, updated, 'User');
+					invalidateTicketDependencyIndex(this._fileService);
+				}
+				await this._resolvePathsAndLoadData();
+			} catch (err) {
+				this._notificationService.error(`Failed to save Depends On: ${(err as Error | undefined)?.message || err}`);
+			}
+		};
+		saveBtn.onclick = () => { void save(); };
+		cancelBtn.onclick = () => close();
+		editor.onkeydown = (e) => {
+			e.stopPropagation();
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				close();
+				anchor.focus();
+			} else if (e.key === 'Enter' && e.target === input) {
+				e.preventDefault();
+				void save();
+			}
+		};
+		ensureThemedControlRules();
+		themedOverlayHost(anchor).appendChild(editor);
+		doc.addEventListener('mousedown', onOutside, true);
+		input.focus();
 	}
 
 	private _buildLabelsSidebarRow(data: IParsedTicketData): HTMLElement {
@@ -24027,6 +24137,7 @@ ${interpolatedPrompt}`;
 						)
 					),
 					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildLabelsSidebarRow(data)] : []),
+					...(!isAgent && !this._isPreviewMode && (data.ticketType || '').toLowerCase() !== 'workspace' ? [this._buildDependsOnSidebarRow(data)] : []),
 					...(this._isFreestyleStructureEditable() ? [this._buildRunStatusSidebarRow()] : []),
 					...(isAgent ? [
 						$('div.sidebar-row', undefined,

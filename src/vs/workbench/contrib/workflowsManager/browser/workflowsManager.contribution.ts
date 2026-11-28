@@ -43,6 +43,7 @@ import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase 
 import './tools/workflowTools.contribution.js';
 import './subWorkflowLiveView.js';
 import './restoreTabsPrompt.js';
+import './ticketDependencyWatcher.js';
 
 export const WORKFLOWS_MANAGER_VIEWLET_ID = 'workbench.view.workflowsManager';
 

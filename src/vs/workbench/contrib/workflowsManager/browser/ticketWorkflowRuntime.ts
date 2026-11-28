@@ -28,6 +28,7 @@ import { writeTicketFile } from '../../workspacesExplorer/browser/ticketChangeRe
 import { checkTicketAttachments, withTicketAttachmentChange } from '../../workspacesExplorer/browser/ticketAttachmentIntegrity.js';
 import { readTicketFileResolved, ticketFolderOfFile } from '../../workspacesExplorer/browser/ticketFieldFiles.js';
 import { decideTicketRunStatus } from './runCompletionStatus.js';
+import { getTicketDependencyUpdater } from './ticketDependencyUpdater.js';
 import { ITicketChangeActor } from '../../workspacesExplorer/common/ticketChangeLog.js';
 import { ticketLastRunRecordFromSteps, writeTicketLastRunRecord } from '../../workspacesExplorer/common/ticketFailure.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -3386,6 +3387,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const statusToWrite = explicitStatus || (statusDecision.action === 'set' ? statusDecision.status : undefined);
 			this.logService.info(`[TicketWorkflowRuntime] Status after run of '${ticketResult.ticketId}': ${statusToWrite ? `'${statusToWrite}'` : 'not changed'} (${explicitStatus ? 'set by a step of the run' : statusDecision.reason})`);
 			await this._persistExecutionState(ticketUri, ticketResult, customMetadata, finalOutput, executionStatus, runActor, statusToWrite);
+			if (!stoppedByUser) {
+				// CI-59: the tickets depending on this one follow its new outcome (queued, not awaited)
+				void getTicketDependencyUpdater({ fileService: this.fileService, workspacesExplorerService: this.workspacesExplorerService, customModulesService: this.customModulesService, logService: this.logService }).onOutcome(ticketFolder);
+			}
 
 			const totalDuration = Date.now() - startTime;
 			this.logService.info(`[TicketWorkflowRuntime] Finished running ticket '${ticketResult.ticketId}' in ${totalDuration}ms (status: ${executionStatus})`);
