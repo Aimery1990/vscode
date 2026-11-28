@@ -35,7 +35,7 @@ import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialSe
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { getLabelColor, hasTicketLabel, isDefinedLabel, parseTicketLabels, TICKET_LABELS_FIELD_KEY, toggleTicketLabel } from '../common/ticketLabels.js';
-import { openWorkspaceLifecycleDialog } from './workspaceLifecycleEditor.js';
+import { ensureThemedControlRules, openWorkspaceLifecycleDialog, THEMED_DESCRIPTION_COLOR, THEMED_MENU_COLORS, themedOverlayHost } from './workspaceLifecycleEditor.js';
 import { buildPriorityOptions, getPriorityColor, groupStatusOptions, ITemplateStatusLike, resolveEffectiveStatusOptions } from '../common/ticketStatusPicker.js';
 import { writeTicketFile } from './ticketChangeRecorder.js';
 import { checkTicketAttachments, readTicketAttachmentManifest, withTicketAttachmentChange } from './ticketAttachmentIntegrity.js';
@@ -5097,7 +5097,8 @@ export class EntityDetailEditor extends EditorPane {
 			notificationService: this._notificationService,
 			workspaceUri: wsRoot,
 			workspaceName: basename(wsRoot),
-			onSaved: () => { this._resolvePathsAndLoadData(); }
+			onSaved: () => { this._resolvePathsAndLoadData(); },
+			anchor: this._container
 		});
 	}
 
@@ -5134,7 +5135,7 @@ export class EntityDetailEditor extends EditorPane {
 		const defs = this._workspaceStatuses?.labels || [];
 		let selected = [...current];
 		const rect = anchor.getBoundingClientRect();
-		const picker = this._labelsPicker = $('div.ticket-labels-picker', { style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${Math.max(8, Math.round(rect.right - 220))}px; width: 220px; max-height: 320px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); color: var(--vscode-editor-foreground); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.6); z-index: 10000; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px;` });
+		const picker = this._labelsPicker = $('div.ticket-labels-picker', { style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${Math.max(8, Math.round(rect.right - 220))}px; width: 220px; max-height: 320px; overflow-y: auto; ${THEMED_MENU_COLORS} border-radius: 8px; z-index: 10000; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px;` });
 		const close = () => {
 			doc.removeEventListener('mousedown', onOutside, true);
 			doc.removeEventListener('keydown', onKey, true);
@@ -5165,14 +5166,14 @@ export class EntityDetailEditor extends EditorPane {
 		const names = [...defs.map(d => d.name), ...current.filter(l => !isDefinedLabel(defs, l))];
 		const render = () => {
 			clearNode(picker);
-			append(picker, $('div', { style: 'font-size: 10.5px; opacity: 0.6; padding: 2px 6px 4px; text-transform: uppercase; letter-spacing: 0.04em;' }, 'Labels'));
+			append(picker, $('div', { style: `font-size: 10.5px; padding: 2px 6px 4px; text-transform: uppercase; letter-spacing: 0.04em; ${THEMED_DESCRIPTION_COLOR}` }, 'Labels'));
 			if (names.length === 0) {
-				append(picker, $('div', { style: 'font-size: 11px; opacity: 0.6; padding: 4px 6px; line-height: 1.4;' }, 'This workspace has no labels yet.'));
+				append(picker, $('div', { style: `font-size: 11px; padding: 4px 6px; line-height: 1.4; ${THEMED_DESCRIPTION_COLOR}` }, 'This workspace has no labels yet.'));
 			}
 			for (const name of names) {
 				const color = getLabelColor(defs, name);
 				const isOn = hasTicketLabel(selected, name);
-				const item = append(picker, $('div', { role: 'menuitemcheckbox', title: isDefinedLabel(defs, name) ? name : `${name} (not defined in this workspace)`, style: `display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer;${isOn ? ' background: rgba(255,255,255,0.06);' : ''}` },
+				const item = append(picker, $('div.anyag-menu-row', { role: 'menuitemcheckbox', title: isDefinedLabel(defs, name) ? name : `${name} (not defined in this workspace)`, style: `display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer;${isOn ? ' background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.16));' : ''}` },
 					$('span' + ThemeIcon.asCSSSelector(Codicon.check), { style: `font-size: 12px; width: 14px; visibility: ${isOn ? 'visible' : 'hidden'};` }),
 					$('span', { style: `width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: ${color};` }),
 					$('span', { style: 'flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, name)
@@ -5185,7 +5186,7 @@ export class EntityDetailEditor extends EditorPane {
 					await save();
 				};
 			}
-			const manage = append(picker, $('div', { title: 'Edit the workspace labels and status lifecycle', style: 'display: flex; align-items: center; gap: 7px; padding: 5px 6px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.08); cursor: pointer; opacity: 0.8;' },
+			const manage = append(picker, $('div.anyag-menu-row', { role: 'menuitem', title: 'Edit the workspace labels and status lifecycle', style: 'display: flex; align-items: center; gap: 7px; padding: 5px 6px; margin-top: 4px; border-top: 1px solid var(--vscode-menu-separatorBackground, var(--vscode-widget-border, rgba(128, 128, 128, 0.35))); border-radius: 0 0 5px 5px; cursor: pointer; color: var(--vscode-textLink-foreground, var(--vscode-foreground));' },
 				$('span' + ThemeIcon.asCSSSelector(Codicon.settingsGear), { style: 'font-size: 12px; width: 14px;' }),
 				$('span', undefined, 'Manage workspace labels...')
 			));
@@ -5196,7 +5197,8 @@ export class EntityDetailEditor extends EditorPane {
 			};
 		};
 		render();
-		doc.body.appendChild(picker);
+		ensureThemedControlRules();
+		themedOverlayHost(anchor).appendChild(picker);
 		doc.addEventListener('mousedown', onOutside, true);
 		doc.addEventListener('keydown', onKey, true);
 	}
@@ -5303,7 +5305,7 @@ export class EntityDetailEditor extends EditorPane {
 		const rect = anchor.getBoundingClientRect();
 		const width = 220;
 		const left = Math.max(8, Math.min(Math.round(rect.left), mainWindow.innerWidth - width - 8));
-		const picker = $('div.ticket-attribute-picker', { role: 'menu', 'aria-label': title, style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${left}px; width: ${width}px; max-height: 360px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); color: var(--vscode-editor-foreground); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.6); z-index: 10000; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px;` });
+		const picker = $('div.ticket-attribute-picker', { role: 'menu', 'aria-label': title, style: `position: fixed; top: ${Math.round(rect.bottom + 4)}px; left: ${left}px; width: ${width}px; max-height: 360px; overflow-y: auto; ${THEMED_MENU_COLORS} border-radius: 8px; z-index: 10000; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px;` });
 		const items: HTMLElement[] = [];
 		const close = (restoreFocus: boolean) => {
 			doc.removeEventListener('mousedown', onOutside, true);
@@ -5351,13 +5353,13 @@ export class EntityDetailEditor extends EditorPane {
 				items[idx].click();
 			}
 		};
-		append(picker, $('div', { style: 'font-size: 10.5px; opacity: 0.6; padding: 2px 6px 4px; text-transform: uppercase; letter-spacing: 0.04em;' }, title));
+		append(picker, $('div', { style: `font-size: 10.5px; padding: 2px 6px 4px; text-transform: uppercase; letter-spacing: 0.04em; ${THEMED_DESCRIPTION_COLOR}` }, title));
 		for (const group of groups) {
 			if (group.header) {
 				append(picker, $('div', { style: `font-size: 10px; font-weight: 700; color: ${group.headerColor || 'inherit'}; padding: 5px 6px 2px; text-transform: uppercase; letter-spacing: 0.04em;` }, group.header));
 			}
 			for (const option of group.items) {
-				const item = append(picker, $('div', { role: 'menuitemradio', 'aria-checked': option.isCurrent ? 'true' : 'false', tabindex: '-1', title: option.title, style: `display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer; outline-offset: -1px;${option.isCurrent ? ' background: rgba(255,255,255,0.06);' : ''}` },
+				const item = append(picker, $('div.anyag-menu-row', { role: 'menuitemradio', 'aria-checked': option.isCurrent ? 'true' : 'false', tabindex: '-1', title: option.title, style: `display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer; outline-offset: -1px;${option.isCurrent ? ' background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.16));' : ''}` },
 					$('span' + ThemeIcon.asCSSSelector(Codicon.check), { style: `font-size: 12px; width: 14px; visibility: ${option.isCurrent ? 'visible' : 'hidden'};` }),
 					$('span', { style: `width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: ${option.color};` }),
 					$('span', { style: `flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;${option.isCurrent ? ' font-weight: 700;' : ''}` }, option.value)
@@ -5371,7 +5373,8 @@ export class EntityDetailEditor extends EditorPane {
 				items.push(item);
 			}
 		}
-		doc.body.appendChild(picker);
+		ensureThemedControlRules();
+		themedOverlayHost(anchor).appendChild(picker);
 		this._attributePicker = { anchor, close };
 		doc.addEventListener('mousedown', onOutside, true);
 		doc.addEventListener('keydown', onKey, true);
