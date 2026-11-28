@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { join } from '../../../../../base/common/path.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { runGitCommand } from '../../../../../platform/git/node/gitCommandRunner.js';
+import { GIT_NON_INTERACTIVE_ENV, runGitCommand } from '../../../../../platform/git/node/gitCommandRunner.js';
 import { IGitRunResult } from '../../../entityPersistence/common/entityPersistence.js';
 import { GitExecutor, IGitComponentConfig, buildGitPlan, runGitPlan } from '../../common/gitComponent.js';
 
@@ -116,5 +116,43 @@ suite('git component (real git, temp repository)', function () {
 		const res = await runGitCommand(['ls-remote', 'https://127.0.0.1:9/none.git'], { cwd: repo, timeoutMs: 20_000 });
 		assert.notStrictEqual(res.exitCode, 0);
 		assert.strictEqual(res.timedOut, false);
+	});
+
+	test('never prompts: an inherited GIT_ASKPASS / SSH_ASKPASS / core.askPass is not used (CI-65)', async () => {
+		assert.strictEqual(GIT_NON_INTERACTIVE_ENV.GIT_ASKPASS, '');
+		await run({ gitCommand: 'custom', gitCustomArgs: 'init -b main' });
+		// A remote that asks for a user name and password
+		const http = await import('http');
+		const server = http.createServer((_req, res) => {
+			res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="test"' });
+			res.end();
+		});
+		await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
+		const port = (server.address() as { port: number }).port;
+		// An askpass program that would wait for a person (like an editor's password dialog)
+		const marker = join(root, 'askpass-called');
+		const askpass = join(root, 'askpass.sh');
+		fs.writeFileSync(askpass, `#!/bin/sh\necho called >> '${marker}'\nsleep 30\necho secret\n`, { mode: 0o755 });
+		await runGitCommand(['config', 'core.askPass', askpass], { cwd: repo });
+		const saved = { GIT_ASKPASS: process.env['GIT_ASKPASS'], SSH_ASKPASS: process.env['SSH_ASKPASS'] };
+		process.env['GIT_ASKPASS'] = askpass;
+		process.env['SSH_ASKPASS'] = askpass;
+		try {
+			const res = await runGitCommand(['ls-remote', `http://127.0.0.1:${port}/x.git`], { cwd: repo, timeoutMs: 20_000 });
+			assert.notStrictEqual(res.exitCode, 0);
+			assert.strictEqual(res.timedOut, false);
+			assert.match(res.stderr, /terminal prompts disabled|could not read Username/i);
+			assert.ok(res.durationMs < 10_000, `took ${res.durationMs} ms`);
+			assert.strictEqual(fs.existsSync(marker), false, 'the askpass program was started');
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) {
+					delete process.env[key];
+				} else {
+					process.env[key] = value;
+				}
+			}
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
 	});
 });

@@ -9,6 +9,9 @@ import { IRunningProcessCommand, PROCESS_EXEC_DEFAULT_MAX_OUTPUT_BYTES, PROCESS_
  * Runs one git command for the AnyAgent `git` component (CI-24). The arguments are an argv array passed to spawn
  * without a shell, so no value can inject shell syntax. The process never waits for a person:
  * - GIT_TERMINAL_PROMPT=0 (git does not ask for credentials), GCM_INTERACTIVE=never, SSH_ASKPASS_REQUIRE=never;
+ * - GIT_ASKPASS set to an empty value (CI-65): git then uses no askpass program at all (not core.askPass, not
+ *   SSH_ASKPASS either). Otherwise an askpass inherited from the environment (e.g. the app started from a VS Code
+ *   terminal, which exports GIT_ASKPASS) shows a password dialog and the command waits for it until the timeout;
  * - GIT_EDITOR / GIT_SEQUENCE_EDITOR = true and GIT_MERGE_AUTOEDIT=no (no editor is opened);
  * - on POSIX the process runs in its own session (no controlling terminal, so ssh cannot prompt either) and the whole
  *   process group is killed on timeout / cancel.
@@ -23,6 +26,7 @@ export const GIT_EXEC_DEFAULT_MAX_OUTPUT_BYTES = PROCESS_EXEC_DEFAULT_MAX_OUTPUT
 /** Environment that keeps git non-interactive. */
 export const GIT_NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	GIT_TERMINAL_PROMPT: '0',
+	GIT_ASKPASS: '',
 	GCM_INTERACTIVE: 'never',
 	SSH_ASKPASS_REQUIRE: 'never',
 	GIT_EDITOR: 'true',
